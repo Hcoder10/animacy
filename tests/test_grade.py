@@ -17,7 +17,7 @@ from animacy.grade.reel import (chunk_reels, number_and_shuffle, plan_reels, sea
                                 speech_envelope)
 from animacy.grade.render import resample_table, urdf_frames
 from animacy.grade.run import CALIBRATION_MIN, GATE_THRESHOLD, calibration, check_workspace, consistency, gate, \
-    contamination_gap, intent_resolution, judge_workspace_root, prepare_workspace, redact_lines, resolve_gate_source, summarise, unseal
+    acquire_run_lock, contamination_gap, intent_resolution, judge_workspace_root, pid_alive, release_run_lock, prepare_workspace, redact_lines, resolve_gate_source, summarise, unseal
 from animacy.profile import find_robot
 
 REQUIRED_FORBIDDEN = {"animacy", "model", "retrieval", "generated", "vendor"}
@@ -449,3 +449,28 @@ def test_intent_resolution_counts_without_storing_text():
     ir = intent_resolution(MOVEMENTS, [])
     assert ir["available"] and ir["tuning"]["n"] == len(MOVEMENTS) and "heldout" not in ir
     assert all(m.text not in json.dumps(ir) for m in MOVEMENTS)
+
+
+def test_run_lock_refuses_a_second_live_writer_and_replaces_a_stale_one(tmp_path):
+    d = str(tmp_path / "run")
+    assert pid_alive(os.getpid()) and not pid_alive(2 ** 22 + 12345)
+    path = acquire_run_lock(d)                       # our own pid: fine
+    assert open(path, encoding="utf-8").read().split()[0] == str(os.getpid())
+    acquire_run_lock(d)                              # re-entrant for the same pid
+    release_run_lock(d)
+    assert not os.path.exists(path)
+    (tmp_path / "run" / "RUNNING.pid").write_text(f"{2 ** 22 + 12345} stale", encoding="utf-8")
+    acquire_run_lock(d)                              # dead pid -> replaced
+    release_run_lock(d)
+    import subprocess, sys, time
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        (tmp_path / "run" / "RUNNING.pid").write_text(f"{other.pid} live", encoding="utf-8")
+        with pytest.raises(RuntimeError):
+            acquire_run_lock(d)
+    finally:
+        other.kill()
+        other.wait()
+    time.sleep(0.2)
+    acquire_run_lock(d)                              # now dead -> replaced
+    release_run_lock(d)

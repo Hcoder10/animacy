@@ -20,6 +20,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -31,7 +32,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from . import kimi, rubric
-from .movements import DEFAULT_CHECKPOINT, DETERMINISTIC_SOURCES, MOVEMENT_KEYS, VENDOR, build_clips
+from .movements import (DEFAULT_CHECKPOINT, DETERMINISTIC_SOURCES, HELDOUT_PATH, HELDOUT_SET, MOVEMENT_KEYS, MOVEMENTS,
+                        TUNING_SET, VENDOR, build_clips, load_heldout_movements)
 from .probe import run_probe
 from .reel import MAX_REEL_SECONDS, Reel, plan_reels, render_reels, write_sealed_manifest
 from .render import ROOT, ViewerRenderer, contact_sheet, joint_plot
@@ -42,6 +44,59 @@ CALIBRATION_MIN = 6.0
 GATE_RULE = "mean over seeds of the judge's overall score >= 8.0 on ALL five movements (best-of-seeds is never used)"
 EVIDENCE_DIR = os.path.join(ROOT, "docs", "evidence", "grading")
 PROVENANCE_FILES = ["robots/lamp/ROBOT.md", "robots/reachy_mini/ROBOT.md", "animacy/retarget.py", "web/models/model.json"]
+
+
+# ---------------------------------------------------------------- run lock
+LOCK_NAME = "RUNNING.pid"
+
+
+def pid_alive(pid: int) -> bool:
+    """Is a process with this id running? (Never signals it: on Windows os.kill(pid, 0) would terminate it.)"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == 259                        # STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def acquire_run_lock(run_dir: str) -> str:
+    """Refuse to start when another live grading process is writing to ``run_dir`` (two renderers in one run
+    dir race on parts/reels and would double every judge call; it happened). A stale lock (dead pid) is replaced."""
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, LOCK_NAME)
+    if os.path.exists(path):
+        try:
+            other = int(open(path, encoding="utf-8").read().split()[0])
+        except (OSError, ValueError, IndexError):
+            other = -1
+        if other != os.getpid() and pid_alive(other):
+            raise RuntimeError(f"another grading run (pid {other}) is writing to {run_dir}; refusing to start a second one")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(f"{os.getpid()} {dt.datetime.now().isoformat(timespec='seconds')}\n")
+    return path
+
+
+def release_run_lock(run_dir: str) -> None:
+    path = os.path.join(run_dir, LOCK_NAME)
+    try:
+        if os.path.exists(path) and open(path, encoding="utf-8").read().split()[0] == str(os.getpid()):
+            os.remove(path)
+    except (OSError, IndexError):
+        pass
 
 
 # ---------------------------------------------------------------- provenance
@@ -86,6 +141,32 @@ def provenance(checkpoint: str, run_dir: Optional[str] = None, robots: Sequence[
     return out
 
 
+def intent_resolution(movements: Sequence, heldout: Sequence) -> Dict:
+    """How many lines of each set the shipped intent rule tags correctly WITHOUT an override (what a user typing
+    text gets). Counts only: the held-out texts are never stored here."""
+    try:
+        from ..model.intent import LEXICON_VERSION, analyse
+    except ImportError:
+        return {"available": False}
+    out: Dict = {"available": True, "lexicon": LEXICON_VERSION}
+    for name, mvs in (("tuning", list(movements)), ("heldout", list(heldout))):
+        if not mvs:
+            continue
+        tags = [(m.key, analyse(m.text).tag) for m in mvs]
+        out[name] = {"correct": sum(1 for k, t in tags if k == t), "n": len(tags),
+                     "wrong": [{"intent": k, "tagged": t} for k, t in tags if k != t]}
+    return out
+
+
+def bundle_lexicon_version() -> Optional[str]:
+    """``intent.lexicon_version`` in the shipped web bundle (None if absent)."""
+    bundle = os.path.join(ROOT, "web", "models", "model.json")
+    try:
+        return (json.load(open(bundle, encoding="utf-8")).get("intent") or {}).get("lexicon_version")
+    except (OSError, ValueError):
+        return None
+
+
 def resolve_gate_source(requested: str = "auto", sources: Sequence[str] = ()) -> Dict:
     """Which source the gate judges. ``auto`` = the SHIPPED default: ``default_backend`` in
     ``web/models/model.json`` (what a user of the web demo gets); else the named source."""
@@ -112,20 +193,75 @@ def _mean(xs: Sequence[float]) -> Optional[float]:
     return statistics.fmean(xs) if xs else None
 
 
+def _set(r: Dict) -> str:
+    """A record's line set (runs before line sets existed are all tuning lines)."""
+    return r.get("line_set") or TUNING_SET
+
+
+def sealed_lines(records: Sequence[Dict]) -> List[str]:
+    """The held-out utterances present in a run's records (from their card lines), for redaction."""
+    out = set()
+    for r in records:
+        if _set(r) == HELDOUT_SET and r.get("card_line"):
+            m = re.match(r'^The robot says: "(.*)"$', r["card_line"])
+            out.add(m.group(1) if m else r["card_line"])
+    return sorted(out)
+
+
+def redact_lines(text: str, lines: Sequence[str], n: int = 3) -> str:
+    """Remove sealed utterances from free text: exact matches and any run of ``n`` consecutive words that the
+    text shares with a sealed line become ``[...]``. Used on everything the judge wrote before it is reported."""
+    if not text or not lines:
+        return text or ""
+    out = str(text)
+    for line in lines:
+        out = re.sub(re.escape(line), "[...]", out, flags=re.I)
+    grams = set()
+    for line in lines:
+        w = [x.strip("'") for x in re.findall(r"[a-z']+", line.lower())]
+        grams.update(" ".join(w[i:i + n]) for i in range(len(w) - n + 1))
+    if not grams:
+        return out
+    tokens = [(m.group(0), m.start(), m.end()) for m in re.finditer(r"[A-Za-z']+", out)]
+    norm = [t[0].lower().strip("'") for t in tokens]      # the judge quotes lines: 'look who' -> look who
+    hit = [False] * len(tokens)
+    for i in range(len(tokens) - n + 1):
+        if " ".join(norm[i:i + n]) in grams:
+            for k in range(i, i + n):
+                hit[k] = True
+    if not any(hit):
+        return out
+    pieces, pos, i = [], 0, 0
+    while i < len(tokens):
+        if hit[i]:
+            j = i
+            while j < len(tokens) and hit[j]:
+                j += 1
+            pieces.append(out[pos:tokens[i][1]])
+            pieces.append("[...]")
+            pos = tokens[j - 1][2]
+            i = j
+        else:
+            i += 1
+    pieces.append(out[pos:])
+    return "".join(pieces)
+
+
 def gate(records: Sequence[Dict], robot: str, movements: Sequence[str] = MOVEMENT_KEYS, source: str = GATE_SOURCE,
-         threshold: float = GATE_THRESHOLD) -> Dict:
+         threshold: float = GATE_THRESHOLD, line_set: str = TUNING_SET) -> Dict:
     """The pass rule. ``records`` are unsealed per-clip results (see :func:`unseal`).
 
-    A movement passes only if it has at least one scored clip and the MEAN of its ``overall`` scores
-    over seeds is >= ``threshold``; the robot passes only if every movement passes."""
+    A movement passes only if it has at least one scored clip (of ``source``, on the ``line_set`` lines) and the
+    MEAN of its ``overall`` scores over seeds is >= ``threshold``; the robot passes only if every movement passes."""
     per: Dict[str, Dict] = {}
     for mv in movements:
         vals = [r["overall"] for r in records
-                if r["robot"] == robot and r["source"] == source and r["movement"] == mv and r.get("overall") is not None]
+                if r["robot"] == robot and r["source"] == source and r["movement"] == mv and _set(r) == line_set
+                and r.get("overall") is not None]
         m = _mean(vals)
         per[mv] = {"n": len(vals), "seeds": vals, "mean": m, "best": max(vals) if vals else None,
                    "pass": bool(vals) and m is not None and m >= threshold}
-    return {"robot": robot, "source": source, "threshold": threshold, "rule": GATE_RULE,
+    return {"robot": robot, "source": source, "line_set": line_set, "threshold": threshold, "rule": GATE_RULE,
             "per_movement": per, "pass": all(per[mv]["pass"] for mv in movements),
             "best_of_seeds_would_pass": all(per[mv]["best"] is not None and per[mv]["best"] >= threshold for mv in movements)}
 
@@ -255,25 +391,60 @@ def unseal(judgements: Sequence[Dict], manifest: Dict) -> List[Dict]:
     return records
 
 
+def _score_table(records: Sequence[Dict], robot: str, sources: Sequence[str], line_set: str) -> Dict:
+    """movement -> source -> {mean, seeds, dims} for one line set (vendor clips belong to every set)."""
+    table: Dict[str, Dict[str, Dict]] = {}
+    for mv in MOVEMENT_KEYS:
+        table[mv] = {}
+        for src in list(sources) + [VENDOR]:
+            mine = [r for r in records if r["robot"] == robot and r["source"] == src and r["movement"] == mv
+                    and (src == VENDOR or _set(r) == line_set)]
+            vals = [r["overall"] for r in mine if r.get("overall") is not None]
+            dims = {d: _mean([r["scores"].get(d) for r in mine if r["scores"].get(d) is not None]) for d in rubric.DIMENSIONS}
+            table[mv][src] = {"mean": _mean(vals), "seeds": vals, "dims": dims}
+    return table
+
+
+def contamination_gap(tables: Dict[str, Dict], source: str) -> Optional[float]:
+    """Mean over movements of (tuning - heldout) overall for ``source``; None unless both sets are present."""
+    if TUNING_SET not in tables or HELDOUT_SET not in tables:
+        return None
+    gaps = []
+    for mv in MOVEMENT_KEYS:
+        a = tables[TUNING_SET][mv].get(source, {}).get("mean")
+        b = tables[HELDOUT_SET][mv].get(source, {}).get("mean")
+        if a is not None and b is not None:
+            gaps.append(a - b)
+    return _mean(gaps)
+
+
 def summarise(records: Sequence[Dict], robots: Sequence[str], sources: Sequence[str],
-              gate_source: str = GATE_SOURCE) -> Dict:
-    """Per robot x source x movement: mean/per-seed overall + the gate (on ``gate_source``), the same rule
-    applied to every other source for information, calibration and consistency."""
-    out: Dict = {"robots": {}, "gate_source": gate_source}
+              gate_source: str = GATE_SOURCE, gate_lines: str = TUNING_SET) -> Dict:
+    """Per robot: score tables per line set, the gate (``gate_source`` on the ``gate_lines`` set), the same rule on
+    every other source and on the other set for information, the contamination gap, calibration, consistency."""
+    sets = [s for s in (TUNING_SET, HELDOUT_SET) if any(_set(r) == s and r["source"] != VENDOR for r in records)] or [TUNING_SET]
+    if gate_lines not in sets:
+        raise ValueError(f"gate lines {gate_lines!r} have no scored clips (sets present: {sets})")
+    out: Dict = {"robots": {}, "gate_source": gate_source, "gate_lines": gate_lines, "line_sets": sets}
     for robot in robots:
-        table: Dict[str, Dict[str, Dict]] = {}
-        for mv in MOVEMENT_KEYS:
-            table[mv] = {}
-            for src in list(sources) + [VENDOR]:
-                vals = [r["overall"] for r in records if r["robot"] == robot and r["source"] == src and r["movement"] == mv
-                        and r.get("overall") is not None]
-                dims = {d: _mean([r["scores"].get(d) for r in records if r["robot"] == robot and r["source"] == src
-                                  and r["movement"] == mv and r["scores"].get(d) is not None]) for d in rubric.DIMENSIONS}
-                table[mv][src] = {"mean": _mean(vals), "seeds": vals, "dims": dims}
-        out["robots"][robot] = {"table": table, "gate": gate(records, robot, source=gate_source),
-                                "gate_by_source": {src: gate(records, robot, source=src) for src in sources},
-                                "calibration": calibration(records, robot), "consistency": consistency(records, robot)}
+        tables = {s: _score_table(records, robot, sources, s) for s in sets}
+        out["robots"][robot] = {
+            "tables": tables,
+            "table": tables.get(TUNING_SET, tables[gate_lines]),        # run-1 compatible view
+            "gate": gate(records, robot, source=gate_source, line_set=gate_lines),
+            "gate_by_source": {src: gate(records, robot, source=src, line_set=gate_lines) for src in sources},
+            "gate_by_set": {s: gate(records, robot, source=gate_source, line_set=s) for s in sets},
+            "contamination_gap": contamination_gap(tables, gate_source),
+            "calibration": calibration(records, robot), "consistency": consistency(records, robot)}
     return out
+
+
+def _tables_of(s: Dict) -> Dict[str, Dict]:
+    return s.get("tables") or {TUNING_SET: s["table"]}
+
+
+SET_LABEL = {TUNING_SET: "tuning lines (the five in movements.py, known to every agent)",
+             HELDOUT_SET: "held-out lines (sealed, authored by the grader, never printed)"}
 
 
 def _fmt(x: Optional[float]) -> str:
@@ -286,16 +457,21 @@ def compare_runs(base: Dict, new: Dict) -> Dict:
     for robot in new["summary"]["robots"]:
         if robot not in base["summary"]["robots"]:
             continue
-        bt, nt = base["summary"]["robots"][robot]["table"], new["summary"]["robots"][robot]["table"]
-        cells: Dict[str, Dict[str, Dict]] = {}
-        for mv in MOVEMENT_KEYS:
-            cells[mv] = {}
-            for src in set(bt.get(mv, {})) | set(nt.get(mv, {})):
-                b = (bt.get(mv, {}).get(src) or {}).get("mean")
-                n = (nt.get(mv, {}).get(src) or {}).get("mean")
-                cells[mv][src] = {"baseline": b, "new": n, "delta": (n - b) if (b is not None and n is not None) else None}
+        btabs, ntabs = _tables_of(base["summary"]["robots"][robot]), _tables_of(new["summary"]["robots"][robot])
+        tables: Dict[str, Dict] = {}
+        for s in [x for x in (TUNING_SET, HELDOUT_SET) if x in btabs and x in ntabs]:
+            bt, nt = btabs[s], ntabs[s]
+            cells: Dict[str, Dict[str, Dict]] = {}
+            for mv in MOVEMENT_KEYS:
+                cells[mv] = {}
+                for src in set(bt.get(mv, {})) | set(nt.get(mv, {})):
+                    b = (bt.get(mv, {}).get(src) or {}).get("mean")
+                    n = (nt.get(mv, {}).get(src) or {}).get("mean")
+                    cells[mv][src] = {"baseline": b, "new": n, "delta": (n - b) if (b is not None and n is not None) else None}
+            tables[s] = cells
         out["robots"][robot] = {
-            "table": cells,
+            "tables": tables,
+            "table": tables.get(TUNING_SET) or next(iter(tables.values()), {}),
             "gate": {"baseline": base["gate"][robot]["pass"], "new": new["gate"][robot]["pass"]},
             "calibration": {"baseline": base["calibration"][robot]["mean"], "new": new["calibration"][robot]["mean"]},
             "model_min": {"baseline": min([v["mean"] for v in base["gate"][robot]["per_movement"].values() if v["mean"] is not None], default=None),
@@ -308,20 +484,22 @@ def _comparison_markdown(cmp: Dict, sources: Sequence[str]) -> List[str]:
     L = [f"## Compared with baseline `{cmp['baseline']}`\n",
          "Overall score, mean over seeds: baseline -> this run (delta). Same movements, rubric, blind protocol and judge.\n"]
     for robot, c in cmp["robots"].items():
-        srcs = [s for s in list(sources) + [VENDOR] if any(s in c["table"][mv] for mv in MOVEMENT_KEYS)]
-        L.append(f"### {robot}\n")
-        L.append("| movement | " + " | ".join(srcs) + " |")
-        L.append("|---|" + "---|" * len(srcs))
-        for mv in MOVEMENT_KEYS:
-            row = []
-            for src in srcs:
-                x = c["table"][mv].get(src)
-                if not x or (x["baseline"] is None and x["new"] is None):
-                    row.append("-")
-                else:
-                    d = "" if x["delta"] is None else f" ({x['delta']:+.1f})"
-                    row.append(f"{_fmt(x['baseline'])} -> {_fmt(x['new'])}{d}")
-            L.append(f"| {mv} | " + " | ".join(row) + " |")
+        for s, table in (c.get("tables") or {TUNING_SET: c["table"]}).items():
+            srcs = [x for x in list(sources) + [VENDOR] if any(x in table[mv] for mv in MOVEMENT_KEYS)]
+            L.append(f"### {robot}: {SET_LABEL.get(s, s)}\n")
+            L.append("| movement | " + " | ".join(srcs) + " |")
+            L.append("|---|" + "---|" * len(srcs))
+            for mv in MOVEMENT_KEYS:
+                row = []
+                for src in srcs:
+                    x = table[mv].get(src)
+                    if not x or (x["baseline"] is None and x["new"] is None):
+                        row.append("-")
+                    else:
+                        d = "" if x["delta"] is None else f" ({x['delta']:+.1f})"
+                        row.append(f"{_fmt(x['baseline'])} -> {_fmt(x['new'])}{d}")
+                L.append(f"| {mv} | " + " | ".join(row) + " |")
+            L.append("")
         g, cal, mm = c["gate"], c["calibration"], c["model_min"]
         L.append("")
         L.append(f"Gate: baseline **{'PASS' if g['baseline'] else 'FAIL'}** (min model movement {_fmt(mm['baseline'])}) -> "
@@ -356,6 +534,12 @@ def markdown_report(run_name: str, meta: Dict, summary: Dict, records: Sequence[
              f"{meta['kimi_calls']} call(s). Checkpoint: `{meta['checkpoint']}`. Seed {meta['seed']}"
              + (f"; seeds per source {meta['seeds_by_source']}" if meta.get("seeds_by_source") else "") + ".\n")
     L.extend(_provenance_markdown(meta.get("provenance")))
+    ir = meta.get("intent_resolution") or {}
+    if ir.get("available") and ("tuning" in ir or "heldout" in ir):
+        parts = [f"{k} {v['correct']}/{v['n']}" + (f" (wrong: {', '.join(w['intent'] + '->' + w['tagged'] for w in v['wrong'])})" if v['wrong'] else "")
+                 for k, v in ir.items() if isinstance(v, dict)]
+        L.append(f"Intent rule (`{ir.get('lexicon')}`) tagging the lines correctly WITHOUT an override, i.e. what a user typing "
+                 f"text gets: {'; '.join(parts)}. The graded clips use the explicit tag, as `animacy say --intent` does.\n")
     L.append("## What the judge could see\n")
     pa = probe.get("answer") or {}
     if probe.get("video_seen"):
@@ -368,10 +552,14 @@ def markdown_report(run_name: str, meta: Dict, summary: Dict, records: Sequence[
              "**The judge grades from video only.** The `timing` dimension therefore measures rhythm plausibility "
              "against the transcript card and the burned-in loudness strip, not audio sync; the pass rule uses "
              "`overall` only.\n")
+    sealed = sealed_lines(records)
+    red = lambda t: redact_lines(str(t or ""), sealed)  # noqa: E731
     L.append("## Gate\n")
     gs = summary.get("gate_source", GATE_SOURCE)
+    gl = summary.get("gate_lines", TUNING_SET)
     gsi = meta.get("gate_source_info") or {}
-    L.append(f"Rule: {GATE_RULE}. **Source under test: `{gs}`** ({gsi.get('why', 'the source named when the run was made')}).\n")
+    L.append(f"Rule: {GATE_RULE}. **Source under test: `{gs}`** ({gsi.get('why', 'the source named when the run was made')}). "
+             f"**Lines under test: {SET_LABEL.get(gl, gl)}.**\n")
     cal_line = "; ".join(f"{robot} {_fmt(s['calibration']['mean'])} over {s['calibration']['n']} clips"
                          for robot, s in summary["robots"].items())
     L.append(f"**The vendor's own hand-authored clips score {cal_line} on this rubric.** That is what a shipped, "
@@ -396,20 +584,34 @@ def markdown_report(run_name: str, meta: Dict, summary: Dict, records: Sequence[
                 L.append(f"| {robot} | {src}{' (under test)' if src == gs else ''} | " + " | ".join(_fmt(m) for m in means2)
                          + f" | {_fmt(mn2)} | {'PASS' if g2['pass'] else 'FAIL'} |")
         L.append("")
+    if any(len(s.get("gate_by_set") or {}) > 1 for s in summary["robots"].values()):
+        L.append(f"The same rule on the other line set, source `{gs}` (contamination check; only the lines under test decide):\n")
+        L.append("| robot | lines | " + " | ".join(MOVEMENT_KEYS) + " | min | would | tuning - heldout |")
+        L.append("|---|---|" + "---|" * (len(MOVEMENT_KEYS) + 3))
+        for robot, s in summary["robots"].items():
+            for sname, g3 in (s.get("gate_by_set") or {}).items():
+                means3 = [g3["per_movement"][mv]["mean"] for mv in MOVEMENT_KEYS]
+                mn3 = min([m for m in means3 if m is not None], default=None)
+                gap = s.get("contamination_gap")
+                L.append(f"| {robot} | {sname}{' (under test)' if sname == gl else ''} | " + " | ".join(_fmt(m) for m in means3)
+                         + f" | {_fmt(mn3)} | {'PASS' if g3['pass'] else 'FAIL'} | {('%+.1f' % gap) if gap is not None else '-'} |")
+        L.append("")
+        L.append("A large positive tuning - heldout gap means the motion was tuned to the known lines rather than to the intents.\n")
     L.append("## Overall score by robot x source x movement (mean over seeds; per-seed in brackets)\n")
     for robot, s in summary["robots"].items():
         srcs = list(meta["sources"]) + [VENDOR]
-        L.append(f"### {robot}\n")
-        L.append("| movement | " + " | ".join(srcs) + " |")
-        L.append("|---|" + "---|" * len(srcs))
-        for mv in MOVEMENT_KEYS:
-            cells = []
-            for src in srcs:
-                cell = s["table"][mv][src]
-                cells.append(f"{_fmt(cell['mean'])} [{', '.join(_fmt(v) for v in cell['seeds'])}]" if cell["seeds"] else "-")
-            L.append(f"| {mv} | " + " | ".join(cells) + " |")
+        for sname, table in _tables_of(s).items():
+            L.append(f"### {robot}: {SET_LABEL.get(sname, sname)}\n")
+            L.append("| movement | " + " | ".join(srcs) + " |")
+            L.append("|---|" + "---|" * len(srcs))
+            for mv in MOVEMENT_KEYS:
+                cells = []
+                for src in srcs:
+                    cell = table[mv][src]
+                    cells.append(f"{_fmt(cell['mean'])} [{', '.join(_fmt(v) for v in cell['seeds'])}]" if cell["seeds"] else "-")
+                L.append(f"| {mv} | " + " | ".join(cells) + " |")
+            L.append("")
         cal = s["calibration"]
-        L.append("")
         L.append(f"Calibration (vendor clips): mean overall **{_fmt(cal['mean'])}** over {cal['n']} clips "
                  f"(minimum {cal['minimum']}): {'OK' if cal['ok'] else 'BROKEN - ' + str(cal['note'])}.")
         con = s["consistency"]
@@ -433,7 +635,7 @@ def markdown_report(run_name: str, meta: Dict, summary: Dict, records: Sequence[
     for r in sorted(records, key=lambda r: (r["robot"], r["number"])):
         sc = r["scores"]
         L.append(f"| {r['robot']} | {r['number']} | `{r['id']}` | {_fmt(r.get('overall'))} | " +
-                 " | ".join(_fmt(sc.get(d)) for d in rubric.DIMENSIONS) + f" | {r['description'].replace('|', '/')} |")
+                 " | ".join(_fmt(sc.get(d)) for d in rubric.DIMENSIONS) + f" | {red(r['description']).replace('|', '/')} |")
     L.append("")
     L.append("## Judge calls and the judge's own notes (verbatim)\n")
     for j in judgements:
@@ -444,7 +646,7 @@ def markdown_report(run_name: str, meta: Dict, summary: Dict, records: Sequence[
         L.append(f"- `{j['reel']}` clips {j['numbers'][0]}..{j['numbers'][-1]}: {'valid' if j.get('valid') else 'INVALID'} after "
                  f"{len(att)} attempt(s), {secs:.0f} s. Workspace held before the call: {j.get('workspace_listing_before')}"
                  + (f"; the judge left {len(own)} file(s) of its own analysis (frames, sheets, motion tables)." if own else "."))
-        notes = str((j.get("answer") or {}).get("notes") or "").strip()
+        notes = red(str((j.get("answer") or {}).get("notes") or "").strip())
         if notes:
             for line in notes.splitlines():
                 L.append(f"  > {line}")
@@ -474,21 +676,48 @@ def run(robots: Sequence[str], sources: Sequence[str], seeds: int, out_dir: str,
         gpu: bool = True, speech_strip: bool = True, no_kimi: bool = False, force_probe: bool = False,
         tts_engine: str = "auto", evidence_dir: str = EVIDENCE_DIR, zoom: float = 0.9, speed: float = 1.0,
         seeds_deterministic: Optional[int] = None, label: str = "", compare: Optional[str] = None,
-        gate_source: str = "auto", log=print) -> Dict:
+        gate_source: str = "auto", gate_lines: str = "auto", heldout_path: str = HELDOUT_PATH,
+        require_lexicon: Optional[str] = None, log=print) -> Dict:
     t_start = time.perf_counter()
     run_dir = os.path.abspath(out_dir)
     os.makedirs(run_dir, exist_ok=True)
+    acquire_run_lock(run_dir)
+    try:
+        return _run_locked(robots, sources, seeds, run_dir, t_start, checkpoint, seed, max_reel_seconds, kimi_timeout,
+                           parallel, gpu, speech_strip, no_kimi, force_probe, tts_engine, evidence_dir, zoom, speed,
+                           seeds_deterministic, label, compare, gate_source, gate_lines, heldout_path, require_lexicon, log)
+    finally:
+        release_run_lock(run_dir)
+
+
+def _run_locked(robots, sources, seeds, run_dir, t_start, checkpoint, seed, max_reel_seconds, kimi_timeout, parallel, gpu,
+                speech_strip, no_kimi, force_probe, tts_engine, evidence_dir, zoom, speed, seeds_deterministic, label,
+                compare, gate_source, gate_lines, heldout_path, require_lexicon, log) -> Dict:
     run_name = os.path.basename(run_dir.rstrip("/\\"))
     workspace_root = judge_workspace_root(run_name)
     command = "python scripts/grade_run.py " + " ".join(sys.argv[1:]) if sys.argv and "grade_run" in sys.argv[0] else "animacy.grade.run.run(...)"
     seeds_by_source = {s: seeds_deterministic for s in sources if s in DETERMINISTIC_SOURCES} if seeds_deterministic else {}
     gsi = resolve_gate_source(gate_source, sources)
+    lexicon = bundle_lexicon_version()
+    if require_lexicon and lexicon != require_lexicon:
+        raise RuntimeError(f"web/models/model.json intent.lexicon_version is {lexicon!r}, required {require_lexicon!r}; not starting")
+    heldout = load_heldout_movements(heldout_path)
+    if gate_lines == "auto":
+        gate_lines = HELDOUT_SET if heldout else TUNING_SET
+    if gate_lines == HELDOUT_SET and not heldout:
+        raise RuntimeError(f"gate lines are {HELDOUT_SET!r} but no sealed held-out file at {heldout_path}")
+    if gate_lines == TUNING_SET:
+        heldout = []                                   # tuning-only run: do not spend reels on the sealed set
     meta = {"generated": dt.datetime.now().isoformat(timespec="seconds"), "command": command, "robots": list(robots),
             "sources": list(sources), "seeds": seeds, "seeds_by_source": seeds_by_source, "checkpoint": checkpoint,
             "seed": seed, "judge_model": kimi.DEFAULT_MODEL, "workspace_root": str(workspace_root),
             "speech_strip": speech_strip, "gpu": gpu, "speed": speed, "label": label, "compare": compare, "kimi_calls": 0,
-            "gate_source": gsi["source"], "gate_source_info": gsi, "provenance": provenance(checkpoint, run_dir, robots)}
-    log(f"[run] gate source: {gsi['source']} ({gsi['why']})")
+            "gate_source": gsi["source"], "gate_source_info": gsi, "gate_lines": gate_lines,
+            "heldout_file": heldout_path if heldout else None, "n_heldout_lines": len(heldout),
+            "lexicon_version": lexicon, "intent_resolution": intent_resolution(MOVEMENTS, heldout),
+            "provenance": provenance(checkpoint, run_dir, robots)}
+    log(f"[run] gate source: {gsi['source']} ({gsi['why']}); gate lines: {gate_lines} "
+        f"({len(heldout)} sealed held-out lines); bundle lexicon {lexicon}")
     log(f"[run] provenance: git {meta['provenance']['git_head_short']}, "
         f"{len(meta['provenance']['git_dirty'])} dirty file(s), checkpoint {checkpoint}")
     if speed != 1.0:
@@ -508,7 +737,8 @@ def run(robots: Sequence[str], sources: Sequence[str], seeds: int, out_dir: str,
 
         # 2. clips
         clips = build_clips(robots, sources, seeds, run_dir, checkpoint=checkpoint, tts_engine=tts_engine,
-                            seeds_by_source=seeds_by_source, log=log)
+                            seeds_by_source=seeds_by_source, heldout=heldout,
+                            log=lambda m: log(m if "@heldout" not in m else m.split(":")[0] + ": (sealed line)"))
 
         # 3. blind plan + reels
         plans = plan_reels(clips, seed, max_reel_seconds)
@@ -530,7 +760,7 @@ def run(robots: Sequence[str], sources: Sequence[str], seeds: int, out_dir: str,
 
     # 5. unseal + reports
     records = unseal(judgements, manifest)
-    summary = summarise(records, robots, sources, gate_source=gsi["source"])
+    summary = summarise(records, robots, sources, gate_source=gsi["source"], gate_lines=gate_lines)
     meta["total_seconds"] = round(time.perf_counter() - t_start, 1)
     results = {"schema": "animacy.grading.results.v1", "run": run_name, "meta": meta, "probe": probe,
                "gate": {r: summary["robots"][r]["gate"] for r in robots},
@@ -675,6 +905,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--compare", default=None, metavar="RUN_DIR", help="baseline run to compare with, side by side")
     ap.add_argument("--gate-source", default="auto",
                     help="source the gate judges: auto = the shipped default_backend in web/models/model.json; or a name")
+    ap.add_argument("--gate-lines", default="auto", choices=["auto", HELDOUT_SET, TUNING_SET],
+                    help="which utterances decide: auto = the sealed held-out lines when data/grading/heldout_lines.json exists")
+    ap.add_argument("--heldout", default=HELDOUT_PATH, help="sealed held-out lines file")
+    ap.add_argument("--require-lexicon", default=None, metavar="VERSION",
+                    help="refuse to start unless web/models/model.json intent.lexicon_version equals VERSION (e.g. intent.v2)")
     ap.add_argument("--slow-variant", action="store_true",
                     help="after the run, render + judge the same clips at 0.5x as a SEPARATE sub-run (<out>_slow); never gated")
     ap.add_argument("--out", default=None, help="run directory (default data/grading/<timestamp>)")
@@ -706,7 +941,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     common = dict(checkpoint=a.checkpoint, seed=a.seed, max_reel_seconds=a.max_reel_seconds, kimi_timeout=a.kimi_timeout,
                   parallel=a.parallel, gpu=not a.software, speech_strip=not a.no_speech_strip, no_kimi=a.no_kimi,
                   force_probe=a.force_probe, tts_engine=a.tts, zoom=a.zoom,
-                  seeds_deterministic=(a.seeds_deterministic or None), gate_source=a.gate_source)
+                  seeds_deterministic=(a.seeds_deterministic or None), gate_source=a.gate_source,
+                  gate_lines=a.gate_lines, heldout_path=a.heldout, require_lexicon=a.require_lexicon)
     results = run(a.robots, a.sources, a.seeds, out, speed=a.speed, label=a.label, compare=a.compare, **common)
     verdict = 0 if all(results["gate"][r]["pass"] for r in a.robots) else 1
     if a.slow_variant and not a.no_kimi:

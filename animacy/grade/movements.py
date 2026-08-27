@@ -16,6 +16,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -29,6 +30,9 @@ from ..serve import SOURCES
 from .render import ROOT
 
 VENDOR = "vendor"
+TUNING_SET = "tuning"      # the five lines in this file: known to every agent, so a model can be tuned to them
+HELDOUT_SET = "heldout"    # five sealed lines authored by the grader: the gate from run 2 on
+HELDOUT_PATH = os.path.join(ROOT, "data", "grading", "heldout_lines.json")
 DEFAULT_CHECKPOINT = os.path.join(ROOT, "checkpoints", "v1")
 VENDOR_MAX_SECONDS = 6.0     # long vendor clips (thinking_deep is 15 s) are trimmed so reels stay short
 
@@ -40,10 +44,16 @@ class Movement:
     expression: str                # what the silent calibration clip expresses (card text)
     vendor: Dict[str, str]         # robot -> native clip name
     intent: Optional[str] = None   # tag handed to a motion source that accepts ``intent`` (defaults to key)
+    line_set: str = TUNING_SET     # tuning (these lines) | heldout (sealed lines with the same intents)
 
     @property
     def intent_tag(self) -> str:
         return self.intent or self.key
+
+    @property
+    def label(self) -> str:
+        """Movement segment of a clip id: ``greeting`` for the tuning set, ``greeting@heldout`` otherwise."""
+        return self.key if self.line_set == TUNING_SET else f"{self.key}@{self.line_set}"
 
 
 MOVEMENTS: List[Movement] = [
@@ -70,6 +80,38 @@ def movement(key: str) -> Movement:
     raise KeyError(key)
 
 
+def _words(text: str) -> List[str]:
+    return [w.strip("'") for w in re.findall(r"[a-z']+", text.lower())]
+
+
+def shared_phrases(a: str, b: str, n: int = 3) -> List[str]:
+    """Word n-grams (default 3) that ``a`` and ``b`` share: the 'no phrase reused' check for held-out lines."""
+    wa, wb = _words(a), _words(b)
+    ga = {" ".join(wa[i:i + n]) for i in range(len(wa) - n + 1)}
+    gb = {" ".join(wb[i:i + n]) for i in range(len(wb) - n + 1)}
+    return sorted(ga & gb)
+
+
+def load_heldout_movements(path: str = HELDOUT_PATH, base: Sequence[Movement] = MOVEMENTS) -> List[Movement]:
+    """The sealed held-out lines (``{"lines": {intent: text}}``) as Movements with ``line_set = heldout``, one per
+    base movement (same intent, expression and vendor clip). Missing file -> empty list. The texts are never
+    logged or printed by this package."""
+    if not os.path.isfile(path):
+        return []
+    obj = json.load(open(path, encoding="utf-8"))
+    lines = obj.get("lines") or {}
+    out: List[Movement] = []
+    for mv in base:
+        text = lines.get(mv.key)
+        if not text or not str(text).strip():
+            raise ValueError(f"held-out file {path} has no line for intent {mv.key!r}")
+        for other in base:
+            if shared_phrases(text, other.text):
+                raise ValueError(f"held-out line for {mv.key!r} shares a 3-word phrase with the tuning line for {other.key!r}")
+        out.append(Movement(mv.key, str(text).strip(), mv.expression, mv.vendor, mv.intent, line_set=HELDOUT_SET))
+    return out
+
+
 @dataclass
 class ClipSpec:
     """One clip to be rendered and judged. ``table`` is in robot units on the robot's grid."""
@@ -85,6 +127,7 @@ class ClipSpec:
     sr: int = 16000
     vendor_clip: Optional[str] = None
     meta: Dict = field(default_factory=dict)
+    line_set: str = TUNING_SET
 
     @property
     def duration(self) -> float:
@@ -94,7 +137,7 @@ class ClipSpec:
         """Everything but the table/audio (what the sealed manifest records)."""
         return {"id": self.id, "robot": self.robot, "movement": self.movement, "source": self.source,
                 "seed": self.seed, "vendor_clip": self.vendor_clip, "card_line": self.card_line,
-                "duration": round(self.duration, 3), "meta": self.meta}
+                "line_set": self.line_set, "duration": round(self.duration, 3), "meta": self.meta}
 
 
 # ---------------------------------------------------------------- vendor clips
@@ -218,8 +261,9 @@ def candidate_table(profile: Profile, source: str, wav: np.ndarray, sr: int, see
 def candidate_clip(profile: Profile, mv: Movement, source: str, seed: int, wav: np.ndarray, sr: int,
                    checkpoint: str = DEFAULT_CHECKPOINT) -> ClipSpec:
     table, meta = candidate_table(profile, source, wav, sr, seed, checkpoint, intent=mv.intent_tag, text=mv.text)
-    return ClipSpec(id=f"{profile.name}/{mv.key}/{source}/s{seed}", robot=profile.name, movement=mv.key, source=source,
-                    seed=seed, card_line=f'The robot says: "{mv.text}"', table=table, audio=wav, sr=sr, meta=meta)
+    return ClipSpec(id=f"{profile.name}/{mv.label}/{source}/s{seed}", robot=profile.name, movement=mv.key, source=source,
+                    seed=seed, card_line=f'The robot says: "{mv.text}"', table=table, audio=wav, sr=sr, meta=meta,
+                    line_set=mv.line_set)
 
 
 DETERMINISTIC_SOURCES = ("retrieval", "envelope")   # retrieval ignores the seed; envelope's seed only shifts slow drift phases
@@ -228,7 +272,7 @@ DETERMINISTIC_SOURCES = ("retrieval", "envelope")   # retrieval ignores the seed
 def build_clips(robots: Sequence[str], sources: Sequence[str], seeds: int, run_dir: str,
                 checkpoint: str = DEFAULT_CHECKPOINT, movements: Sequence[Movement] = MOVEMENTS,
                 with_vendor: bool = True, tts_engine: str = "auto", seeds_by_source: Optional[Dict[str, int]] = None,
-                log=print) -> List[ClipSpec]:
+                heldout: Optional[Sequence[Movement]] = None, log=print) -> List[ClipSpec]:
     """Every clip for the run: candidates for each (robot, movement, source, seed) + one vendor clip per
     (robot, movement). ``seeds_by_source`` overrides the seed count per source (deterministic sources need one).
     Joint tables and utterance audio are saved under ``<run_dir>/clips`` for the record."""
@@ -240,17 +284,18 @@ def build_clips(robots: Sequence[str], sources: Sequence[str], seeds: int, run_d
     tts_dir = os.path.join(run_dir, "tts")
     clip_dir = os.path.join(run_dir, "clips")
     os.makedirs(clip_dir, exist_ok=True)
-    wavs = {mv.key: synth_cached(mv.text, tts_dir, tts_engine) for mv in movements}
+    all_movements = list(movements) + list(heldout or [])
+    wavs = {(mv.line_set, mv.key): synth_cached(mv.text, tts_dir, tts_engine) for mv in all_movements}
     for rname in robots:
         profile = find_robot(rname)
-        for mv in movements:
-            wav, sr = wavs[mv.key]
+        for mv in all_movements:
+            wav, sr = wavs[(mv.line_set, mv.key)]
             for source in sources:
                 for seed in range(seeds_by_source.get(source, seeds)):
                     c = candidate_clip(profile, mv, source, seed, wav, sr, checkpoint)
                     clips.append(c)
                     log(f"[clips] {c.id}: {len(c.table)} frames, {c.duration:.2f}s")
-            if with_vendor:
+            if with_vendor and mv.line_set == TUNING_SET:      # one calibration clip per intent, shared by both sets
                 c = vendor_clip(profile, mv)
                 clips.append(c)
                 log(f"[clips] {c.id}: {len(c.table)} frames, {c.duration:.2f}s (vendor)")

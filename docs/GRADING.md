@@ -143,6 +143,25 @@ user of the web demo gets (run 1 was made when the definition was the
 source under test, and applies the same rule to every other graded source
 for information. `--gate-source model` pins it explicitly.
 
+**Lines under test (from run 2): the sealed held-out set.** The five
+utterances in `movements.py` are known to every agent (they even appeared in
+the intent lexicon), so from run 2 the gate is scored on five **held-out**
+lines with the same intents, authored by the grader and stored only in
+`data/grading/heldout_lines.json` (gitignored; never messaged to another
+agent; `load_heldout_movements` refuses a file that shares a 3-word phrase
+with a tuning line). Both sets are rendered and judged: the held-out set
+decides (`--gate-lines auto` picks it when the file exists), the original
+five are reported alongside as the **tuning set**, and the report prints
+`tuning - heldout` per robot for the source under test: a large positive gap
+means the motion was tuned to the known lines, not to the intents. Held-out
+clips carry ids like `lamp/greeting@heldout/model/s0`; the judge sees their
+text on the card, but the report redacts the sealed lines (exact matches and
+any shared 3-word run) from the judge's descriptions and notes. Vendor
+calibration clips are rendered once and shared by both sets.
+
+`--require-lexicon intent.v2` refuses to start until the shipped bundle's
+`intent.lexicon_version` says the tuning lines were stripped from the lexicon.
+
 Seeds: `--seeds N` for the stochastic source (`model`), `--seeds-deterministic
 M` (default 1) for `retrieval` and `envelope`, whose seed does not change the
 clip (retrieval ignores it; envelope's only shifts slow drift phases). Run 1
@@ -150,11 +169,18 @@ used 2 seeds everywhere and measured the judge's noise on the identical
 retrieval pairs (mean |gap| 0.4 on the lamp, 0.8 on the Reachy).
 
 Intent: each movement carries an intent tag (`Movement.intent_tag`, e.g.
-`greeting`); it is passed to a motion source as `intent=` only when that
-source's signature accepts it (`movements.accepts_intent`), so an
-intent-conditioned talk mode is exercised exactly as `animacy say --intent`
-would be, and sources without it are unchanged. `meta.intent_passed` in the
-clip record says whether it was used.
+`greeting`). For the `model` and `retrieval` sources the grader hands over
+exactly what `animacy say "<line>" --intent <tag>` hands over:
+`animacy.model.intent.analyse(line, override=tag)` (the tag's base arousal
+plus the line's punctuation), and only when the source's signature accepts
+`intent` (`movements.accepts_intent`); the envelope heuristic and older
+signatures are untouched. The clip record's `meta.intent_passed` says
+whether it was used and `meta.intent` records the arousal/amplitude that
+resulted. Note for readers of run-2 numbers: the intent lexicon in
+`animacy/model/intent.py` was written with the grader's five lines in it
+verbatim, so the tag is guaranteed to resolve for these utterances; whether
+it generalises to other lines is a separate question this gate does not
+answer.
 
 ## What the judge can and cannot see (measured)
 
