@@ -34,15 +34,26 @@ robots/<name>/
    - affect (`brow_l/r`, `mouth_open`) → the body's most legible expressive channel.
    - `speaking` is not mapped; it is a training-time role flag.
    Seed gains so a typical human move lands inside the vendor's envelope.
-5. **Run `animacy check robots/<name>`** until it passes.
-6. **Preview.** `animacy profile export robots/<name>` then open `web/` and
-   play a captured clip. Fix directions with `gain: -1`. Play the vendor's
-   native clips (if any) first — if *those* look wrong, the URDF axes are wrong,
-   not the mapping.
-7. **Write the prose**: which signs are verified (sim vs hardware), what `rest`
+5. **Run `animacy check robots/<name>`** until it passes (it also refuses a
+   profile range wider than the URDF's limits — that means a wrong sign/offset).
+6. **Find your signs headlessly.** `animacy preview robots/<name>` renders PNGs
+   of the rest pose and of each canonical calibration pose (look left, look up,
+   roll, brows, lean in, puppet wave) *through your mapping*, and prints what
+   +10 units on each joint does to the head/tip position. Read the PNGs (a
+   coding agent can) before touching the browser. Until that command lands,
+   `robots/so101/dev/render_previews.py` is the worked example.
+7. **Preview in the browser.** `animacy profile export robots/<name>` then open
+   `web/` and play a captured clip. Fix directions with `gain: -1`. Play the
+   vendor's native clips (if any) first — if *those* look wrong, the URDF axes
+   are wrong, not the mapping.
+8. **Write the prose**: which signs are verified (sim vs hardware), what `rest`
    looks like, how frames reach the real robot, and the verification commands.
-8. Add a row to the README table and open a PR. CI runs `animacy check` on
-   every robot.
+9. Add a row to the README robots table and open a PR. CI runs `animacy check`
+   on every robot.
+
+Worked example with timings: `robots/so101/ADDING_LOG.md` — the SO-101 arm was
+added by a coding agent following this page in 26 minutes; its gap list drove
+rules 7–10 of the spec.
 
 ## Rules of thumb
 

@@ -98,6 +98,26 @@ native_clips:                    # the vendor's own hand-authored moves, if any
    names; the URDF exists and contains every `urdf_joint`; rest within limits;
    every mapping channel exists; `default` mapping present; each joint mapped at
    most once per mode; speeds positive.
+7. **`max_speed` when the vendor publishes no safety file** (LeRobot arms, most
+   research robots): use the *lowest* of (a) the servo datasheet's no-load speed
+   × 0.5, (b) the fastest move in the vendor's own recordings/datasets, (c)
+   180 deg/s (100 mm/s) — and say which in the prose. Conservative beats fast:
+   time is stretched, never clipped, so nothing is lost.
+8. **`rest` when the vendor has no idle/emotion library**: a natural *attentive*
+   pose facing +x (the "listening" pose), not a storage/folded pose. State it in
+   the prose with the joint values.
+9. **Units promise.** `export.formats: [lerobot]` profiles promise degrees /
+   millimetres in the LeRobot dataset (`use_degrees=True` semantics). Vendors
+   that drive servos in calibrated-span units (Autonomous OS `RANGE_M100_100`)
+   keep vendor units in the profile and say so in a `# UNITS CAVEAT` comment.
+10. **Profile limits must lie inside the URDF's limits.** `animacy check`
+    converts `min/max` through `urdf_sign`/`urdf_offset`/unit and refuses a
+    range wider than the URDF's `<limit>` (1e-3 tolerance) — a wider range means
+    the sign or offset is wrong, not the URDF.
+
+Valid `export.formats` today: `autonomous_os_csv`, `pollen_move`, `lerobot`,
+`csv`, `json`. Planned (not yet implemented): an `absolute: true` mapping flag so
+1:1 puppet chains need no `offset: -rest` per joint.
 
 ## Prose section (after the front matter)
 

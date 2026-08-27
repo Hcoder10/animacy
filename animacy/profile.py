@@ -7,6 +7,7 @@ prose is for people and coding agents. See ``docs/ROBOT_MD_SPEC.md``.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from typing import Dict, List, Optional
@@ -64,6 +65,27 @@ class MixTerm(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class Spring(BaseModel):
+    """Second-order tracker (docs/RETARGET.md §spring): replaces the one-pole
+    smoother for this joint. ``hz`` = natural frequency, ``zeta`` = damping
+    ratio (1 = critically damped, <1 overshoots)."""
+    hz: float = Field(..., gt=0)
+    zeta: float = Field(1.0, gt=0, le=2.0)
+
+
+class Idle(BaseModel):
+    """Liveliness layer (docs/RETARGET.md §idle): deterministic band-limited
+    sway of peak amplitude ``amp`` (joint units) around ``hz``, added while the
+    mapped target is near-still; ``still`` (units/s) is the target speed at
+    which it is fully suppressed (default ``10 * amp * hz``)."""
+    amp: float = Field(..., ge=0)
+    hz: float = Field(..., gt=0)
+    still: Optional[float] = Field(None, gt=0)
+
+    def still_speed(self) -> float:
+        return self.still if self.still is not None else 10.0 * self.amp * self.hz
+
+
 class Mapping(BaseModel):
     from_: Optional[str] = Field(None, alias="from")
     gain: float = 1.0
@@ -73,6 +95,10 @@ class Mapping(BaseModel):
     max: Optional[float] = None
     deadband: float = 0.0
     smooth_hz: Optional[float] = None
+    # v1.1 additive keys (docs/RETARGET.md); all optional, absent = v1 behaviour
+    spring: Optional[Spring] = None
+    idle: Optional[Idle] = None
+    soft_limit: Optional[float] = Field(None, ge=0.0, lt=0.5)
 
     model_config = {"populate_by_name": True}
 
@@ -191,15 +217,34 @@ class Profile(BaseModel):
                         errs.append(f"retarget.{mode}.{jn}: min {lo} >= max {hi}")
                     if m.min is not None and m.min < j.min or m.max is not None and m.max > j.max:
                         errs.append(f"retarget.{mode}.{jn}: mapping bounds exceed joint limits")
+                if m.spring is not None and m.spring.hz > self.rate_hz / 4.0:
+                    # semi-implicit Euler is stable for w*dt < 2 (~rate/3.1 Hz); keep a margin
+                    errs.append(f"retarget.{mode}.{jn}: spring.hz {m.spring.hz} > rate_hz/4 ({self.rate_hz / 4.0}) — unstable at this rate")
+                if m.idle is not None and j is not None and m.idle.amp > 0.25 * (j.max - j.min):
+                    errs.append(f"retarget.{mode}.{jn}: idle.amp {m.idle.amp} is more than a quarter of the joint range")
         urdf = self.urdf_path()
         if not os.path.exists(urdf):
             errs.append(f"description.urdf not found: {urdf}")
         else:
             text = open(urdf, encoding="utf-8", errors="replace").read()
             present = set(re.findall(r'<joint\s+[^>]*name="([^"]+)"', text))
+            limits = urdf_joint_limits(text)
             for j in self.joints:
                 if j.urdf_joint not in present:
                     errs.append(f"joint {j.name}: urdf_joint {j.urdf_joint!r} not in {os.path.basename(urdf)}")
+                    continue
+                lim = limits.get(j.urdf_joint)
+                if lim is None:
+                    continue
+                # profile range → URDF units, then it must lie inside the URDF's own limits (rule 10)
+                scale = {"deg": math.pi / 180.0, "mm": 1e-3}.get(j.unit, 1.0)
+                a = (j.min + j.urdf_offset) * j.urdf_sign * scale
+                b = (j.max + j.urdf_offset) * j.urdf_sign * scale
+                lo, hi = min(a, b), max(a, b)
+                tol = 1e-3
+                if lo < lim[0] - tol or hi > lim[1] + tol:
+                    errs.append(f"joint {j.name}: profile range [{j.min}, {j.max}] {j.unit} exceeds the URDF's "
+                                f"[{lim[0]:.4f}, {lim[1]:.4f}] on {j.urdf_joint} (rule 10; tighten min/max or fix urdf_sign/offset)")
         if self.native_clips is not None:
             d = os.path.join(self.dir, self.native_clips.dir)
             if not os.path.isdir(d):
@@ -227,6 +272,9 @@ class Profile(BaseModel):
                         "max": self.joint(jn).max if m.max is None else m.max,
                         "deadband": m.deadband,
                         "smooth_hz": m.smooth_hz,
+                        "spring": None if m.spring is None else {"hz": m.spring.hz, "zeta": m.spring.zeta},
+                        "idle": None if m.idle is None else {"amp": m.idle.amp, "hz": m.idle.hz, "still": m.idle.still_speed()},
+                        "soft_limit": m.soft_limit,
                     }
                     for jn, m in mp.items()
                 }
@@ -234,6 +282,24 @@ class Profile(BaseModel):
             },
             "native_clips": self.native_clips.model_dump() if self.native_clips else None,
         }
+
+
+def urdf_joint_limits(text: str) -> Dict[str, tuple]:
+    """``{joint_name: (lower, upper)}`` for every URDF joint carrying a ``<limit>``
+    (radians / metres). Continuous joints and joints without limits are absent."""
+    out: Dict[str, tuple] = {}
+    for m in re.finditer(r'<joint\s+[^>]*name="([^"]+)"[^>]*>(.*?)</joint>', text, re.S):
+        lim = re.search(r'<limit\b[^>]*>', m.group(2))
+        if not lim:
+            continue
+        lo = re.search(r'lower="([^"]+)"', lim.group(0))
+        hi = re.search(r'upper="([^"]+)"', lim.group(0))
+        if lo and hi:
+            try:
+                out[m.group(1)] = (float(lo.group(1)), float(hi.group(1)))
+            except ValueError:
+                pass
+    return out
 
 
 def split_front_matter(text: str):

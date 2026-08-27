@@ -99,6 +99,21 @@ def test_live_retargeter_clips_velocity_and_converges():
     assert abs(prev - 40.0) < 0.5
 
 
+def test_check_refuses_profile_range_wider_than_urdf(tmp_path):
+    urdf = tmp_path / "r.urdf"
+    urdf.write_text('<robot name="r"><link name="a"/><link name="b"/>'
+                    '<joint name="j" type="revolute"><parent link="a"/><child link="b"/>'
+                    '<axis xyz="0 0 1"/><limit lower="-0.5" upper="0.5" effort="1" velocity="1"/></joint></robot>')
+    base = {"schema": "animacy.robot.v1", "name": "r", "display_name": "R", "description": {"urdf": "r.urdf"},
+            "retarget": {"default": {}}}
+    ok = Profile(**base, joints=[{"name": "j", "min": -28, "max": 28, "rest": 0, "max_speed": 100}])
+    ok.path = str(tmp_path / "ROBOT.md")
+    assert ok.check() == []
+    bad = Profile(**base, joints=[{"name": "j", "min": -90, "max": 90, "rest": 0, "max_speed": 100}])
+    bad.path = str(tmp_path / "ROBOT.md")
+    assert any("exceeds the URDF" in e for e in bad.check())
+
+
 def test_to_urdf_values_applies_sign_offset_units():
     spec = {"schema": "animacy.robot.v1", "name": "t", "display_name": "T", "description": {"urdf": "x.urdf"},
             "joints": [{"name": "p", "min": -90, "max": 90, "rest": 0, "max_speed": 100, "urdf_sign": -1, "urdf_offset": 10},

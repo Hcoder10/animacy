@@ -26,7 +26,7 @@ retarget:
     neck_pitch: { from: head_pitch, gain: 1.0, deadband: 0.5, smooth_hz: 6 }
 
 export:
-  formats: [csv]
+  formats: [csv]                 # autonomous_os_csv | pollen_move | lerobot | csv | json
 
 runtime:
   kind: none
