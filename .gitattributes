@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.stl binary
+*.glb binary
+*.png binary
+*.bin binary
+*.onnx binary
+*.parquet binary
+*.wav binary
