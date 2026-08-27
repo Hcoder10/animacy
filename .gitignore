@@ -31,3 +31,6 @@ Thumbs.db
 data/models/
 data/debug/
 data/sim2real/
+data/lerobot/
+data/hf_stage/
+.venv-lerobot/

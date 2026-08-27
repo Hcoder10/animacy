@@ -80,6 +80,22 @@ def _cmd_capture(a) -> int:
     return capture_main(a)
 
 
+def _cmd_lerobot(a) -> int:
+    from .lerobot_export import export, push_to_hub, validate_with_lerobot
+
+    exclude = [x for x in a.exclude.split(",") if x]
+    export(a.robot, a.clips, a.out, fps=a.fps, mode=a.mode, exclude=exclude, env_state=a.env_state,
+           max_stretch=(a.max_stretch if a.max_stretch > 0 else None), force=a.force)
+    if a.validate or a.push:
+        ok, log, _ = validate_with_lerobot(a.out)
+        print(log[-2000:] if not ok else "VALIDATION OK")
+        if not ok:
+            return 1
+    if a.push:
+        print(push_to_hub(a.out, a.push))
+    return 0
+
+
 def _cmd_import_browser(a) -> int:
     from .import_browser import run_from_args
 
@@ -177,6 +193,20 @@ def build_parser() -> argparse.ArgumentParser:
     ib.add_argument("-o", "--output", required=True)
     ib.add_argument("--no-smooth", action="store_true")
     ib.set_defaults(fn=_cmd_import_browser)
+
+    lr = sub.add_parser("lerobot", help="export clips as a LeRobot v3.0 dataset for one robot")
+    lr.add_argument("--robot", required=True)
+    lr.add_argument("--clips", default="data/clips")
+    lr.add_argument("--out", required=True)
+    lr.add_argument("--fps", type=float, default=30.0)
+    lr.add_argument("--mode", default="default")
+    lr.add_argument("--exclude", default="")
+    lr.add_argument("--env-state", default="audio", choices=("audio", "human", "none"))
+    lr.add_argument("--max-stretch", type=float, default=1.1)
+    lr.add_argument("--force", action="store_true")
+    lr.add_argument("--validate", action="store_true")
+    lr.add_argument("--push", default=None)
+    lr.set_defaults(fn=_cmd_lerobot)
     return p
 
 
