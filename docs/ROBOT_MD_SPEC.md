@@ -61,6 +61,9 @@ retarget:                        # one or more named mappings from canonical cha
       spring: { hz: 4, zeta: 0.7 }   # 2nd-order tracker instead of smooth_hz (overshoot-and-settle)
       idle: { amp: 2, hz: 0.2 }      # deterministic sway added while the target is still; `still:` optional
       soft_limit: 0.15               # tanh knee over the last 15 % of the range before the hard clamp
+      settle: { seconds: 0.6 }       # quiet (still + not speaking) for `quiet:` 0.4 s → blend to rest over 0.6 s
+      # a mix term may carry `tag: gaze_comp` — a derived (URDF FK) compensation
+      # term written by scripts/retarget_fit.py; the runtime ignores tags
   puppet:                        # e.g. drive the lamp with your own arm
     base_yaw:      { from: shoulder_yaw }
     base_pitch:    { from: shoulder_pitch, gain: -1, offset: 90 }
