@@ -24,6 +24,12 @@ description:
 # recording playback (hal/drivers/motors/recording_timing.py). Their SAFETY.md
 # motion.max_speed=120 applies to commanded /servo/move paths, which the live
 # runtime respects separately (runtime.stream_max_speed).
+# UNITS CAVEAT: the vendor drives the bus in LeRobot RANGE_M100_100 mode
+# (hal/follower/config_hal_follower.py use_degrees=False), so a clip value is a
+# fraction of the per-unit calibrated span (~1.07 deg/unit yaw, ~1.16 roll; pitch
+# joints calibration-dependent). Values here are those vendor units, labelled
+# `deg` because they are within ~10% of degrees and the viewer needs an angle;
+# directions and topology are exact, amplitudes approximate until a unit is measured.
 joints:
   - { name: base_yaw,    unit: deg, min: -90, max: 90, rest: -1.8, max_speed: 250 }
   - { name: base_pitch,  unit: deg, min: -90, max: 90, rest: 28.9, max_speed: 250 }
