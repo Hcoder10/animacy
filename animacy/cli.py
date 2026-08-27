@@ -80,6 +80,12 @@ def _cmd_capture(a) -> int:
     return capture_main(a)
 
 
+def _cmd_import_browser(a) -> int:
+    from .import_browser import run_from_args
+
+    return run_from_args(a)
+
+
 def _cmd_mirror(a) -> int:
     from .mirror import run_from_args
 
@@ -165,6 +171,12 @@ def build_parser() -> argparse.ArgumentParser:
     mi.add_argument("--readback-every", type=float, default=5.0)
     mi.add_argument("--log", default=None)
     mi.set_defaults(fn=_cmd_mirror)
+
+    ib = sub.add_parser("import-browser", help="web viewer Record-mode zip/dir -> standard clip dir(s)")
+    ib.add_argument("src")
+    ib.add_argument("-o", "--output", required=True)
+    ib.add_argument("--no-smooth", action="store_true")
+    ib.set_defaults(fn=_cmd_import_browser)
     return p
 
 
