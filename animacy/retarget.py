@@ -6,8 +6,9 @@ Two paths share one arithmetic core:
   would demand more than ``max_speed`` (the Autonomous OS playback rule), then
   resampled onto the robot's rate grid and smoothed with a zero-phase filter
   (or, for joints that declare a ``spring``, tracked by the same causal
-  spring the live path uses, fed a lag-compensated input). Nothing is clipped,
-  so a big human move becomes a slower robot move rather than a truncated one.
+  spring the live path uses, fed a target advanced by the spring's lag).
+  Nothing is clipped, so a big human move becomes a slower robot move rather
+  than a truncated one.
 * :class:`LiveRetargeter` — online, one frame in, one frame out. Velocity is
   clipped (you cannot stretch time you have not seen yet). The browser viewer
   implements the same equations in JS (``web/js/retarget.js``).
@@ -15,7 +16,8 @@ Two paths share one arithmetic core:
 Per joint and frame (exact spec with a numeric example in ``docs/RETARGET.md``):
 
 ``u = rest + offset + Σ gain·channel`` → deadband → soft limit → clamp
-→ + gated idle sway → clamp → tracker (spring | one-pole) → rate limit → clamp.
+→ + gated idle sway → clamp → tracker (spring | one-pole) → rate limit → clamp
+→ carry the spring velocity (re-derived only if the limits engaged).
 """
 from __future__ import annotations
 
@@ -73,13 +75,60 @@ def soft_clip(x, lo: float, hi: float, frac: Optional[float]):
     return x
 
 
-def spring_step(y: float, v: float, u: float, dt: float, hz: float, zeta: float) -> Tuple[float, float]:
-    """One semi-implicit Euler step of ``y'' = w²(u − y) − 2ζw y'``. Returns (y, v)."""
+def spring_coefficients(hz: float, zeta: float, dt: float) -> Tuple[float, float, float, float]:
+    """Exact zero-order-hold step of ``y'' = w²(u − y) − 2ζw y'`` (w = 2π·hz)
+    over ``dt``, as the four coefficients of the linear map
+    ``[y − u, v] → [y' − u, v']``: (pp, pv, vp, vv). Closed form per damping
+    regime (under / critical / over), so any ``hz`` and ``dt`` is stable and
+    the overshoot is the analytic ``exp(−πζ/√(1−ζ²))``. Same equations as
+    ``web/js/retarget.js:springCoefficients``."""
     w = 2.0 * math.pi * hz
-    acc = w * w * (u - y) - 2.0 * zeta * w * v
-    v = v + acc * dt
-    y = y + v * dt
-    return y, v
+    if abs(zeta - 1.0) < 1e-9:
+        e = math.exp(-w * dt)
+        te = dt * e
+        tef = te * w
+        return tef + e, te, -w * tef, -tef + e
+    if zeta < 1.0:
+        wz = w * zeta
+        a = w * math.sqrt(1.0 - zeta * zeta)
+        e = math.exp(-wz * dt)
+        c = math.cos(a * dt)
+        s = math.sin(a * dt)
+        es, ec = e * s, e * c
+        ewzs = e * wz * s / a
+        return ec + ewzs, es / a, -es * a - wz * ewzs, ec - ewzs
+    za = -w * zeta
+    zb = w * math.sqrt(zeta * zeta - 1.0)
+    z1, z2 = za - zb, za + zb
+    e1, e2 = math.exp(z1 * dt), math.exp(z2 * dt)
+    inv = 1.0 / (2.0 * zb)
+    e1i, e2i = e1 * inv, e2 * inv
+    return e1i * z2 - z2 * e2i + e2, -e1i + e2i, (z1 * e1i - z2 * e2i + e2) * z2, -z1 * e1i + z2 * e2i
+
+
+def spring_step(y: float, v: float, u: float, dt: float, hz: float, zeta: float) -> Tuple[float, float]:
+    """One exact step of the damped spring toward ``u`` (see :func:`spring_coefficients`). Returns (y, v)."""
+    pp, pv, vp, vv = spring_coefficients(hz, zeta, dt)
+    p = y - u
+    return p * pp + v * pv + u, p * vp + v * vv
+
+
+def clip_step(prev: float, y_free: float, v_free: Optional[float], dt: float, max_speed: float,
+              lo: float, hi: float) -> Tuple[float, float]:
+    """Steps 8–10 of the per-frame update: rate limit, hard clamp, and the
+    velocity to carry: the tracker's own ``v_free`` when nothing clipped,
+    else the achieved ``(y − prev)/dt`` so a spring cannot wind up against a
+    limit. One-pole joints pass ``v_free=None`` (velocity unused)."""
+    vmax = max_speed * dt
+    d = y_free - prev
+    clipped = abs(d) > vmax
+    y = prev + min(max(d, -vmax), vmax)
+    if y < lo or y > hi:
+        clipped = True
+        y = min(max(y, lo), hi)
+    if v_free is None or clipped:
+        return y, (y - prev) / dt
+    return y, v_free
 
 
 def spring_lag_s(spring: Spring) -> float:
@@ -212,19 +261,14 @@ def _advance(x: np.ndarray, frames: float) -> np.ndarray:
 
 
 def spring_track_offline(u: np.ndarray, dt: float, spring: Spring, max_speed: float, lo: float, hi: float) -> np.ndarray:
-    """Causal spring over an on-grid target, input advanced by the spring's
-    low-frequency lag so the output lines up with the audio clock. Rate limit
-    and clamp inside the loop, velocity re-derived after them (as live)."""
-    adv = _advance(u, spring_lag_s(spring) / dt)
+    """Causal spring over an on-grid target (already lag-advanced by the
+    caller). Rate limit and clamp inside the loop, velocity re-derived after
+    them — the same per-frame rule as live."""
     out = np.empty_like(u)
     y, v = float(u[0]), 0.0
-    vmax = max_speed * dt
     for i in range(len(u)):
-        yn, v = spring_step(y, v, float(adv[i]), dt, spring.hz, spring.zeta)
-        yn = y + min(max(yn - y, -vmax), vmax)
-        yn = min(max(yn, lo), hi)
-        v = (yn - y) / dt
-        y = yn
+        y_free, v_free = spring_step(y, v, float(u[i]), dt, spring.hz, spring.zeta)
+        y, v = clip_step(y, y_free, v_free, dt, max_speed, lo, hi)
         out[i] = y
     return out
 
@@ -243,6 +287,10 @@ def retarget_clip(clip: HumanClip, profile: Profile, mode: str = "default",
         m = mp.get(j.name)
         lo, hi = mapping_bounds(j, m)
         u = on_grid[j.name].to_numpy(dtype=np.float64)
+        if m is not None and m.spring is not None:
+            # offline only: feed the spring a target advanced by its low-frequency
+            # lag so the output stays on the audio clock (live cannot see ahead)
+            u = _advance(u, spring_lag_s(m.spring) / dt)
         if m is not None and m.idle is not None:
             u = idle_offline(u, dt, m.idle, idx, lo, hi)
         if m is not None and m.spring is not None:
@@ -311,16 +359,14 @@ class LiveRetargeter:
                     u = min(max(u + g * idle_value(self.clock[j.name], m.idle.amp, m.idle.hz, idx), lo), hi)
             prev = self.state[j.name]
             if m is not None and m.spring is not None:
-                y, v = spring_step(prev, self.vel[j.name], u, dt, m.spring.hz, m.spring.zeta)
+                y_free, v_free = spring_step(prev, self.vel[j.name], u, dt, m.spring.hz, m.spring.zeta)
             else:
                 # one-pole low-pass, alpha from cutoff
                 alpha = 1.0 if not cutoff else 1.0 - math.exp(-2.0 * math.pi * cutoff * dt)
-                y = prev + alpha * (u - prev)
-            # velocity clip
-            vmax = j.max_speed * dt
-            y = prev + min(max(y - prev, -vmax), vmax)
-            y = min(max(y, j.min), j.max)
-            self.vel[j.name] = (y - prev) / dt
+                y_free = prev + alpha * (u - prev)
+                v_free = None
+            y, v = clip_step(prev, y_free, v_free, dt, j.max_speed, j.min, j.max)
+            self.vel[j.name] = v
             self.state[j.name] = y
             out[j.name] = y
         return out

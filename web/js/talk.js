@@ -91,7 +91,7 @@ export class MotionBackends {
     this._indexPromise = null;
   }
 
-  get hasModel() { return !!(this.bundle.a2m && this.bundle.vq_decoder && this.bundle.model_json); }
+  get hasModel() { return !!((this.bundle.a2m || this.bundle.a2m_ar) && this.bundle.vq_decoder && this.bundle.model_json); }
   get hasRetrieval() { return !!this.bundle.retrieval; }
 
   /** Backends in picker order: the bundle's `default_backend` first (retrieval unless the model earned it). */
@@ -132,8 +132,9 @@ export class MotionBackends {
       try {
         const model = await this.getModel();
         if (model) {
-          const { motion, codes } = await model.generate(featRows, speaking, { causal, seed });
-          return { frames: motionToFrames(motion, T, model.channels, speaking), backend: 'model', codes };
+          const onStep = model.arch === 'ar' ? (i, L) => this.onStatus(`model (${model.describe}) step ${i}/${L}…`, i / L) : null;
+          const { motion, codes, arch } = await model.generate(featRows, speaking, { causal, seed, onStep });
+          return { frames: motionToFrames(motion, T, model.channels, speaking), backend: 'model', codes, arch };
         }
       } catch (e) {
         console.warn('[talk] model backend failed, falling back:', e && e.message);
@@ -257,11 +258,12 @@ export class TalkSource extends MotionSource {
     this.track = framesToTrack(res.frames, text.slice(0, 40));
     this.buffer = ctx.createBuffer(1, audio.length, sr);
     this.buffer.copyToChannel(Float32Array.from(audio), 0);
-    this.last = { text, backend: res.backend, seconds: audio.length / sr, ttsMs, motionMs: tMotion, codes: res.codes ? res.codes.length : 0, frames: res.frames.length };
+    this.last = { text, backend: res.backend, arch: res.arch || null, seconds: audio.length / sr, ttsMs, motionMs: tMotion, codes: res.codes ? res.codes.length : 0, frames: res.frames.length };
     this._offset = 0;
     this.finished = false;
     this._startAudio(0);
-    this.onStatus(`${res.backend}: ${(audio.length / sr).toFixed(1)} s of speech · tts ${(ttsMs / 1000).toFixed(1)} s · motion ${tMotion.toFixed(0)} ms`, 1);
+    const label = res.backend === 'model' && res.arch ? `model/${res.arch}` : res.backend;
+    this.onStatus(`${label}: ${(audio.length / sr).toFixed(1)} s of speech · tts ${(ttsMs / 1000).toFixed(1)} s · motion ${tMotion.toFixed(0)} ms`, 1);
     return this.last;
   }
 
@@ -307,10 +309,11 @@ export class TalkSource extends MotionSource {
   update(_realDt) {
     if (!this.track) return null;
     const t = this.time;
-    const dt = this._pendingSeek ? 0.5 : Math.max(1e-4, this.playing ? t - (this._lastT ?? t) : 1 / RATE_HZ);
+    const seek = !!this._pendingSeek;
+    const dt = Math.max(1e-4, this.playing ? t - (this._lastT ?? t) : 1 / RATE_HZ);
     this._pendingSeek = false;
     this._lastT = t;
-    const frame = { t, dt, channels: this.track.sample(t) };
+    const frame = { t, dt, seek, channels: this.track.sample(t) };
     this._emit(frame);
     return frame;
   }

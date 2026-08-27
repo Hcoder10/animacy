@@ -74,14 +74,31 @@ channel order, `stats`, sampling defaults, smoothing cutoff, file names. The
 manifest's `bundle` flags say which files exist; missing ones remove that
 backend from the picker and the Talk tab still works on the envelope heuristic.
 
+Two model archs, chosen by `model.json` (`resolveArch` in `model.js`):
+
+| shape | arch | graph | per-step rule |
+|---|---|---|---|
+| v1: no `archs` key | `ff` | `a2m.onnx` once → logits `[L,512]` | `softmax(logits/T + w·bigram[prev])` (infer.sample_codes) |
+| v2: `archs: ["ff","ar"]`, `default_arch` | `ar` | `a2m_ar.onnx` stepped per code with the history `[BOS=512, c0, …]` → `logits_next` | temperature, top-p, repeat penalty, optional stay bias (a2m_ar.generate) |
+
+The default arch is used when its sampler exists and its file is listed;
+otherwise the first runnable listed arch (e.g. a v3 `default_arch` this build
+does not know falls back to `ar`/`ff`), and if none is runnable
+`MotionBackends` drops to retrieval → envelope with a status line — never a
+hard error. Only the chosen arch's ONNX is downloaded. The Talk status shows
+`model/ff` or `model/ar` and, for `ar`, a per-step progress bar (30 steps ≈ 0.2 s
+in wasm on a laptop).
+
 Parity with Python: `tests/test_web_features_parity.py` (features to 1e-4,
 `filtfilt` to 1e-9, node) and `tests/test_web_model_parity.py` (headless
-Chromium running `model.js` on the real bundle vs onnxruntime + `infer.py`:
-logits < 1e-3, decoder < 1e-3, greedy codes identical, full greedy generate
-< 2e-3, retrieval ids identical). The stochastic sampler uses sfc32 rather than
+Chromium running `model.js` on the real bundle vs onnxruntime + `infer.py` /
+`a2m_ar.py`: ff logits < 1e-3, decoder < 1e-3, greedy codes identical for both
+archs, full greedy generate < 2e-3, retrieval ids identical, every AR draw
+inside Python's top-p nucleus, `sampleTopP` frequencies within sampling noise
+of `AudioToMotionAR.sample`). The stochastic samplers use sfc32 rather than
 numpy's PCG64, so seeded sequences are reproducible in the browser but not
-bit-identical to Python; the test scores the JS draws under Python's per-step
-distribution instead.
+bit-identical to Python; the tests score the JS draws under Python's per-step
+distributions instead.
 
 * `js/main.js` — boot, UI, the single `requestAnimationFrame` loop, and the
   `window.animacy` API used by the dev scripts (`setSource`, `setClip`,
@@ -132,10 +149,10 @@ LiveRetargeter.step(channels, dt):           # docs/RETARGET.md
   u      = softClip(x + offset + rest, soft_limit)   # tanh knee over the last soft_limit of the range
   u      = clamp(u, [min, max])               # mapping bounds, else joint limits
   u      = clamp(u + gate·idleValue(clock))   # idle sway, gated off while the target moves
-  y      = spring ? springStep(prev, vel, u)  # semi-implicit Euler, hz/zeta
-         : prev + (1 − exp(−2π·cutoff·dt))·(u − prev)   # one-pole, cutoff = smooth_hz or 6 Hz
-  y      = prev + clamp(y − prev, ±max_speed·dt)
-  y      = clamp(y, [joint.min, joint.max]);  vel = (y − prev)/dt
+  y,v    = spring ? springStep(prev, vel, u)  # exact zero-order-hold damped oscillator (springCoefficients)
+         : prev + (1 − exp(−2π·cutoff·dt))·(u − prev), null   # one-pole, cutoff = smooth_hz or 6 Hz
+  y,v    = clipStep(prev, y, v)              # |Δ| ≤ max_speed·dt, clamp [joint.min, joint.max];
+                                             # carry the spring's own v unless a limit engaged, then (y − prev)/dt
 toUrdfValues: (value + urdf_offset)·urdf_sign, deg→rad, mm→m, keyed by urdf_joint
 ```
 
@@ -145,7 +162,11 @@ agreement to 1e-6 — on the shipped profiles and on a synthetic v1.1 profile
 that uses `soft_limit`, `idle` and `spring`; it also checks that
 `web/robots/*.json` and `manifest.json` are current. Clip playback hands the retargeter *clip-time* `dt` (so 2× speed
 is a faster robot, as it would be on hardware); the webcam hands it wall-clock
-`dt` from the video frame timestamps.
+`dt` from the video frame timestamps. `main.js` never feeds the retargeter
+more than one nominal 1/30 s step: longer gaps are split into equal
+sub-steps (the exact spring composes, so this changes nothing but keeps the
+rate limit per-frame), and a scrub (`frame.seek`) is settled with 30 nominal
+steps instead of one giant one.
 
 ## Record mode (contribute data from the page)
 

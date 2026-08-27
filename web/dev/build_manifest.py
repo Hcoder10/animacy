@@ -77,14 +77,16 @@ def build() -> dict:
         models.append(entry)
     mdir = os.path.join(WEB, "models")
     bundle = {k: os.path.isfile(os.path.join(mdir, f)) for k, f in (
-        ("model_json", "model.json"), ("a2m", "a2m.onnx"), ("vq_decoder", "vq_decoder.onnx"),
+        ("model_json", "model.json"), ("a2m", "a2m.onnx"), ("a2m_ar", "a2m_ar.onnx"), ("vq_decoder", "vq_decoder.onnx"),
         ("bigram", "bigram.bin"), ("retrieval", "retrieval.json"))}
     bundle["retrieval"] = bundle["retrieval"] and os.path.isfile(os.path.join(mdir, "retrieval.bin"))
     if bundle["model_json"]:
         try:
             mj = json.load(open(os.path.join(mdir, "model.json"), encoding="utf-8"))
             bundle["default_backend"] = mj.get("default_backend", "retrieval")
-            bundle["arch"] = mj.get("arch", "a2m")
+            # v1 model.json has no archs (feed-forward "ff"); v2 lists archs + default_arch
+            bundle["archs"] = mj.get("archs") or (["ff"] if mj.get("a2m") else [])
+            bundle["default_arch"] = mj.get("default_arch") or (bundle["archs"][0] if bundle["archs"] else None)
             bundle["verdict"] = mj.get("verdict", {}).get("summary", "") if isinstance(mj.get("verdict"), dict) else ""
         except Exception as e:  # noqa: BLE001
             print(f"warning: could not read model.json: {e}", file=sys.stderr)

@@ -13,9 +13,10 @@
 //                                    `profile.to_web_json`; else joint bounds)
 //     → + gated idle sway          (only while the mapped target is near-still)
 //     → clamp
-//     → tracker: spring (semi-implicit Euler) | one-pole, alpha = 1 − exp(−2π·cutoff·dt)
+//     → tracker: spring (exact zero-order-hold) | one-pole, alpha = 1 − exp(−2π·cutoff·dt)
 //     → velocity clip               |Δ| ≤ max_speed·dt
 //     → clamp [joint.min, joint.max]
+//     → carry the spring velocity  (re-derived only if the limits engaged)
 //
 // Profile JSON is what `animacy profile export` writes (web/robots/<name>.json):
 // mapping = {terms[], offset, min, max, deadband, smooth_hz, spring{hz,zeta}|null,
@@ -50,13 +51,64 @@ export function softClip(x, lo, hi, frac) {
   return x;
 }
 
-/** One semi-implicit Euler step of y'' = w²(u − y) − 2ζw y'. Returns [y, v]. */
-export function springStep(y, v, u, dt, hz, zeta) {
+/**
+ * Exact zero-order-hold step of y'' = w²(u − y) − 2ζw y' (w = 2π·hz) over dt,
+ * as the four coefficients of the linear map [y − u, v] → [y' − u, v']:
+ * [pp, pv, vp, vv]. Closed form per damping regime (under / critical / over),
+ * so any hz and dt is stable and the overshoot is the analytic exp(−πζ/√(1−ζ²)).
+ * Same equations as animacy.retarget.spring_coefficients.
+ */
+export function springCoefficients(hz, zeta, dt) {
   const w = 2.0 * Math.PI * hz;
-  const acc = w * w * (u - y) - 2.0 * zeta * w * v;
-  v = v + acc * dt;
-  y = y + v * dt;
-  return [y, v];
+  if (Math.abs(zeta - 1.0) < 1e-9) {
+    const e = Math.exp(-w * dt);
+    const te = dt * e;
+    const tef = te * w;
+    return [tef + e, te, -w * tef, -tef + e];
+  }
+  if (zeta < 1.0) {
+    const wz = w * zeta;
+    const a = w * Math.sqrt(1.0 - zeta * zeta);
+    const e = Math.exp(-wz * dt);
+    const c = Math.cos(a * dt);
+    const s = Math.sin(a * dt);
+    const es = e * s, ec = e * c;
+    const ewzs = (e * wz * s) / a;
+    return [ec + ewzs, es / a, -es * a - wz * ewzs, ec - ewzs];
+  }
+  const za = -w * zeta;
+  const zb = w * Math.sqrt(zeta * zeta - 1.0);
+  const z1 = za - zb, z2 = za + zb;
+  const e1 = Math.exp(z1 * dt), e2 = Math.exp(z2 * dt);
+  const inv = 1.0 / (2.0 * zb);
+  const e1i = e1 * inv, e2i = e2 * inv;
+  return [e1i * z2 - z2 * e2i + e2, -e1i + e2i, (z1 * e1i - z2 * e2i + e2) * z2, -z1 * e1i + z2 * e2i];
+}
+
+/** One exact step of the damped spring toward u (springCoefficients). Returns [y, v]. */
+export function springStep(y, v, u, dt, hz, zeta) {
+  const [pp, pv, vp, vv] = springCoefficients(hz, zeta, dt);
+  const p = y - u;
+  return [p * pp + v * pv + u, p * vp + v * vv];
+}
+
+/**
+ * Steps 8–10 of the per-frame update (animacy.retarget.clip_step): rate limit,
+ * hard clamp, and the velocity to carry — the tracker's own vFree when nothing
+ * clipped, else the achieved (y − prev)/dt so a spring cannot wind up against a
+ * limit. One-pole joints pass vFree = null (velocity unused). Returns [y, v].
+ */
+export function clipStep(prev, yFree, vFree, dt, maxSpeed, lo, hi) {
+  const vmax = maxSpeed * dt;
+  const d = yFree - prev;
+  let clipped = Math.abs(d) > vmax;
+  let y = prev + Math.min(Math.max(d, -vmax), vmax);
+  if (y < lo || y > hi) {
+    clipped = true;
+    y = Math.min(Math.max(y, lo), hi);
+  }
+  if (vFree === null || vFree === undefined || clipped) return [y, (y - prev) / dt];
+  return [y, vFree];
 }
 
 const isNil = (v) => v === null || v === undefined;
@@ -135,19 +187,17 @@ export class LiveRetargeter {
         }
       }
       const prev = this.state[j.name];
-      let y;
+      let yFree, vFree;
       if (m && m.spring) {
-        [y] = springStep(prev, this.vel[j.name], u, dt, m.spring.hz, m.spring.zeta);
+        [yFree, vFree] = springStep(prev, this.vel[j.name], u, dt, m.spring.hz, m.spring.zeta);
       } else {
         // one-pole low-pass, alpha from cutoff
         const alpha = !cutoff ? 1.0 : 1.0 - Math.exp(-2.0 * Math.PI * cutoff * dt);
-        y = prev + alpha * (u - prev);
+        yFree = prev + alpha * (u - prev);
+        vFree = null;
       }
-      // velocity clip
-      const vmax = j.max_speed * dt;
-      y = prev + Math.min(Math.max(y - prev, -vmax), vmax);
-      y = Math.min(Math.max(y, j.min), j.max);
-      this.vel[j.name] = (y - prev) / dt;
+      const [y, v] = clipStep(prev, yFree, vFree, dt, j.max_speed, j.min, j.max);
+      this.vel[j.name] = v;
       this.state[j.name] = y;
       out[j.name] = y;
     }

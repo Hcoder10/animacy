@@ -109,6 +109,45 @@ def main() -> int:
         if abs(r["head_yaw"]) < 5:
             failures.append("canonical clip did not move the reachy on Pages")
         page.screenshot(path=os.path.join(SHOTS, "pages_03_canonical.png"))
+
+        # talk mode over Pages: synthetic 24 kHz voice → features → every backend the deployed bundle offers
+        has_talk = page.evaluate("typeof window.animacy.sayAudio === 'function'")
+        if has_talk:
+            page.evaluate("window.animacy.setSource('talk')")
+            page.wait_for_function("window.animacy.sourceInfo().kind === 'talk'", timeout=30_000)
+            avail = page.evaluate("window.animacy.backends.available()")
+            deployed = page.evaluate("fetch('models/model.json', {cache: 'no-cache'}).then(r => r.ok ? r.json() : null).then(m => m ? {archs: m.archs || null, default_arch: m.default_arch || null, default_backend: m.default_backend} : null)")
+            print(f"talk on Pages: backends {avail}; deployed model.json: {deployed}")
+            voice_js = """(() => { const sr = 24000, n = Math.round(2.5 * sr), out = new Float32Array(n);
+                for (let i = 0; i < n; i++) { const t = i / sr; const env = (t % 0.45) < 0.25 ? Math.sin(Math.PI * ((t % 0.45) / 0.25)) : 0;
+                  let v = 0; for (let k = 1; k < 6; k++) v += Math.sin(2 * Math.PI * 130 * k * t) / k; out[i] = 0.5 * env * v + 0.01 * (Math.random() - 0.5); }
+                return Array.from(out); })()"""
+            rest = {n: {j["name"]: j["rest"] for j in page.evaluate(f"window.animacy.robots['{n}'].profile.joints")} for n in ("lamp", "reachy_mini")}
+            for backend in avail:
+                t_b = time.time()
+                info = page.evaluate(f"(async () => {{ const a = {voice_js}; return await window.animacy.sayAudio(a, 24000, '{backend}'); }})()")
+                wall = time.time() - t_b
+                for _ in range(60):
+                    page.wait_for_timeout(100)
+                    if page.evaluate("window.animacy.talkInfo().time") > 0.6:
+                        break
+                ti = page.evaluate("window.animacy.talkInfo()")
+                dev = {}
+                for n in ("lamp", "reachy_mini"):
+                    v = joints(n)
+                    dev[n] = max(abs(v[k] - rest[n][k]) for k in rest[n])
+                print(f"  talk/{backend}: used={info['backend']} frames={info['frames']} motion {info['motionMs']:.0f} ms (wall {wall:.1f} s incl. downloads) "
+                      f"clock {ti['time']:.2f}/{ti['duration']:.2f} playing={ti['playing']} lamp |d| {dev['lamp']:.1f} reachy |d| {dev['reachy_mini']:.1f}")
+                if info["backend"] != backend:
+                    failures.append(f"talk/{backend} on Pages fell back to {info['backend']}")
+                if info["frames"] < 70 or not ti["playing"] or ti["time"] < 0.3:
+                    failures.append(f"talk/{backend} on Pages did not play ({info['frames']} frames, t={ti['time']})")
+                if dev["lamp"] < 0.5 or dev["reachy_mini"] < 0.5:
+                    failures.append(f"talk/{backend} on Pages did not move both robots")
+            page.screenshot(path=os.path.join(SHOTS, "pages_04_talk.png"))
+        else:
+            print("talk mode not deployed yet (no animacy.sayAudio on the page)")
+            failures.append("talk mode not on Pages")
         app_errors = page.evaluate("window.animacy.errors")
         if app_errors:
             failures.append(f"app errors: {app_errors}")

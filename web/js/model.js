@@ -9,10 +9,13 @@
 // plus the retrieval (motion-matching) index retrieval.json + retrieval.bin, and
 // the speech-envelope heuristic from animacy/serve.py as the no-model fallback.
 //
-// Sampling mirrors infer.sample_codes: z = logits/T + w·bigram[prev]; softmax;
-// categorical draw. The RNG is sfc32 (not numpy's PCG64), so a seeded run is
-// reproducible in the browser but not bit-identical to Python; with T → 0 both
-// reduce to argmax and tests/test_web_model_parity.py checks that path exactly.
+// Two archs (model.json `archs` / `default_arch`; v1 files without them are "ff"):
+//   ff  a2m.onnx     one pass → logits [L,512]; infer.sample_codes: softmax(logits/T + w·bigram[prev])
+//   ar  a2m_ar.onnx  stepped per code with the history [BOS, …] → logits_next; a2m_ar.generate:
+//                    temperature, top-p, repeat penalty (+ stay bias on quiet audio)
+// The RNG is sfc32 (not numpy's PCG64), so a seeded run is reproducible in the
+// browser but not bit-identical to Python; with T → 0 both reduce to argmax and
+// tests/test_web_model_parity.py checks that path exactly for both archs.
 
 import { float16ToFloat32, seededRng, smoothColumns, hanning, convolveSame } from './dsp.js';
 import { N_FEATS, RATE_HZ } from './features.js';
@@ -136,40 +139,120 @@ export function motionToFrames(motion, T, channels, speaking = null, rateHz = RA
   return frames;
 }
 
+/**
+ * One categorical draw with temperature, nucleus (top-p) and an optional penalty
+ * on repeating `prev` — a2m_ar.AudioToMotionAR.sample, line for line
+ * (np.searchsorted(cum, top_p) keeps every sorted entry up to and including the
+ * first whose cumulative mass reaches top_p).
+ */
+export function sampleTopP(logits, n, temperature, topP, rng, prev = null, repeatPenalty = 0.0) {
+  const z = new Float64Array(n);
+  for (let k = 0; k < n; k++) z[k] = logits[k];
+  if (prev !== null && prev >= 0 && prev < n && repeatPenalty) z[prev] -= repeatPenalty;
+  const invT = 1.0 / Math.max(temperature, 1e-6);
+  let zmax = -Infinity;
+  for (let k = 0; k < n; k++) { z[k] *= invT; if (z[k] > zmax) zmax = z[k]; }
+  let sum = 0;
+  for (let k = 0; k < n; k++) { z[k] = Math.exp(z[k] - zmax); sum += z[k]; }
+  for (let k = 0; k < n; k++) z[k] /= sum;
+  if (topP > 0 && topP < 1) {
+    const order = Array.from({ length: n }, (_, k) => k).sort((a, b) => z[b] - z[a]);
+    let cum = 0, keepMass = 0, i = 0;
+    for (; i < n; i++) { cum += z[order[i]]; keepMass += z[order[i]]; if (cum >= topP) break; }
+    const keep = new Set(order.slice(0, Math.min(i + 1, n)));
+    for (let k = 0; k < n; k++) z[k] = keep.has(k) ? z[k] / keepMass : 0;
+  }
+  const u = rng();
+  let acc = 0, pick = n - 1;
+  for (let k = 0; k < n; k++) { acc += z[k]; if (u < acc) { pick = k; break; } }
+  return pick;
+}
+
 // ---------------------------------------------------------------------------
-// code samplers, keyed by model.json `arch` (default "a2m")
+// code samplers, keyed by model.json arch ("ff" | "ar"; v1 files without an
+// `archs` key are "ff")
 // ---------------------------------------------------------------------------
 // A sampler turns 15 Hz features into codes. Signature:
 //   async (model, feat15: Float32Array [L*66], L, speaking15: BigInt64Array [L],
-//          {causal, temperature, bigramWeight, seed}) → Int32Array codes [L]
+//          opts) → Int32Array codes [L]
 //
-// "a2m" (v1): one non-autoregressive pass gives logits for every step, then the
-//   bigram-prior categorical draw of infer.sample_codes.
-// "ar" (planned v2): the graph is stepped once per code with its own previous
-//   code(s) as input. Its per-step ONNX signature is declared in model.json
-//   (`ar.inputs` / `ar.outputs`); register it here as SAMPLERS.ar when it lands.
+// "ff": one non-autoregressive pass (a2m.onnx) gives logits for every step,
+//   then the bigram-prior categorical draw of infer.sample_codes.
+// "ar": a2m_ar.onnx is stepped once per code with the whole history
+//   [BOS, c0, …] as input (exact: the decoder's self-attention window is
+//   `window` codes per layer) → logits_next; temperature / top-p / repeat
+//   penalty (+ optional stay bias on quiet audio) per a2m_ar.generate.
 export const SAMPLERS = {
-  async a2m(model, feat15, L, speaking15, { causal, temperature, bigramWeight, seed }) {
+  async ff(model, feat15, L, speaking15, { causal, temperature, bigramWeight, seed }) {
     const lg = await model.logits(feat15, L, speaking15, causal);
     return sampleCodes(lg, L, model.nCodes, model.bigram, { temperature, bigramWeight, seed });
   },
+  async ar(model, feat15, L, speaking15, { causal, temperature, topP, repeatPenalty, seed, stayBias = 0, stayEnergy = -0.3, onStep = null }) {
+    const n = model.nCodes;
+    const bos = (model.meta.a2m_ar && model.meta.a2m_ar.bos) ?? n;
+    const rng = seededRng(seed);
+    const hist = [bos];
+    const out = new Int32Array(L);
+    for (let t = 0; t < L; t++) {
+      const logits = await model.logitsNext(feat15, L, speaking15, causal, hist);
+      const prev = t > 0 ? out[t - 1] : null;
+      if (prev !== null && stayBias && feat15[t * N_FEATS + 64] < stayEnergy) logits[prev] += stayBias;
+      const c = sampleTopP(logits, n, temperature, topP, rng, prev, repeatPenalty);
+      out[t] = c;
+      hist.push(c);
+      if (onStep) onStep(t + 1, L);
+    }
+    return out;
+  },
 };
+const ARCH_ALIASES = { a2m: 'ff' };
+
+/**
+ * Which arch a model.json asks for and which this build can run.
+ * v1 (no `archs`): "ff" via `a2m`. v2: `archs` + `default_arch`, blocks `a2m`
+ * ("ff") and `a2m_ar` ("ar"). An arch we cannot run (no sampler, or its file
+ * missing from the json) falls back to the first listed arch we can; none → null.
+ */
+export function resolveArch(meta) {
+  const blocks = { ff: meta.a2m || null, ar: meta.a2m_ar || null };
+  const norm = (a) => ARCH_ALIASES[a] || a;
+  const listed = (meta.archs && meta.archs.length ? meta.archs : Object.keys(blocks).filter((a) => blocks[a])).map(norm);
+  const usable = (a) => !!(SAMPLERS[a] && blocks[a] && blocks[a].file);
+  const want = norm(meta.default_arch || meta.arch || listed[0] || 'ff');
+  if (usable(want)) return { arch: want, wanted: want, block: blocks[want] };
+  const alt = listed.find(usable) || Object.keys(blocks).find(usable);
+  return alt ? { arch: alt, wanted: want, block: blocks[alt] } : null;
+}
 
 // ---------------------------------------------------------------------------
 // the learned model
 // ---------------------------------------------------------------------------
 export class MotionModel {
-  constructor(meta, a2m, decoder, bigram) {
+  /**
+   * @param {object} meta       model.json
+   * @param {object} sessions   {ff?: ort session (a2m.onnx), ar?: ort session (a2m_ar.onnx)}
+   * @param {object} decoder    vq_decoder.onnx session
+   * @param {Float32Array|null} bigram  [n*n] log P(next|prev), ff only
+   * @param {string} arch       resolved arch ("ff" | "ar")
+   */
+  constructor(meta, sessions, decoder, bigram, arch) {
     this.meta = meta;
-    this.a2m = a2m;
+    this.sessions = sessions;
+    this.a2m = sessions.ff || null;     // kept for the parity tests / ff path
     this.decoder = decoder;
     this.bigram = bigram;               // Float32Array [n*n] or null
     this.channels = meta.channels;
     this.nCodes = meta.n_codes;
-    this.arch = meta.arch || 'a2m';
+    this.arch = arch;
     this.sampling = meta.sampling || { temperature: 0.8, bigram_weight: 0.5 };
     this.smoothHz = (meta.smoothing && meta.smoothing.cutoff_hz) || 6.0;
-    if (!SAMPLERS[this.arch]) throw new Error(`model.json arch '${this.arch}' has no sampler in web/js/model.js (known: ${Object.keys(SAMPLERS).join(', ')})`);
+    if (!SAMPLERS[this.arch] || !sessions[this.arch]) throw new Error(`model.json arch '${this.arch}' is not runnable here (samplers: ${Object.keys(SAMPLERS).join(', ')})`);
+  }
+
+  /** Human-readable "what will run": arch + file. */
+  get describe() {
+    const b = this.arch === 'ar' ? this.meta.a2m_ar : this.meta.a2m;
+    return `${this.arch}:${b && b.file}`;
   }
 
   /**
@@ -184,8 +267,12 @@ export class MotionModel {
     const mr = await fetch(`${baseUrl}model.json`, { cache: 'no-cache' });
     if (!mr.ok) throw new Error(`no model bundle: ${baseUrl}model.json (${mr.status})`);
     const meta = await mr.json();
-    const files = [meta.a2m.file, meta.vq_decoder.file, meta.bigram && meta.bigram.file].filter(Boolean);
-    const sizes = [meta.a2m.bytes || 0, meta.vq_decoder.bytes || 0, 0];
+    if (!meta.vq_decoder || !meta.vq_decoder.file) throw new Error('model.json has no vq_decoder');
+    const res = resolveArch(meta);
+    if (!res) throw new Error(`model.json lists no arch this build can run (archs: ${JSON.stringify(meta.archs || Object.keys(meta).filter((k) => k.startsWith('a2m')))})`);
+    if (res.arch !== res.wanted) console.warn(`[model] model.json wants arch '${res.wanted}', running '${res.arch}' instead`);
+    const files = [res.block.file, meta.vq_decoder.file, res.arch === 'ff' && meta.bigram && meta.bigram.file].filter(Boolean);
+    const sizes = [res.block.bytes || 0, meta.vq_decoder.bytes || 0, 0];
     const totalBytes = sizes.reduce((a, b) => a + b, 0) || 1;
     let doneBytes = 0;
     const bufs = [];
@@ -196,7 +283,8 @@ export class MotionModel {
     }
     say('creating sessions…', 0.75);
     const opts = { executionProviders: ['wasm'] };
-    const a2m = await ort.InferenceSession.create(bufs[0], opts);
+    const sessions = {};
+    sessions[res.arch] = await ort.InferenceSession.create(bufs[0], opts);
     const decoder = await ort.InferenceSession.create(bufs[1], opts);
     let bigram = null;
     if (bufs[2]) {
@@ -204,19 +292,33 @@ export class MotionModel {
       bigram = float16ToFloat32(u16);
       if (bigram.length !== meta.n_codes * meta.n_codes) { console.warn('[model] bigram size mismatch, ignoring prior'); bigram = null; }
     }
-    say('model ready', 1);
-    return new MotionModel(meta, a2m, decoder, bigram);
+    say(`model ready (${res.arch}: ${res.block.file})`, 1);
+    return new MotionModel(meta, sessions, decoder, bigram, res.arch);
   }
 
-  /** a2m logits for 15 Hz features. @returns {Promise<Float32Array>} flat [L*n] */
+  /** ff: a2m logits for 15 Hz features. @returns {Promise<Float32Array>} flat [L*n] */
   async logits(feat15, L, speaking15, causal) {
+    if (!this.sessions.ff) throw new Error('feed-forward a2m session not loaded');
     const ort = await loadOrt();
-    const out = await this.a2m.run({
+    const out = await this.sessions.ff.run({
       features: new ort.Tensor('float32', feat15, [1, L, N_FEATS]),
       speaking: new ort.Tensor('int64', speaking15, [1, L]),
       causal: new ort.Tensor('int64', BigInt64Array.of(causal ? 1n : 0n), [1]),
     });
     return out.logits.data;
+  }
+
+  /** ar: logits for the next code given the history [BOS, c0, …]. @returns {Promise<Float32Array>} [n] */
+  async logitsNext(feat15, L, speaking15, causal, hist) {
+    if (!this.sessions.ar) throw new Error('autoregressive a2m_ar session not loaded');
+    const ort = await loadOrt();
+    const out = await this.sessions.ar.run({
+      features: new ort.Tensor('float32', feat15, [1, L, N_FEATS]),
+      speaking: new ort.Tensor('int64', speaking15, [1, L]),
+      causal: new ort.Tensor('int64', BigInt64Array.of(causal ? 1n : 0n), [1]),
+      codes: new ort.Tensor('int64', BigInt64Array.from(hist, (v) => BigInt(v)), [1, hist.length]),
+    });
+    return Float32Array.from(out.logits_next.data);
   }
 
   /** codes [L] → motion flat [2L*C] canonical units */
@@ -232,23 +334,29 @@ export class MotionModel {
    * @param {Float32Array[]} featRows
    * @param {Uint8Array|number[]} speaking
    */
-  async generate(featRows, speaking, { causal = false, temperature = null, bigramWeight = null, seed = 0, smoothHz = undefined } = {}) {
+  async generate(featRows, speaking, { causal = false, temperature = null, bigramWeight = null, topP = null, repeatPenalty = null, seed = 0, smoothHz = undefined, onStep = null } = {}) {
     const T = featRows.length;
     const C = this.channels.length;
     const stats = this.meta.stats || {};
     if (T < FRAMES_PER_CODE) {
       const m = new Float32Array(T * C);
       for (let t = 0; t < T; t++) for (let c = 0; c < C; c++) m[t * C + c] = (stats.mean && stats.mean[c]) || 0;
-      return { motion: m, codes: new Int32Array(0) };
+      return { motion: m, codes: new Int32Array(0), arch: this.arch };
     }
     const L = Math.floor(T / FRAMES_PER_CODE);
     const f15 = poolPairs(featRows, N_FEATS);
     const s15 = poolFlag(speaking);
+    const arS = (this.meta.a2m_ar && this.meta.a2m_ar.sampling) || {};
     const codes = await SAMPLERS[this.arch](this, f15, L, s15, {
       causal,
-      temperature: temperature ?? this.sampling.temperature ?? 0.8,
+      temperature: temperature ?? (this.arch === 'ar' ? arS.temperature : this.sampling.temperature) ?? 0.8,
       bigramWeight: bigramWeight ?? this.sampling.bigram_weight ?? 0.5,
+      topP: topP ?? arS.top_p ?? 0.9,
+      repeatPenalty: repeatPenalty ?? arS.repeat_penalty ?? 0.0,
+      stayBias: arS.stay_bias ?? 0.0,
+      stayEnergy: arS.stay_energy ?? -0.3,
       seed,
+      onStep,
     });
     let m = await this.decode(codes);                       // [2L, C]
     const T2 = 2 * L;
@@ -260,7 +368,7 @@ export class MotionModel {
       for (let t = T2; t < T; t++) for (let c = 0; c < C; c++) padded[t * C + c] = m[(T2 - 1) * C + c];
       m = padded;
     }
-    return { motion: m.slice(0, T * C), codes };
+    return { motion: m.slice(0, T * C), codes, arch: this.arch };
   }
 }
 

@@ -215,13 +215,24 @@ def main() -> int:
             # brows → antennas / wrist_pitch
             ev("(async () => { await window.animacy.setClip('synth/cal_brows'); })()")
             page.wait_for_function("window.animacy.sourceInfo().clip === 'synth/cal_brows'", timeout=20_000)
-            ev("window.animacy.seek(0.2); window.animacy.play()")
-            page.wait_for_timeout(350)
-            rb = joints("reachy_mini")
-            chb = ev("window.animacy.getChannels()")
-            print(f"cal brows: brow_l={chb['brow_l']:.2f} antenna_left={rb['antenna_left']:.1f} antenna_right={rb['antenna_right']:.1f}")
-            if rb["antenna_left"] < 10:
-                failures.append("reachy antenna_left did not rise on brow raise")
+            ev("window.animacy.seek(0.0); window.animacy.play()")
+            # brows pulse at 0.2-0.8 s and 1.1-1.7 s: track the antennas' largest excursion over the first pulses
+            best_l = best_r = 0.0
+            peak = None
+            t_end = time.time() + 2.5
+            while time.time() < t_end:
+                rb = joints("reachy_mini")
+                chb = ev("window.animacy.getChannels()") or {}
+                if peak is None or abs(rb["antenna_left"]) > best_l:
+                    best_l = abs(rb["antenna_left"])
+                    peak = (rb["antenna_left"], rb["antenna_right"], chb.get("brow_l", float("nan")))
+                best_r = max(best_r, abs(rb["antenna_right"]))
+                page.wait_for_timeout(60)
+            print(f"cal brows: peak antenna_left={peak[0]:.1f} antenna_right={peak[1]:.1f} at brow_l={peak[2]:.2f} (sign is ROBOT.md's call: mirror hinges)")
+            if best_l < 10 or best_r < 10:
+                failures.append(f"reachy antennas did not move on brow raise (max |L| {best_l:.1f}, |R| {best_r:.1f})")
+            ev("window.animacy.pause(); window.animacy.seek(0.5)")
+            page.wait_for_timeout(300)
             shot("05_cal_brows_both")
 
             # ---- puppet mode ---------------------------------------------------

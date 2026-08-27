@@ -14,7 +14,8 @@
 //
 // `dt` is the time the retargeter should integrate over: clip time for clips
 // (so speed × 2 plays a faster robot, like the real thing would), wall time
-// for the webcam.
+// for the webcam. `seek: true` marks a timeline discontinuity (scrub); the
+// consumer settles the retargeter there rather than integrating across it.
 
 export class MotionSource {
   constructor() { this._cb = null; }
@@ -67,19 +68,20 @@ export class ClipSource extends MotionSource {
         else { this.time = this.duration; this.finished = true; this.playing = false; }
       }
     }
-    // A seek is a discontinuity: hand the retargeter a generous dt so it can
-    // jump instead of slewing at max_speed from wherever it was.
-    const dt = this._pendingSeek ? 0.5 : Math.max(dtClip, 1e-4);
+    // A seek is a discontinuity: flag it so the consumer settles the pose
+    // (repeated nominal steps) instead of slewing from wherever it was.
+    const seek = this._pendingSeek;
+    const dt = Math.max(dtClip, 1e-4);
     this._pendingSeek = false;
-    const frame = this._frameAt(this.time, dt);
+    const frame = this._frameAt(this.time, dt, seek);
     this._emit(frame);
     return frame;
   }
 
-  _frameAt(t, dt) {
+  _frameAt(t, dt, seek = false) {
     const s = this.track.sample(t);
-    if (this.track.kind === 'canonical') return { t, dt, channels: s };
-    return { t, dt, joints: { [this.track.robot]: s } };
+    if (this.track.kind === 'canonical') return { t, dt, seek, channels: s };
+    return { t, dt, seek, joints: { [this.track.robot]: s } };
   }
 }
 

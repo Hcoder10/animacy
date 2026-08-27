@@ -633,6 +633,26 @@ function updateReadouts() {
 // ---------------------------------------------------------------------------
 // frame application + render loop
 // ---------------------------------------------------------------------------
+// The retargeter is a fixed-step integrator (the robots consume 30 Hz frames and
+// the spring tracker is a semi-implicit Euler step): never hand it more than
+// one nominal frame at a time. Longer gaps are split into equal sub-steps with
+// the same channels; a seek is settled by a second of nominal steps so the
+// pose lands where the timeline says without slewing from wherever it was.
+const RT_DT_MAX = 1 / 30;
+const RT_SEEK_SETTLE_STEPS = 30;
+
+function stepRetargeter(rt, channels, dt, seek) {
+  if (seek) {
+    let out;
+    for (let i = 0; i < RT_SEEK_SETTLE_STEPS; i++) out = rt.step(channels, RT_DT_MAX);
+    return out;
+  }
+  const n = Math.max(1, Math.ceil(dt / RT_DT_MAX));
+  let out;
+  for (let i = 0; i < n; i++) out = rt.step(channels, dt / n);
+  return out;
+}
+
 function applyFrame(frame) {
   if (frame.channels) {
     app.channels = frame.channels;
@@ -640,7 +660,7 @@ function applyFrame(frame) {
       const R = app.robots[n];
       if (!R) continue;
       const rt = R.retargeters[app.mode] || R.retargeters.default;
-      applyJoints(R, rt.step(frame.channels, frame.dt));
+      applyJoints(R, stepRetargeter(rt, frame.channels, frame.dt, frame.seek));
     }
   } else if (frame.joints) {
     app.channels = null;
@@ -801,6 +821,16 @@ Object.assign(app, {
     lastZipBase64: async () => { const t = app.recorder && app.recorder.take; if (!t) return null; const b = new Uint8Array(await t.zip.arrayBuffer()); let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s); },
   },
   talkInfo: () => (app.talk ? { last: app.talk.last, backend: app.talk.backend, time: app.talk.time, duration: app.talk.duration, playing: app.talk.playing, available: app.backends.available() } : null),
+  // Headless rendering hook (animacy/grade + web/dev/render_clip.py): pose one robot from URDF
+  // joint values (radians / metres, keyed by urdf_joint), render once, return the frame as a PNG data URL.
+  // Set `animacy.source = null` first so the animation loop stops applying its own frames.
+  renderFrame: (name, urdfValues, mime = 'image/png') => {
+    const R = app.robots[name];
+    if (!R) throw new Error(`no robot '${name}'`);
+    if (urdfValues) R.viewer.setJoints(urdfValues);
+    R.viewer.render();
+    return R.viewer.renderer.domElement.toDataURL(mime);
+  },
   // World-space forward (+x) axis of a link, in three.js coordinates: x = robot forward,
   // y = up, z = robot RIGHT (URDF −y). A head turning LEFT makes z go negative; looking UP makes y go positive.
   linkForward: (name, link = 'head') => {

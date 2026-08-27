@@ -95,13 +95,15 @@ V11_SPEC = {
         {"name": "b", "min": -90, "max": 90, "rest": -10, "max_speed": 120},
         {"name": "c", "unit": "mm", "min": -30, "max": 30, "rest": 0, "max_speed": 200},
         {"name": "d", "min": -45, "max": 45, "rest": 0, "max_speed": 500},
-        {"name": "e", "min": -45, "max": 45, "rest": 0, "max_speed": 500},
+        {"name": "e", "min": -45, "max": 45, "rest": 0, "max_speed": 60},
     ],
     "retarget": {"default": {
         "a": {"from": "head_yaw", "gain": 1.0, "soft_limit": 0.2, "spring": {"hz": 2.0, "zeta": 0.6}},
         "b": {"mix": [{"from": "head_pitch", "gain": 0.8}, {"from": "brow_l", "gain": 5}], "deadband": 0.5, "idle": {"amp": 3.0, "hz": 0.4}, "smooth_hz": 4},
         "c": {"from": "head_x", "gain": 0.3, "idle": {"amp": 2.0, "hz": 0.25, "still": 40}, "spring": {"hz": 1.5, "zeta": 1.0}, "soft_limit": 0.1},
         "d": {"from": "head_roll", "gain": 1.0, "min": -20, "max": 20, "soft_limit": 0.3},
+        # over-damped spring on a slow joint: the rate limit engages, so the carried velocity is re-derived
+        "e": {"from": "head_yaw", "gain": 0.8, "spring": {"hz": 3.0, "zeta": 1.5}},
     }},
 }
 
