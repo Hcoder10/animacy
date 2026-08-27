@@ -1,0 +1,179 @@
+{
+ "schema": "animacy.model.v1",
+ "feature_contract": "animacy.features.v1",
+ "rate_hz": 30,
+ "feature_rate_hz": 15,
+ "frames_per_code": 2,
+ "n_feats": 66,
+ "n_codes": 512,
+ "channels": [
+  "head_yaw",
+  "head_pitch",
+  "head_roll",
+  "head_x",
+  "head_y",
+  "head_z",
+  "brow_l",
+  "brow_r",
+  "brow_furrow",
+  "torso_lean_fwd",
+  "torso_lean_side",
+  "torso_yaw",
+  "mouth_open",
+  "smile"
+ ],
+ "stats": {
+  "mean": [
+   -0.00704940315335989,
+   -0.0025914479047060013,
+   0.0045927101746201515,
+   0.026179447770118713,
+   0.026385419070720673,
+   -0.01831415668129921,
+   0.10903685539960861,
+   0.11288243532180786,
+   0.09573592245578766,
+   0.006440326105803251,
+   -0.014492037706077099,
+   0.06236051768064499,
+   0.0633639246225357,
+   0.08541703224182129
+  ],
+  "std": [
+   3.2722299098968506,
+   2.445866107940674,
+   2.2555410861968994,
+   4.1784892082214355,
+   9.272778511047363,
+   4.216657638549805,
+   0.19211503863334656,
+   0.1932782232761383,
+   0.19774486124515533,
+   2.624695301055908,
+   1.2607975006103516,
+   2.784111261367798,
+   0.07970055192708969,
+   0.17664575576782227
+  ],
+  "norm_clip": 4.0
+ },
+ "a2m": {
+  "file": "a2m.onnx",
+  "inputs": {
+   "features": "float32 [1, L, 66] (30 Hz features averaged in pairs -> 15 Hz)",
+   "speaking": "int64 [1, L] (any of the pair)",
+   "causal": "int64 [1]: 0 = talk (non-causal), 1 = listen (causal)"
+  },
+  "outputs": {
+   "logits": "float32 [1, L, 512]"
+  },
+  "bytes": 7622914
+ },
+ "vq_decoder": {
+  "file": "vq_decoder.onnx",
+  "inputs": {
+   "codes": "int64 [1, L]"
+  },
+  "outputs": {
+   "motion": "float32 [1, 2L, 14] canonical units, channel order = channels"
+  },
+  "bytes": 1177445
+ },
+ "bigram": {
+  "file": "bigram.bin",
+  "dtype": "float16",
+  "shape": [
+   512,
+   512
+  ],
+  "meaning": "log P(next | prev), row = prev"
+ },
+ "sampling": {
+  "temperature": 0.8,
+  "bigram_weight": 0.5,
+  "rule": "softmax(logits / temperature + bigram_weight * bigram[prev]) per step, prev = last sampled code"
+ },
+ "smoothing": {
+  "kind": "zero-phase butterworth order 2",
+  "cutoff_hz": 6.0
+ },
+ "detrend": {
+  "channels": [
+   "head_yaw",
+   "head_pitch",
+   "head_roll",
+   "head_x",
+   "head_y",
+   "head_z",
+   "torso_lean_fwd",
+   "torso_lean_side",
+   "torso_yaw"
+  ],
+  "cutoff_hz": 0.3,
+  "meaning": "pose channels are the residual above cutoff_hz: output motion is centred on neutral; add the gaze overlay for where to look"
+ },
+ "neutral": {
+  "eye_open_l": 0.6,
+  "eye_open_r": 0.6,
+  "gaze_yaw": 0.0,
+  "gaze_pitch": 0.0
+ },
+ "retrieval": {
+  "file": "retrieval.json",
+  "bin": "retrieval.bin"
+ },
+ "default_backend": "retrieval",
+ "verdict": {},
+ "training": {
+  "command": "python -m animacy.model.train --data data/clips --out checkpoints/v1 --export-dir web/models --sweep --device cpu",
+  "device": "cpu",
+  "data": {
+   "n_clips": 6,
+   "n_with_audio": 6,
+   "n_subjects": 6,
+   "total_minutes": 20.48,
+   "valid_minutes": 14.95,
+   "valid_minutes_with_audio": 14.95,
+   "sources": {
+    "video": 6
+   },
+   "clips": [
+    "cbp_vlog_day2",
+    "kende_interview_2014",
+    "obama_2014_09_13",
+    "obama_2015_02_07",
+    "royal_society_cloke",
+    "sd_rapper_interview"
+   ]
+  },
+  "split": {
+   "mode": "subject",
+   "n_groups": 6,
+   "held_out_groups": [
+    "415880533b"
+   ],
+   "leaky": false,
+   "held_out_valid_seconds": 178.0,
+   "rule": "group(s) nearest 20% of valid frames"
+  },
+  "vq": {
+   "n_codes": 512,
+   "dim": 64,
+   "n_train_segments": 5364,
+   "n_val_segments": 1334,
+   "best_val_mae": 0.3274061679840088,
+   "baseline_val_mae": 0.6424769759178162,
+   "used_codes_train": 511,
+   "perplexity_train": 445.3191223144531,
+   "used_codes_val": 347,
+   "perplexity_val": 225.17013549804688
+  },
+  "a2m": {
+   "d_model": 192,
+   "n_layers": 4,
+   "n_heads": 4,
+   "n_train_chunks": 1393,
+   "n_val_chunks": 178
+  }
+ }
+}

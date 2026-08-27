@@ -37,11 +37,15 @@ retarget:
   # "headshake" is ~117° of wrist_roll + 39° of base_yaw; a "nod" is ~12° base
   # + 26° elbow + 17° wrist_pitch; "sad" droops 32/45/64) so the retarget lands
   # inside the envelope the body was authored for.
+  # Vendor signs (see "Sign conventions" below): +base_yaw and +wrist_roll pan
+  # RIGHT, +wrist_pitch tips the head DOWN — all opposite to the canonical
+  # channels (+yaw = left, +pitch = up), hence the negative gains. Rule 4 of
+  # the spec: signs are fixed here, never in the URDF or the data.
   default:
     base_yaw:
       mix:
-        - { from: head_yaw,  gain: 0.45 }
-        - { from: torso_yaw, gain: 0.6 }
+        - { from: head_yaw,  gain: -0.45 }
+        - { from: torso_yaw, gain: -0.6 }
       deadband: 0.3
       smooth_hz: 5
     wrist_roll:
@@ -49,18 +53,18 @@ retarget:
       # axis pans the lamp head left/right — that is the vendor's own
       # "headshake". So gaze yaw lives here, not on base_yaw.
       mix:
-        - { from: head_yaw,  gain: 1.0 }
-        - { from: head_roll, gain: 0.3 }
+        - { from: head_yaw,  gain: -1.0 }
+        - { from: head_roll, gain: -0.3 }
       deadband: 0.3
       smooth_hz: 6
       min: -60
       max: 70
     wrist_pitch:
       mix:
-        - { from: head_pitch, gain: 0.9 }
-        - { from: brow_l,     gain: 5.0 }   # brow raise = "perk up" (head tips up a touch)
-        - { from: brow_r,     gain: 5.0 }
-        - { from: torso_lean_fwd, gain: -0.5 }  # keep looking at the person while leaning in
+        - { from: head_pitch, gain: -0.9 }
+        - { from: brow_l,     gain: -5.0 }  # brow raise = "perk up" (head tips up a touch)
+        - { from: brow_r,     gain: -5.0 }
+        - { from: torso_lean_fwd, gain: 0.5 }  # keep looking at the person while leaning in
       smooth_hz: 6
       min: -85
       max: 30
@@ -83,11 +87,11 @@ retarget:
   # wrist → neck/head. Offsets put a relaxed forearm-forward pose at the
   # vendor's rest.
   puppet:
-    base_yaw:    { from: shoulder_yaw, gain: 1.0, smooth_hz: 6 }
+    base_yaw:    { from: shoulder_yaw, gain: -1.0, smooth_hz: 6 }
     base_pitch:  { from: shoulder_pitch, gain: 0.6, offset: -25.0, smooth_hz: 6, min: 0, max: 80 }
     elbow_pitch: { from: elbow_flex, gain: 0.6, offset: -25.0, smooth_hz: 6, min: -10, max: 65 }
-    wrist_roll:  { from: wrist_roll, gain: 1.0, smooth_hz: 8, min: -70, max: 85 }
-    wrist_pitch: { from: wrist_pitch, gain: 1.0, smooth_hz: 8, min: -90, max: 30 }
+    wrist_roll:  { from: wrist_roll, gain: -1.0, smooth_hz: 8, min: -70, max: 85 }
+    wrist_pitch: { from: wrist_pitch, gain: -1.0, smooth_hz: 8, min: -90, max: 30 }
 
 export:
   formats: [autonomous_os_csv, lerobot]
@@ -125,23 +129,56 @@ are those files verbatim (Apache-2.0, © Autonomous).
 
 Joint values here are **identical to the vendor CSV values** (that is what
 `/servo/upload` receives), so the URDF in `urdf/` is built in the vendor's
-convention and `urdf_sign`/`urdf_offset` stay at identity.
+convention and `urdf_sign`/`urdf_offset` stay at identity. The URDF's
+geometry, chain and joint directions come from the vendor's own CAD
+(`cad_src/lamp.glb`) and the vendor's device notes; `urdf/README.md` has the
+evidence for every number.
 
-Status: **verified in simulation against the vendor's own clips** (idle →
-upright lamp looking at the desk, `sad` → droop, `nod` → bob, `headshake` →
-pan). Hardware verification is pending a physical unit — if your lamp turns the
-wrong way on `look left`, flip `gain` on `wrist_roll`/`base_yaw` in `default`
-and open an issue with the unit id.
+Direction of a **positive** value on each joint, taken from Autonomous's
+device-measured notes (`hal/drivers/tracking/constants.py`, unit lamp-ac82,
+2026-08-25) and reproduced by the URDF (`tests/test_lamp_urdf.py`):
 
-Physical reading of the vendor data (from the clip envelope):
+- `base_yaw` + → the head pans to the lamp's **right** (clockwise from above).
+- `wrist_roll` + → pans **right** as well; it rolls the head about the neck
+  axis, and because the head looks perpendicular to the neck that swings the
+  gaze sideways (the vendor's `headshake`). Note: these two are the *opposite*
+  of the canonical `head_yaw` (+ = left), so a `head_yaw → base_yaw/wrist_roll`
+  mapping needs a negative `gain`.
+- `base_pitch` + → lower arm leans **forward**, camera tips down.
+- `elbow_pitch` + → fold closes, head rises, camera tips **up** (vendor:
+  "elbow +1.6 framed the desk, +54.8 the ceiling"; opposite sense to
+  `base_pitch`, their `ELBOW_PITCH_SIGN = -1`).
+- `wrist_pitch` + → head tips **down**; **negative = look up** (vendor: "looking
+  up drives wrist NEGATIVE"). Also opposite to canonical `head_pitch` (+ = up).
 
-- `base_yaw` — turns the whole arm on the base bearing. Median −2°, ±50° in use.
-- `base_pitch` — lower arm from vertical; 0 = upright, ~29 at rest, 74 = far lean.
-- `elbow_pitch` — upper arm fold; ~28 at rest, 62 = stretched up.
-- `wrist_roll` — rotation about the upper-arm axis. Because the head is tipped
-  down at rest, this **pans the head** left/right (the vendor's headshake).
-- `wrist_pitch` — head tip; −62 at rest (looking down at the desk), +28 = looking
-  well up, −82 = tucked.
+Status: **verified in simulation only.** What was checked: (a) FK of the URDF
+at the vendor home values reproduces the CAD assembly pose; (b) rendering the
+vendor clips through `animacy.retarget.to_urdf_values`
+(`scripts/lamp_render_clip.py`, PNGs in `urdf/preview/`) gives an upright lamp
+looking forward/slightly down at rest, `sad`/`sleepy` drooping to the desk,
+`nod` bobbing, `headshake` panning left-right, `stretching` the tallest pose;
+(c) every clip keeps the head above the desk and in front of the base. Two
+things are **not** verified and are only inferable from vendor artefacts: the
+vendor value of the CAD pose (taken as the clips' home pose 29.8/27.1/−26.3/8.2,
+see README) and the unit scale — the vendor drives the bus in LeRobot
+`RANGE_M100_100` mode (`use_degrees = False`), so a value is a fraction of the
+per-unit calibrated span (~1.07°/unit for yaw, ~1.16°/unit for roll, pitch joints
+calibration-dependent); the URDF and this file treat 1 unit = 1°. Hardware
+verification is pending a physical unit — if your lamp turns the wrong way on
+`look left`, flip `gain` on `wrist_roll`/`base_yaw` in `default` and open an
+issue with the unit id.
+
+Physical reading of the vendor data (clip envelope, in the URDF's reading):
+
+- `base_yaw` — turns the whole arm on the base bearing. Median −2, ±50 in use.
+- `base_pitch` — lower arm; 0 = lying back on the base, ~30 at rest (arm ~45°
+  back of vertical, the CAD pose), 74 = near vertical (`stretching`).
+- `elbow_pitch` — upper arm fold; ~27 at rest (90° fold), 62 = folded up tall
+  (`stretching`), −13 = opened out (`wake_up` start, asleep lying back).
+- `wrist_roll` — roll about the neck axis; pans the head (headshake ±60).
+- `wrist_pitch` — head tip; −26 = the CAD pose (looking 45° down the neck),
+  −62 = idle (looking forward, slightly down), +28 = looking straight down at
+  the desk, −82 = looking up.
 
 ## Neutral pose
 

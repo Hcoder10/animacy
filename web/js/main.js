@@ -1,0 +1,623 @@
+// animacy browser viewer: two URDF robots driven by one canonical motion space.
+//
+//   profile JSON (web/robots/<name>.json, written by `animacy profile export`)
+//     └─ description.urdf → ../robots/<name>/<urdf>  → RobotViewer (three.js + urdf-loader)
+//     └─ retarget.<mode>  → LiveRetargeter (same equations as animacy/retarget.py)
+//   motion source (motion_source.js) → frame → retargeter → toUrdfValues → viewer.setJoints
+//
+// Everything that can fail (fetches, camera, models) is caught and shown in
+// the status line; the render loop never throws.
+
+import { RobotViewer } from './viewer.js';
+import { LiveRetargeter, toUrdfValues, restValues } from './retarget.js';
+import { CHANNELS, BOUNDS, UNITS, FLAGS } from './canonical.js';
+import { parseAutonomousCsv, parseJointJson, parseCanonicalJson, syntheticClips, listDir, normaliseListing, fetchJsonOrNull, fetchTextOrNull, urlExists } from './clips.js';
+import { ClipSource, SyntheticSource, WebcamSource, ModelSource } from './motion_source.js';
+import { STANDINS } from './standins.js';
+
+// ---------------------------------------------------------------------------
+// pins (also listed in web/README.md)
+// ---------------------------------------------------------------------------
+const MP_VERSION = '0.10.21';
+const CDN = {
+  vision: `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}/vision_bundle.mjs`,
+  wasm: `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}/wasm`,
+  faceModel: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+  poseModel: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+};
+
+const ROBOT_NAMES = ['lamp', 'reachy_mini'];
+// GitHub Pages has no directory listing; these are the 31 Autonomous OS recordings.
+const LAMP_NATIVE_FALLBACK = [
+  'acknowledge', 'confused', 'curious', 'excited', 'fear', 'goodbye', 'greeting', 'happy_wiggle', 'headshake', 'idle',
+  'laugh', 'listening', 'music_chill', 'music_classical', 'music_groove', 'music_hiphop', 'music_hype', 'music_jazz',
+  'music_rock', 'music_waltz', 'nod', 'playful', 'sad', 'scanning', 'shock', 'shy', 'sleepy', 'stretching',
+  'thinking_deep', 'tracking', 'wake_up',
+];
+const READOUT_CHANNELS = CHANNELS.filter((c) => c !== 't');
+
+const params = new URLSearchParams(location.search);
+const $ = (id) => document.getElementById(id);
+const IS_LOCAL = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+// web/manifest.json (python web/dev/build_manifest.py) says what exists so the
+// static site never probes for files that may 404.
+let manifest = null;
+
+// ---------------------------------------------------------------------------
+// state
+// ---------------------------------------------------------------------------
+const app = {
+  ready: false,
+  robots: {},            // name → {profile, viewer, retargeters, alias, standin, urdfUrl, values, urdf, missingJoints}
+  sourceKind: null,      // 'native' | 'canonical' | 'webcam' | 'model'
+  source: null,
+  clips: { native: [], canonical: [] },
+  clipId: null,
+  mode: 'default',
+  channels: null,        // latest canonical frame
+  ab: { on: false, viewer: null, source: null, clipId: null, values: null },
+  fps: 0,
+  errors: [],
+  webcam: null,
+  loop: true,
+  speed: 1.0,
+};
+window.animacy = app; // test / debugging API, extended at the bottom
+
+// ---------------------------------------------------------------------------
+// status + errors
+// ---------------------------------------------------------------------------
+function setStatus(msg, kind = '') {
+  const el = $('status');
+  el.textContent = msg;
+  el.className = `status ${kind}`;
+}
+let toastTimer = null;
+function toast(msg, ms = 6000) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, ms);
+}
+function reportError(where, err) {
+  const msg = `${where}: ${err && err.message ? err.message : err}`;
+  app.errors.push(msg);
+  console.warn('[animacy]', msg, err);
+  setStatus(msg, 'err');
+  toast(msg);
+}
+window.addEventListener('error', (e) => { app.errors.push(String(e.message)); });
+window.addEventListener('unhandledrejection', (e) => { reportError('promise', e.reason); });
+
+// ---------------------------------------------------------------------------
+// robots
+// ---------------------------------------------------------------------------
+async function loadRobot(name, container, { forAb = false } = {}) {
+  const profile = await fetchJsonOrNull(`robots/${name}.json`);
+  if (!profile) throw new Error(`robots/${name}.json missing — run: animacy profile export robots/${name} -o web/robots/${name}.json`);
+  const robotDir = `../robots/${name}`;
+  let urdfUrl = `${robotDir}/${profile.description.urdf}`;
+  // package://<x>/ inside a shipped URDF resolves inside the robot folder
+  let packages = (pkg) => (pkg === name ? robotDir : `${robotDir}/${pkg}`);
+  let alias = null;
+  let standin = null;
+  let anchorLink = null;
+  let cameraDistance = (profile.description.viewer && profile.description.viewer.camera_distance) || null;
+
+  const override = params.get(`urdf_${name}`);
+  const mrobot = manifest && manifest.robots && manifest.robots[name];
+  const urdfExists = async () => (mrobot ? mrobot.exists && mrobot.urdf === profile.description.urdf : urlExists(urdfUrl));
+  if (override) {
+    urdfUrl = override;
+    packages = (pkg) => `${override.replace(/\/[^/]*$/, '')}/${pkg}`;
+  } else if (params.get('standin') === '1' || !(await urdfExists())) {
+    standin = STANDINS[name] || null;
+    if (standin) {
+      urdfUrl = standin.urdf;
+      packages = standin.packages;
+      alias = standin.joints;
+      anchorLink = standin.anchorLink || null;
+      cameraDistance = standin.cameraDistance || cameraDistance;
+    }
+  }
+
+  const viewer = new RobotViewer(container);
+  const loadingEl = $(`loading-${forAb ? 'lamp-ab' : name}`);
+  try {
+    await viewer.loadRobot({ urdfUrl, packages, meshScale: profile.description.mesh_scale || 1, cameraDistance, anchorLink });
+    loadingEl.hidden = true;
+  } catch (e) {
+    loadingEl.textContent = `could not load ${urdfUrl}`;
+    loadingEl.classList.add('err');
+    throw e;
+  }
+  const have = new Set(viewer.jointNames);
+  const urdfNameOf = (j) => (alias && alias[j.name] && alias[j.name].urdf_joint) || j.urdf_joint || j.name;
+  const missingJoints = profile.joints.filter((j) => !have.has(urdfNameOf(j))).map((j) => j.name);
+  const retargeters = {};
+  for (const mode of Object.keys(profile.retarget)) retargeters[mode] = new LiveRetargeter(profile, mode);
+  const R = { name, profile, viewer, retargeters, alias, standin, urdfUrl, values: restValues(profile), urdf: {}, missingJoints };
+  applyJoints(R, R.values);
+  return R;
+}
+
+function applyJoints(R, values) {
+  R.values = values;
+  R.urdf = toUrdfValues(values, R.profile, R.alias);
+  R.viewer.setJoints(R.urdf);
+}
+
+function restAll(except = null) {
+  for (const n of ROBOT_NAMES) {
+    if (n === except) continue;
+    const R = app.robots[n];
+    if (!R) continue;
+    for (const rt of Object.values(R.retargeters)) rt.reset();
+    applyJoints(R, restValues(R.profile));
+  }
+}
+
+function describeRobot(R, forAb = false) {
+  const id = forAb ? 'lamp-ab' : R.name;
+  const badge = $(`badge-${id}`);
+  const sub = $(`sub-${id}`);
+  if (R.standin) {
+    badge.textContent = 'stand-in URDF';
+    badge.className = 'badge warn';
+    if (!forAb) sub.textContent = R.standin.note + (R.missingJoints.length ? ` · not driven: ${R.missingJoints.join(', ')}` : '');
+  } else {
+    badge.textContent = R.missingJoints.length ? `${R.missingJoints.length} joint(s) missing` : '';
+    badge.className = R.missingJoints.length ? 'badge warn' : 'badge';
+    if (!forAb) {
+      const p = R.profile;
+      sub.textContent = `${p.vendor} · ${p.joints.length} joints · ${R.profile.description.urdf}` + (R.missingJoints.length ? ` · missing in URDF: ${R.missingJoints.join(', ')}` : '');
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// clips
+// ---------------------------------------------------------------------------
+const trackCache = new Map();
+
+async function discoverClips() {
+  // native clips: from the manifest; without one, probe (index.json / listing / built-in names)
+  const nativeList = async (robot, ext, fallback) => {
+    if (manifest && manifest.native && manifest.native[robot]) return normaliseListing(manifest.native[robot], ext);
+    return listDir(`../robots/${robot}/clips/native`, ext, { fallback });
+  };
+  for (const f of await nativeList('lamp', '.csv', LAMP_NATIVE_FALLBACK)) {
+    app.clips.native.push({ id: `lamp/${f.name}`, label: `lamp · ${f.name}`, robot: 'lamp', url: `../robots/lamp/clips/native/${f.file}`, fmt: 'autonomous_csv', description: f.description });
+  }
+  for (const f of await nativeList('reachy_mini', '.json', [])) {
+    app.clips.native.push({ id: `reachy_mini/${f.name}`, label: `reachy · ${f.name}`, robot: 'reachy_mini', url: `../robots/reachy_mini/clips/native/${f.file}`, fmt: 'joint_json', description: f.description });
+  }
+  // canonical: synthetic calibration + captured (web/clips/*.json)
+  for (const tr of syntheticClips()) {
+    trackCache.set(`synth/${tr.name}`, tr);
+    app.clips.canonical.push({ id: `synth/${tr.name}`, label: tr.label, group: 'calibration', synthetic: true });
+  }
+  const seen = new Set();
+  const addCaptured = (f) => {
+    if (seen.has(f.file)) return;
+    seen.add(f.file);
+    app.clips.canonical.push({ id: `clip/${f.name}`, label: `captured · ${f.name}`, url: `clips/${f.file}`, group: 'captured', description: f.description });
+  };
+  if (manifest && manifest.clips) normaliseListing(manifest.clips, '.json').forEach(addCaptured);
+  // on a local http.server, newly dropped files show up without rebuilding the manifest
+  if (IS_LOCAL || !manifest) (await listDir('clips', '.json', { index: !manifest, listing: true })).forEach(addCaptured);
+}
+
+function pollenMoveToTrack(obj, name) {
+  // Pollen recorded-move JSON (export.py to_pollen_move) → joint table
+  const t = obj.time.map((x) => x - obj.time[0]);
+  const data = { head_x: [], head_y: [], head_z: [], head_roll: [], head_pitch: [], head_yaw: [], antenna_left: [], antenna_right: [], body_yaw: [] };
+  const RAD = 180 / Math.PI;
+  for (const s of obj.set_target_data) {
+    const M = s.head;
+    data.head_x.push(M[0][3] * 1000); data.head_y.push(M[1][3] * 1000); data.head_z.push(M[2][3] * 1000);
+    // ZYX euler from R = Rz·Ry·Rx (matches export._rpy_to_matrix)
+    data.head_yaw.push(Math.atan2(M[1][0], M[0][0]) * RAD);
+    data.head_pitch.push(Math.asin(Math.min(1, Math.max(-1, -M[2][0]))) * RAD);
+    data.head_roll.push(Math.atan2(M[2][1], M[2][2]) * RAD);
+    data.antenna_left.push(s.antennas[0] * RAD); data.antenna_right.push(s.antennas[1] * RAD);
+    data.body_yaw.push((s.body_yaw || 0) * RAD);
+  }
+  return parseJointJson({ robot: 'reachy_mini', t, data, joints: Object.keys(data) }, name, 'reachy_mini');
+}
+
+async function getTrack(entry) {
+  if (trackCache.has(entry.id)) return trackCache.get(entry.id);
+  let tr;
+  if (entry.fmt === 'autonomous_csv') {
+    const text = await fetchTextOrNull(entry.url);
+    if (text === null) throw new Error(`clip not found: ${entry.url}`);
+    tr = parseAutonomousCsv(text, entry.label, entry.robot);
+  } else if (entry.fmt === 'joint_json') {
+    const obj = await fetchJsonOrNull(entry.url);
+    if (!obj) throw new Error(`clip not found: ${entry.url}`);
+    tr = obj.set_target_data ? pollenMoveToTrack(obj, entry.label) : parseJointJson(obj, entry.label, entry.robot);
+  } else {
+    const obj = await fetchJsonOrNull(entry.url);
+    if (!obj) throw new Error(`clip not found: ${entry.url}`);
+    tr = parseCanonicalJson(obj, entry.label);
+  }
+  trackCache.set(entry.id, tr);
+  return tr;
+}
+
+function fillClipSelect(kind) {
+  const sel = $('clip-select');
+  sel.innerHTML = '';
+  const list = app.clips[kind] || [];
+  if (!list.length) {
+    const o = document.createElement('option');
+    o.textContent = kind === 'native' ? 'no native clips found' : 'no clips';
+    sel.appendChild(o);
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  let group = null, og = null;
+  for (const e of list) {
+    const g = e.group || e.robot || '';
+    if (g !== group) { og = document.createElement('optgroup'); og.label = g; sel.appendChild(og); group = g; }
+    const o = document.createElement('option');
+    o.value = e.id;
+    o.textContent = e.label;
+    if (e.description) o.title = e.description;
+    (og || sel).appendChild(o);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// sources
+// ---------------------------------------------------------------------------
+function stopSource() {
+  if (app.source && app.source.stop) { try { app.source.stop(); } catch (e) { /* ignore */ } }
+  app.source = null;
+}
+
+async function setSource(kind) {
+  if (kind === app.sourceKind && kind !== 'webcam') { return; }
+  const prev = app.sourceKind;
+  stopSource();
+  app.sourceKind = kind;
+  for (const b of $('source-tabs').querySelectorAll('button')) b.classList.toggle('active', b.dataset.source === kind);
+  const isClip = kind === 'native' || kind === 'canonical';
+  $('clip-select').hidden = !isClip;
+  $('webcam-controls').hidden = kind !== 'webcam';
+  $('webcam-thumb').hidden = kind !== 'webcam';
+  $('mode-select').disabled = kind === 'native';
+  for (const id of ['play', 'loop', 'scrub', 'speed']) $(id).disabled = !isClip;
+  restAll();
+  try {
+    if (isClip) {
+      fillClipSelect(kind);
+      const want = app.clipId && app.clips[kind].some((e) => e.id === app.clipId) ? app.clipId : (app.clips[kind][0] && app.clips[kind][0].id);
+      if (want) await setClip(want);
+      else setStatus(kind === 'native' ? 'no native clips found' : 'no canonical clips', 'err');
+    } else if (kind === 'webcam') {
+      await startWebcam();
+    } else if (kind === 'model') {
+      app.source = new ModelSource((manifest && manifest.models) || []);
+      await app.source.start();
+      setStatus(app.source.description);
+      toast(app.source.description, 6000);
+    }
+  } catch (e) {
+    reportError(`source ${kind}`, e);
+    if (kind === 'webcam' && prev && prev !== 'webcam') { await setSource(prev); }
+  }
+}
+
+async function setClip(id) {
+  const kind = app.sourceKind;
+  const entry = (app.clips[kind] || []).find((e) => e.id === id);
+  if (!entry) throw new Error(`unknown clip ${id}`);
+  app.clipId = id;
+  $('clip-select').value = id;
+  setStatus(`loading ${entry.label}…`);
+  const track = await getTrack(entry);
+  stopSource();
+  const Src = entry.synthetic ? SyntheticSource : ClipSource;
+  app.source = new Src(track, { loop: app.loop, speed: app.speed });
+  if (params.get('autoplay') === '0') app.source.pause();
+  if (track.kind === 'joint') restAll(track.robot);
+  else for (const R of Object.values(app.robots)) for (const rt of Object.values(R.retargeters)) rt.reset();
+  $('scrub').max = String(track.duration || 1);
+  $('play').textContent = app.source.playing ? '❚❚' : '▶';
+  const info = track.kind === 'joint'
+    ? `${entry.label} — vendor clip, ${track.n} frames, ${track.duration.toFixed(2)} s, plays raw on ${track.robot}`
+    : `${entry.label} — canonical, ${track.n} frames @ ${track.duration.toFixed(2)} s → retargeted through both ROBOT.md (${app.mode})`;
+  setStatus(info, 'ok');
+}
+
+async function startWebcam() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('this browser has no getUserMedia (serve over http://localhost or https)');
+  const wc = new WebcamSource({
+    video: $('webcam-video'),
+    overlay: $('webcam-overlay'),
+    arm: $('arm-select').value,
+    onStatus: (m) => { $('webcam-status').textContent = m; setStatus(`webcam: ${m}`); },
+    cdn: CDN,
+  });
+  app.source = wc;
+  app.webcam = wc;
+  await wc.start();
+  for (const R of Object.values(app.robots)) for (const rt of Object.values(R.retargeters)) rt.reset();
+  setStatus('webcam live → canonical channels → both robots', 'ok');
+}
+
+function setMode(mode) {
+  app.mode = mode;
+  $('mode-select').value = mode;
+  for (const R of Object.values(app.robots)) {
+    if (!R.retargeters[mode]) continue;
+    // continue from the current pose instead of snapping to rest
+    Object.assign(R.retargeters[mode].state, R.values);
+  }
+  const hint = mode === 'puppet' ? ' · puppet: your arm drives the lamp; wrist drives the reachy head' : '';
+  if (app.sourceKind !== 'native') setStatus(`mapping = ${mode}${hint}`, 'ok');
+}
+
+// ---------------------------------------------------------------------------
+// A/B: a second lamp playing the vendor's raw clip
+// ---------------------------------------------------------------------------
+async function setAb(on) {
+  app.ab.on = on;
+  $('ab').checked = on;
+  $('ab-select').disabled = !on;
+  const vp = $('vp-lamp-ab');
+  vp.hidden = !on;
+  if (!on) { if (app.ab.source) app.ab.source.pause(); return; }
+  try {
+    if (!app.ab.viewer) {
+      const R = await loadRobot('lamp', vp, { forAb: true });
+      app.ab.viewer = R;
+      describeRobot(R, true);
+    }
+    const id = app.ab.clipId || (app.clips.native.find((e) => e.robot === 'lamp') || {}).id;
+    if (id) await setAbClip(id);
+  } catch (e) {
+    reportError('A/B', e);
+    app.ab.on = false; $('ab').checked = false; vp.hidden = true;
+  }
+}
+
+async function setAbClip(id) {
+  const entry = app.clips.native.find((e) => e.id === id && e.robot === 'lamp');
+  if (!entry) return;
+  app.ab.clipId = id;
+  $('ab-select').value = id;
+  const track = await getTrack(entry);
+  app.ab.source = new ClipSource(track, { loop: true, speed: app.speed });
+  $('sub-lamp-ab').textContent = `B = vendor's hand-authored '${entry.label.replace('lamp · ', '')}' CSV, played raw · A (left) = retargeted from the human clip`;
+}
+
+// ---------------------------------------------------------------------------
+// readouts
+// ---------------------------------------------------------------------------
+const bars = { channels: {}, joints: {} };
+
+function makeBar(parent, key, label, cls = '') {
+  const el = document.createElement('div');
+  el.className = `bar ${cls}`;
+  el.innerHTML = `<span class="k" title="${key}">${label}</span><span class="track"><span class="mid"></span><span class="fill"></span></span><span class="v">–</span>`;
+  parent.appendChild(el);
+  return { el, fill: el.querySelector('.fill'), v: el.querySelector('.v'), mid: el.querySelector('.mid') };
+}
+
+function buildReadouts() {
+  const cp = $('channel-bars');
+  cp.style.gridTemplateRows = `repeat(${Math.ceil(READOUT_CHANNELS.length / 4)}, 18px)`;
+  for (const c of READOUT_CHANNELS) {
+    const [lo, hi] = BOUNDS[c];
+    bars.channels[c] = { ...makeBar(cp, c, c, FLAGS.includes(c) ? 'flag' : ''), lo, hi, signed: lo < 0 };
+    if (!(lo < 0)) bars.channels[c].mid.style.display = 'none';
+  }
+  for (const n of ROBOT_NAMES) {
+    const R = app.robots[n];
+    const jp = $(`joint-bars-${n}`);
+    if (!R) continue;
+    jp.style.gridTemplateRows = `repeat(${Math.min(7, R.profile.joints.length)}, 18px)`;
+    bars.joints[n] = {};
+    for (const j of R.profile.joints) {
+      const b = makeBar(jp, j.name, j.name, 'joint');
+      bars.joints[n][j.name] = { ...b, lo: j.min, hi: j.max, signed: j.min < 0 && j.max > 0 };
+      if (!(j.min < 0 && j.max > 0)) b.mid.style.display = 'none';
+    }
+  }
+}
+
+function setBar(b, v, unit = '') {
+  if (v === null || v === undefined || Number.isNaN(v)) { b.fill.style.width = '0%'; b.v.textContent = '–'; b.el.classList.add('stale'); return; }
+  b.el.classList.remove('stale');
+  const span = b.hi - b.lo || 1;
+  if (b.signed) {
+    const f = Math.max(-1, Math.min(1, v / Math.max(Math.abs(b.lo), Math.abs(b.hi))));
+    const w = Math.abs(f) * 50;
+    b.fill.style.left = f < 0 ? `${50 - w}%` : '50%';
+    b.fill.style.width = `${w}%`;
+  } else {
+    const f = Math.max(0, Math.min(1, (v - b.lo) / span));
+    b.fill.style.left = '0';
+    b.fill.style.width = `${f * 100}%`;
+  }
+  b.v.textContent = unit === 'unit' || unit === 'flag' ? v.toFixed(2) : v.toFixed(1);
+}
+
+function updateReadouts() {
+  const ch = app.channels;
+  for (const c of READOUT_CHANNELS) setBar(bars.channels[c], ch ? ch[c] : null, UNITS[c]);
+  $('channels-note').textContent = app.sourceKind === 'native' ? '— (native clip: robot joint space, no canonical frame)' : '— docs/CANONICAL.md, neutral-relative';
+  for (const n of ROBOT_NAMES) {
+    const R = app.robots[n];
+    if (!R || !bars.joints[n]) continue;
+    const mp = R.profile.retarget[app.mode] || {};
+    for (const j of R.profile.joints) {
+      const b = bars.joints[n][j.name];
+      setBar(b, R.values[j.name]);
+      b.el.classList.toggle('unmapped', app.sourceKind !== 'native' && !mp[j.name]);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// frame application + render loop
+// ---------------------------------------------------------------------------
+function applyFrame(frame) {
+  if (frame.channels) {
+    app.channels = frame.channels;
+    for (const n of ROBOT_NAMES) {
+      const R = app.robots[n];
+      if (!R) continue;
+      const rt = R.retargeters[app.mode] || R.retargeters.default;
+      applyJoints(R, rt.step(frame.channels, frame.dt));
+    }
+  } else if (frame.joints) {
+    app.channels = null;
+    for (const n in frame.joints) {
+      const R = app.robots[n];
+      if (!R) continue;
+      const vals = { ...restValues(R.profile) };
+      for (const k in frame.joints[n]) if (k in vals && !Number.isNaN(frame.joints[n][k])) vals[k] = frame.joints[n][k];
+      applyJoints(R, vals);
+    }
+  }
+}
+
+let lastNow = performance.now();
+let fpsAcc = { n: 0, t: performance.now() };
+let readoutAcc = 0;
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min(0.1, Math.max(0, (now - lastNow) / 1000));
+  lastNow = now;
+  try {
+    if (app.source) {
+      const frame = app.source.update(dt);
+      if (frame) applyFrame(frame);
+      if (app.source.duration !== undefined) {
+        const s = app.source;
+        if (document.activeElement !== $('scrub')) $('scrub').value = String(s.time);
+        $('time').textContent = `${s.time.toFixed(2)} / ${s.duration.toFixed(2)} s`;
+        const glyph = s.playing ? '❚❚' : '▶';
+        if ($('play').textContent !== glyph) $('play').textContent = glyph;
+      }
+      if (app.sourceKind === 'webcam' && app.webcam) {
+        const w = app.webcam;
+        $('webcam-stat').textContent = `${w.fps.toFixed(0)} fps · face ${w.stats.faceMs.toFixed(0)} ms · pose ${w.stats.poseMs.toFixed(0)} ms · ${w.hasFace ? 'face' : 'no face'} · ${w.hasPose ? 'pose' : 'no pose'}${w.speaking ? ' · speaking' : ''}`;
+      }
+    }
+    if (app.ab.on && app.ab.source && app.ab.viewer) {
+      if (app.source && app.source.duration !== undefined) app.ab.source.playing = app.source.playing;
+      const f = app.ab.source.update(dt);
+      if (f && f.joints && f.joints.lamp) {
+        const R = app.ab.viewer;
+        const vals = { ...restValues(R.profile), ...f.joints.lamp };
+        applyJoints(R, vals);
+      }
+      app.ab.viewer.viewer.render();
+    }
+    for (const n of ROBOT_NAMES) if (app.robots[n]) app.robots[n].viewer.render();
+    readoutAcc += dt;
+    if (readoutAcc >= 0.05) { readoutAcc = 0; updateReadouts(); }
+    fpsAcc.n++;
+    if (now - fpsAcc.t >= 1000) {
+      app.fps = (fpsAcc.n * 1000) / (now - fpsAcc.t);
+      $('fps').textContent = `${app.fps.toFixed(0)} fps`;
+      fpsAcc = { n: 0, t: now };
+    }
+  } catch (e) {
+    reportError('frame', e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UI wiring
+// ---------------------------------------------------------------------------
+function wireUi() {
+  $('source-tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-source]');
+    if (b) setSource(b.dataset.source).catch((err) => reportError('source', err));
+  });
+  $('clip-select').addEventListener('change', (e) => setClip(e.target.value).catch((err) => reportError('clip', err)));
+  $('mode-select').addEventListener('change', (e) => setMode(e.target.value));
+  $('play').addEventListener('click', () => { if (app.source && app.source.toggle) app.source.toggle(); });
+  $('loop').addEventListener('change', (e) => { app.loop = e.target.checked; if (app.source && 'loop' in app.source) app.source.loop = app.loop; });
+  $('scrub').addEventListener('input', (e) => { if (app.source && app.source.seek) app.source.seek(parseFloat(e.target.value)); });
+  $('speed').addEventListener('input', (e) => {
+    app.speed = parseFloat(e.target.value);
+    $('speed-val').textContent = `${app.speed.toFixed(2)}×`;
+    if (app.source && 'speed' in app.source) app.source.speed = app.speed;
+    if (app.ab.source) app.ab.source.speed = app.speed;
+  });
+  $('ab').addEventListener('change', (e) => setAb(e.target.checked).catch((err) => reportError('A/B', err)));
+  $('ab-select').addEventListener('change', (e) => setAbClip(e.target.value).catch((err) => reportError('A/B clip', err)));
+  $('set-neutral').addEventListener('click', () => { if (app.webcam) { if (!app.webcam.setNeutral()) toast('no face tracked yet — look at the camera'); } });
+  $('arm-select').addEventListener('change', (e) => { if (app.webcam) app.webcam.arm = e.target.value; });
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !['INPUT', 'SELECT', 'BUTTON', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+      e.preventDefault();
+      if (app.source && app.source.toggle) app.source.toggle();
+    }
+  });
+  // A/B select: lamp native clips only
+  const abSel = $('ab-select');
+  abSel.innerHTML = '';
+  for (const e of app.clips.native.filter((c) => c.robot === 'lamp')) {
+    const o = document.createElement('option');
+    o.value = e.id;
+    o.textContent = e.label.replace('lamp · ', 'B: ');
+    abSel.appendChild(o);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// boot
+// ---------------------------------------------------------------------------
+async function boot() {
+  setStatus('loading robots…');
+  manifest = await fetchJsonOrNull('manifest.json');
+  if (!manifest) console.warn('[animacy] web/manifest.json missing — probing for files instead (run python web/dev/build_manifest.py)');
+  const results = await Promise.allSettled(ROBOT_NAMES.map((n) => loadRobot(n, $(`vp-${n}`))));
+  results.forEach((r, i) => {
+    const n = ROBOT_NAMES[i];
+    if (r.status === 'fulfilled') { app.robots[n] = r.value; describeRobot(r.value); }
+    else reportError(`load ${n}`, r.reason);
+  });
+  await discoverClips();
+  buildReadouts();
+  wireUi();
+  requestAnimationFrame((t) => { lastNow = t; fpsAcc.t = t; loop(t); });
+  const kind = params.get('source') || 'native';
+  if (params.get('clip')) app.clipId = params.get('clip');
+  if (params.get('mode')) setMode(params.get('mode'));
+  await setSource(kind);
+  if (params.get('ab') === '1') await setAb(true);
+  app.ready = true;
+  const loaded = Object.keys(app.robots);
+  if (loaded.length === ROBOT_NAMES.length && !app.errors.length) {
+    const s = $('status').textContent;
+    setStatus(s || 'ready', 'ok');
+  }
+}
+
+// test / debugging API
+Object.assign(app, {
+  setSource, setClip, setMode, setAb, setAbClip,
+  play: () => app.source && app.source.play && app.source.play(),
+  pause: () => app.source && app.source.pause && app.source.pause(),
+  seek: (t) => app.source && app.source.seek && app.source.seek(t),
+  getJointValues: (name) => (app.robots[name] ? { ...app.robots[name].values } : null),
+  getUrdfJoints: (name) => (app.robots[name] ? app.robots[name].viewer.getJoints() : null),
+  getChannels: () => (app.channels ? { ...app.channels } : null),
+  sourceInfo: () => ({ kind: app.sourceKind, clip: app.clipId, mode: app.mode, time: app.source && app.source.time, duration: app.source && app.source.duration, playing: app.source && app.source.playing }),
+  robotInfo: (name) => { const R = app.robots[name]; return R ? { urdfUrl: R.urdfUrl, standin: !!R.standin, missingJoints: R.missingJoints, urdfJoints: R.viewer.jointNames } : null; },
+  setView: (kind) => { for (const R of Object.values(app.robots)) R.viewer.setView(kind); if (app.ab.viewer) app.ab.viewer.viewer.setView(kind); },
+});
+
+boot().catch((e) => reportError('boot', e));

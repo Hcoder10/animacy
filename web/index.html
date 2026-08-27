@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>animacy — one motion space, any expressive robot</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23ffb86b'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%230e1117'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="css/style.css" />
+  <!-- All dependencies come from a CDN through this import map: no build step.
+       urdf-loader imports 'three/examples/jsm/loaders/STLLoader.js', so that
+       prefix is mapped as well as 'three/addons/'. Pins are also listed in README.md. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+      "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+      "urdf-loader": "https://cdn.jsdelivr.net/npm/urdf-loader@0.13.1/src/URDFLoader.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <span class="name">animacy</span>
+      <span class="tagline">one motion space, any expressive robot — human motion in, any body out</span>
+    </div>
+    <div class="topbar-right">
+      <span id="fps" class="pill" title="render frames per second">— fps</span>
+      <span id="status" class="status">loading…</span>
+    </div>
+  </header>
+
+  <main class="viewports" id="viewports">
+    <section class="viewport" id="vp-lamp" data-robot="lamp">
+      <div class="vp-label"><span class="vp-title">Autonomous Lamp</span><span class="badge" id="badge-lamp"></span></div>
+      <div class="vp-sub" id="sub-lamp"></div>
+      <div class="vp-loading" id="loading-lamp">loading URDF…</div>
+    </section>
+    <section class="viewport ab" id="vp-lamp-ab" data-robot="lamp-ab" hidden>
+      <div class="vp-label"><span class="vp-title">Lamp · B: vendor clip (raw)</span><span class="badge" id="badge-lamp-ab"></span></div>
+      <div class="vp-sub" id="sub-lamp-ab">the vendor's hand-authored CSV, played as-is</div>
+      <div class="vp-loading" id="loading-lamp-ab">loading URDF…</div>
+    </section>
+    <section class="viewport" id="vp-reachy_mini" data-robot="reachy_mini">
+      <div class="vp-label"><span class="vp-title">Reachy Mini</span><span class="badge" id="badge-reachy_mini"></span></div>
+      <div class="vp-sub" id="sub-reachy_mini"></div>
+      <div class="vp-loading" id="loading-reachy_mini">loading URDF…</div>
+    </section>
+    <div id="webcam-thumb" hidden>
+      <video id="webcam-video" playsinline muted></video>
+      <canvas id="webcam-overlay"></canvas>
+      <div class="wc-status" id="webcam-status">starting…</div>
+    </div>
+  </main>
+
+  <section class="controls">
+    <div class="row">
+      <div class="seg" id="source-tabs" role="tablist" aria-label="motion source">
+        <button data-source="native" class="active" title="the vendor's own hand-authored clips">Native clip</button>
+        <button data-source="canonical" title="human motion (captured or synthetic) retargeted through each ROBOT.md">Canonical clip</button>
+        <button data-source="webcam" title="live MediaPipe face + pose → canonical channels → both robots">Webcam live</button>
+        <button data-source="model" title="ONNX motion model: speech + text → canonical channels (not wired yet)">Model <small>(coming)</small></button>
+      </div>
+      <select id="clip-select" class="wide" aria-label="clip"></select>
+      <label class="lbl">mapping
+        <select id="mode-select" aria-label="retarget mode">
+          <option value="default">default (face + torso)</option>
+          <option value="puppet">puppet (your arm)</option>
+        </select>
+      </label>
+      <span id="webcam-controls" class="group" hidden>
+        <button id="set-neutral" title="median of the last second becomes the zero pose">Set neutral</button>
+        <label class="lbl">arm
+          <select id="arm-select" aria-label="puppet arm">
+            <option value="right">right</option>
+            <option value="left">left</option>
+            <option value="none">none</option>
+          </select>
+        </label>
+        <span id="webcam-stat" class="muted"></span>
+      </span>
+    </div>
+    <div class="row transport">
+      <button id="play" class="icon" title="play / pause (space)">❚❚</button>
+      <label class="lbl chk"><input type="checkbox" id="loop" checked /> loop</label>
+      <input type="range" id="scrub" min="0" max="1" step="0.001" value="0" aria-label="scrub" />
+      <span id="time" class="mono">0.00 / 0.00 s</span>
+      <label class="lbl">speed <input type="range" id="speed" min="0.25" max="2" step="0.05" value="1" /> <span id="speed-val" class="mono">1.00×</span></label>
+      <label class="lbl chk" title="play the vendor's raw clip on a second lamp next to the retargeted one"><input type="checkbox" id="ab" /> A/B vendor clip</label>
+      <select id="ab-select" aria-label="A/B vendor clip" disabled></select>
+    </div>
+  </section>
+
+  <section class="readouts">
+    <div class="panel" id="channels-panel">
+      <h3>canonical channels <span class="muted" id="channels-note">— docs/CANONICAL.md</span></h3>
+      <div class="bars" id="channel-bars"></div>
+    </div>
+    <div class="panel">
+      <h3>lamp joints <span class="muted">deg</span></h3>
+      <div class="bars" id="joint-bars-lamp"></div>
+    </div>
+    <div class="panel">
+      <h3>reachy mini joints <span class="muted">deg / mm</span></h3>
+      <div class="bars" id="joint-bars-reachy_mini"></div>
+    </div>
+  </section>
+
+  <div id="toast" hidden></div>
+
+  <noscript>animacy needs JavaScript (ES modules) to render the robots.</noscript>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

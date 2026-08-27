@@ -1,0 +1,280 @@
+{
+ "generated": "2026-08-26T22:15:16",
+ "robots": {
+  "lamp": {
+   "urdf": "urdf/lamp.urdf",
+   "exists": true
+  },
+  "reachy_mini": {
+   "urdf": "urdf/reachy_mini.urdf",
+   "exists": true
+  }
+ },
+ "native": {
+  "lamp": [
+   {
+    "file": "acknowledge.csv",
+    "name": "acknowledge",
+    "description": ""
+   },
+   {
+    "file": "confused.csv",
+    "name": "confused",
+    "description": ""
+   },
+   {
+    "file": "curious.csv",
+    "name": "curious",
+    "description": ""
+   },
+   {
+    "file": "excited.csv",
+    "name": "excited",
+    "description": ""
+   },
+   {
+    "file": "fear.csv",
+    "name": "fear",
+    "description": ""
+   },
+   {
+    "file": "goodbye.csv",
+    "name": "goodbye",
+    "description": ""
+   },
+   {
+    "file": "greeting.csv",
+    "name": "greeting",
+    "description": ""
+   },
+   {
+    "file": "happy_wiggle.csv",
+    "name": "happy_wiggle",
+    "description": ""
+   },
+   {
+    "file": "headshake.csv",
+    "name": "headshake",
+    "description": ""
+   },
+   {
+    "file": "idle.csv",
+    "name": "idle",
+    "description": ""
+   },
+   {
+    "file": "laugh.csv",
+    "name": "laugh",
+    "description": ""
+   },
+   {
+    "file": "listening.csv",
+    "name": "listening",
+    "description": ""
+   },
+   {
+    "file": "music_chill.csv",
+    "name": "music_chill",
+    "description": ""
+   },
+   {
+    "file": "music_classical.csv",
+    "name": "music_classical",
+    "description": ""
+   },
+   {
+    "file": "music_groove.csv",
+    "name": "music_groove",
+    "description": ""
+   },
+   {
+    "file": "music_hiphop.csv",
+    "name": "music_hiphop",
+    "description": ""
+   },
+   {
+    "file": "music_hype.csv",
+    "name": "music_hype",
+    "description": ""
+   },
+   {
+    "file": "music_jazz.csv",
+    "name": "music_jazz",
+    "description": ""
+   },
+   {
+    "file": "music_rock.csv",
+    "name": "music_rock",
+    "description": ""
+   },
+   {
+    "file": "music_waltz.csv",
+    "name": "music_waltz",
+    "description": ""
+   },
+   {
+    "file": "nod.csv",
+    "name": "nod",
+    "description": ""
+   },
+   {
+    "file": "playful.csv",
+    "name": "playful",
+    "description": ""
+   },
+   {
+    "file": "sad.csv",
+    "name": "sad",
+    "description": ""
+   },
+   {
+    "file": "scanning.csv",
+    "name": "scanning",
+    "description": ""
+   },
+   {
+    "file": "shock.csv",
+    "name": "shock",
+    "description": ""
+   },
+   {
+    "file": "shy.csv",
+    "name": "shy",
+    "description": ""
+   },
+   {
+    "file": "sleepy.csv",
+    "name": "sleepy",
+    "description": ""
+   },
+   {
+    "file": "stretching.csv",
+    "name": "stretching",
+    "description": ""
+   },
+   {
+    "file": "thinking_deep.csv",
+    "name": "thinking_deep",
+    "description": ""
+   },
+   {
+    "file": "tracking.csv",
+    "name": "tracking",
+    "description": ""
+   },
+   {
+    "file": "wake_up.csv",
+    "name": "wake_up",
+    "description": ""
+   }
+  ],
+  "reachy_mini": [
+   {
+    "file": "amazed1.json",
+    "name": "amazed1",
+    "description": "When you discover something extraordinary. It could be a new robot, or someone tells you you've been programmed with new abilities. It can also be when you admire what someone has done."
+   },
+   {
+    "file": "attentive1.json",
+    "name": "attentive1",
+    "description": "Use this when you want to show that you're listening to the conversation. You encourage the speaker to keep talking. You can follow with attentive2 if the person hasn't finished speaking."
+   },
+   {
+    "file": "boredom1.json",
+    "name": "boredom1",
+    "description": "You\u2019re about to fall asleep because the conversation is boring. Use it when no one talks to you for 2 minutes. You can follow with boredom2 if there is still no interaction."
+   },
+   {
+    "file": "cheerful1.json",
+    "name": "cheerful1",
+    "description": "It is like whistling. Use it when someone makes you a proposal that makes you happy."
+   },
+   {
+    "file": "confused1.json",
+    "name": "confused1",
+    "description": "Similar to the lost1 gesture. Use it when you don\u2019t know how to answer a question. It can be funny sometimes."
+   },
+   {
+    "file": "curious1.json",
+    "name": "curious1",
+    "description": "You look around. Use this when you\u2019re in a conversation with several people and want to glance at everyone."
+   },
+   {
+    "file": "head_tilt_roll.json",
+    "name": "head_tilt_roll",
+    "description": "A continuous side-to-side head roll (ear to shoulder)."
+   },
+   {
+    "file": "laughing1.json",
+    "name": "laughing1",
+    "description": "When someone laughs, you can mimic the laughter. Or simply laugh at a joke or funny situation."
+   },
+   {
+    "file": "no1.json",
+    "name": "no1",
+    "description": "A firm, categorical no. Like that\u2019s final."
+   },
+   {
+    "file": "proud1.json",
+    "name": "proud1",
+    "description": "You look all around with a satisfied air."
+   },
+   {
+    "file": "sad1.json",
+    "name": "sad1",
+    "description": "You\u2019re very sad and start whining."
+   },
+   {
+    "file": "simple_nod.json",
+    "name": "simple_nod",
+    "description": "A simple, continuous up-and-down nodding motion."
+   },
+   {
+    "file": "surprised1.json",
+    "name": "surprised1",
+    "description": "A reaction of surprise or amazement to something unexpected."
+   },
+   {
+    "file": "thoughtful1.json",
+    "name": "thoughtful1",
+    "description": "You look up as if searching for a new idea, especially in complex or uncertain situations."
+   },
+   {
+    "file": "welcoming1.json",
+    "name": "welcoming1",
+    "description": "A welcoming gesture to greet someone."
+   },
+   {
+    "file": "yes1.json",
+    "name": "yes1",
+    "description": "A long affirmative response. You nod to confirm what your interlocutor said."
+   }
+  ]
+ },
+ "clips": [
+  {
+   "file": "kende_interview_2014.json",
+   "name": "kende_interview_2014"
+  },
+  {
+   "file": "obama_2015_02_07.json",
+   "name": "obama_2015_02_07"
+  },
+  {
+   "file": "royal_society_cloke.json",
+   "name": "royal_society_cloke"
+  }
+ ],
+ "models": [
+  {
+   "file": "a2m.onnx",
+   "name": "a2m",
+   "bytes": 7622914
+  },
+  {
+   "file": "vq_decoder.onnx",
+   "name": "vq_decoder",
+   "bytes": 1177445
+  }
+ ]
+}

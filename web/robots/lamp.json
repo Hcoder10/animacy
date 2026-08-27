@@ -1,0 +1,246 @@
+{
+  "schema": "animacy.robot.v1",
+  "name": "lamp",
+  "display_name": "Autonomous Lamp",
+  "vendor": "Autonomous",
+  "license": "Apache-2.0",
+  "rate_hz": 30.0,
+  "description": {
+    "urdf": "urdf/lamp.urdf",
+    "mesh_scale": 1.0,
+    "up_axis": "z",
+    "viewer": {
+      "camera_distance": 0.9,
+      "ground": true
+    }
+  },
+  "joints": [
+    {
+      "name": "base_yaw",
+      "unit": "deg",
+      "min": -90.0,
+      "max": 90.0,
+      "rest": -1.8,
+      "max_speed": 250.0,
+      "urdf_joint": "base_yaw",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "base_pitch",
+      "unit": "deg",
+      "min": -90.0,
+      "max": 90.0,
+      "rest": 28.9,
+      "max_speed": 250.0,
+      "urdf_joint": "base_pitch",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "elbow_pitch",
+      "unit": "deg",
+      "min": -90.0,
+      "max": 90.0,
+      "rest": 27.6,
+      "max_speed": 250.0,
+      "urdf_joint": "elbow_pitch",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "wrist_roll",
+      "unit": "deg",
+      "min": -90.0,
+      "max": 90.0,
+      "rest": 8.2,
+      "max_speed": 250.0,
+      "urdf_joint": "wrist_roll",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "wrist_pitch",
+      "unit": "deg",
+      "min": -90.0,
+      "max": 90.0,
+      "rest": -62.4,
+      "max_speed": 250.0,
+      "urdf_joint": "wrist_pitch",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    }
+  ],
+  "retarget": {
+    "default": {
+      "base_yaw": {
+        "terms": [
+          {
+            "from": "head_yaw",
+            "gain": -0.45
+          },
+          {
+            "from": "torso_yaw",
+            "gain": -0.6
+          }
+        ],
+        "offset": 0.0,
+        "min": -90.0,
+        "max": 90.0,
+        "deadband": 0.3,
+        "smooth_hz": 5.0
+      },
+      "wrist_roll": {
+        "terms": [
+          {
+            "from": "head_yaw",
+            "gain": -1.0
+          },
+          {
+            "from": "head_roll",
+            "gain": -0.3
+          }
+        ],
+        "offset": 0.0,
+        "min": -60.0,
+        "max": 70.0,
+        "deadband": 0.3,
+        "smooth_hz": 6.0
+      },
+      "wrist_pitch": {
+        "terms": [
+          {
+            "from": "head_pitch",
+            "gain": -0.9
+          },
+          {
+            "from": "brow_l",
+            "gain": -5.0
+          },
+          {
+            "from": "brow_r",
+            "gain": -5.0
+          },
+          {
+            "from": "torso_lean_fwd",
+            "gain": 0.5
+          }
+        ],
+        "offset": 0.0,
+        "min": -85.0,
+        "max": 30.0,
+        "deadband": 0.0,
+        "smooth_hz": 6.0
+      },
+      "base_pitch": {
+        "terms": [
+          {
+            "from": "torso_lean_fwd",
+            "gain": 1.0
+          },
+          {
+            "from": "head_x",
+            "gain": 0.12
+          }
+        ],
+        "offset": 0.0,
+        "min": 0.0,
+        "max": 75.0,
+        "deadband": 0.0,
+        "smooth_hz": 4.0
+      },
+      "elbow_pitch": {
+        "terms": [
+          {
+            "from": "head_z",
+            "gain": 0.35
+          },
+          {
+            "from": "torso_lean_fwd",
+            "gain": 0.4
+          },
+          {
+            "from": "mouth_open",
+            "gain": 6.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -5.0,
+        "max": 62.0,
+        "deadband": 0.0,
+        "smooth_hz": 4.0
+      }
+    },
+    "puppet": {
+      "base_yaw": {
+        "terms": [
+          {
+            "from": "shoulder_yaw",
+            "gain": -1.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -90.0,
+        "max": 90.0,
+        "deadband": 0.0,
+        "smooth_hz": 6.0
+      },
+      "base_pitch": {
+        "terms": [
+          {
+            "from": "shoulder_pitch",
+            "gain": 0.6
+          }
+        ],
+        "offset": -25.0,
+        "min": 0.0,
+        "max": 80.0,
+        "deadband": 0.0,
+        "smooth_hz": 6.0
+      },
+      "elbow_pitch": {
+        "terms": [
+          {
+            "from": "elbow_flex",
+            "gain": 0.6
+          }
+        ],
+        "offset": -25.0,
+        "min": -10.0,
+        "max": 65.0,
+        "deadband": 0.0,
+        "smooth_hz": 6.0
+      },
+      "wrist_roll": {
+        "terms": [
+          {
+            "from": "wrist_roll",
+            "gain": -1.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -70.0,
+        "max": 85.0,
+        "deadband": 0.0,
+        "smooth_hz": 8.0
+      },
+      "wrist_pitch": {
+        "terms": [
+          {
+            "from": "wrist_pitch",
+            "gain": -1.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -90.0,
+        "max": 30.0,
+        "deadband": 0.0,
+        "smooth_hz": 8.0
+      }
+    }
+  },
+  "native_clips": {
+    "dir": "clips/native",
+    "format": "autonomous_os_csv"
+  }
+}

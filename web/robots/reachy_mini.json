@@ -1,0 +1,356 @@
+{
+  "schema": "animacy.robot.v1",
+  "name": "reachy_mini",
+  "display_name": "Reachy Mini",
+  "vendor": "Pollen Robotics / Hugging Face",
+  "license": "Apache-2.0",
+  "rate_hz": 30.0,
+  "description": {
+    "urdf": "urdf/reachy_mini.urdf",
+    "mesh_scale": 1.0,
+    "up_axis": "z",
+    "viewer": {
+      "camera_distance": 0.6,
+      "ground": true
+    }
+  },
+  "joints": [
+    {
+      "name": "head_x",
+      "unit": "mm",
+      "min": -25.0,
+      "max": 25.0,
+      "rest": 0.0,
+      "max_speed": 150.0,
+      "urdf_joint": "head_x",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "head_y",
+      "unit": "mm",
+      "min": -25.0,
+      "max": 25.0,
+      "rest": 0.0,
+      "max_speed": 150.0,
+      "urdf_joint": "head_y",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "head_z",
+      "unit": "mm",
+      "min": -15.0,
+      "max": 25.0,
+      "rest": 0.0,
+      "max_speed": 150.0,
+      "urdf_joint": "head_z",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "head_roll",
+      "unit": "deg",
+      "min": -30.0,
+      "max": 30.0,
+      "rest": 0.0,
+      "max_speed": 200.0,
+      "urdf_joint": "head_roll",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "head_pitch",
+      "unit": "deg",
+      "min": -30.0,
+      "max": 30.0,
+      "rest": 0.0,
+      "max_speed": 200.0,
+      "urdf_joint": "head_pitch",
+      "urdf_sign": -1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "head_yaw",
+      "unit": "deg",
+      "min": -60.0,
+      "max": 60.0,
+      "rest": 0.0,
+      "max_speed": 200.0,
+      "urdf_joint": "head_yaw",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "body_yaw",
+      "unit": "deg",
+      "min": -120.0,
+      "max": 120.0,
+      "rest": 0.0,
+      "max_speed": 150.0,
+      "urdf_joint": "body_yaw",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "antenna_left",
+      "unit": "deg",
+      "min": -140.0,
+      "max": 140.0,
+      "rest": 0.0,
+      "max_speed": 600.0,
+      "urdf_joint": "antenna_left",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "antenna_right",
+      "unit": "deg",
+      "min": -140.0,
+      "max": 140.0,
+      "rest": 0.0,
+      "max_speed": 600.0,
+      "urdf_joint": "antenna_right",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    }
+  ],
+  "retarget": {
+    "default": {
+      "head_yaw": {
+        "terms": [
+          {
+            "from": "head_yaw",
+            "gain": 0.8
+          }
+        ],
+        "offset": 0.0,
+        "min": -60.0,
+        "max": 60.0,
+        "deadband": 0.3,
+        "smooth_hz": 6.0
+      },
+      "head_pitch": {
+        "terms": [
+          {
+            "from": "head_pitch",
+            "gain": 0.8
+          }
+        ],
+        "offset": 0.0,
+        "min": -30.0,
+        "max": 30.0,
+        "deadband": 0.3,
+        "smooth_hz": 6.0
+      },
+      "head_roll": {
+        "terms": [
+          {
+            "from": "head_roll",
+            "gain": 0.8
+          }
+        ],
+        "offset": 0.0,
+        "min": -30.0,
+        "max": 30.0,
+        "deadband": 0.3,
+        "smooth_hz": 6.0
+      },
+      "head_x": {
+        "terms": [
+          {
+            "from": "head_x",
+            "gain": 0.2
+          }
+        ],
+        "offset": 0.0,
+        "min": -25.0,
+        "max": 25.0,
+        "deadband": 0.0,
+        "smooth_hz": 4.0
+      },
+      "head_y": {
+        "terms": [
+          {
+            "from": "head_y",
+            "gain": 0.2
+          }
+        ],
+        "offset": 0.0,
+        "min": -25.0,
+        "max": 25.0,
+        "deadband": 0.0,
+        "smooth_hz": 4.0
+      },
+      "head_z": {
+        "terms": [
+          {
+            "from": "head_z",
+            "gain": 0.25
+          }
+        ],
+        "offset": 0.0,
+        "min": -15.0,
+        "max": 25.0,
+        "deadband": 0.0,
+        "smooth_hz": 4.0
+      },
+      "body_yaw": {
+        "terms": [
+          {
+            "from": "torso_yaw",
+            "gain": 0.8
+          },
+          {
+            "from": "head_yaw",
+            "gain": 0.25
+          }
+        ],
+        "offset": 0.0,
+        "min": -120.0,
+        "max": 120.0,
+        "deadband": 0.0,
+        "smooth_hz": 3.0
+      },
+      "antenna_left": {
+        "terms": [
+          {
+            "from": "brow_l",
+            "gain": 90.0
+          },
+          {
+            "from": "head_roll",
+            "gain": -0.5
+          },
+          {
+            "from": "mouth_open",
+            "gain": 15.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -140.0,
+        "max": 140.0,
+        "deadband": 0.0,
+        "smooth_hz": 8.0
+      },
+      "antenna_right": {
+        "terms": [
+          {
+            "from": "brow_r",
+            "gain": 90.0
+          },
+          {
+            "from": "head_roll",
+            "gain": 0.5
+          },
+          {
+            "from": "mouth_open",
+            "gain": 15.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -140.0,
+        "max": 140.0,
+        "deadband": 0.0,
+        "smooth_hz": 8.0
+      }
+    },
+    "puppet": {
+      "head_yaw": {
+        "terms": [
+          {
+            "from": "shoulder_yaw",
+            "gain": 0.6
+          }
+        ],
+        "offset": 0.0,
+        "min": -60.0,
+        "max": 60.0,
+        "deadband": 0.0,
+        "smooth_hz": 6.0
+      },
+      "head_pitch": {
+        "terms": [
+          {
+            "from": "wrist_pitch",
+            "gain": 0.5
+          }
+        ],
+        "offset": 0.0,
+        "min": -30.0,
+        "max": 30.0,
+        "deadband": 0.0,
+        "smooth_hz": 6.0
+      },
+      "head_roll": {
+        "terms": [
+          {
+            "from": "wrist_roll",
+            "gain": 0.4
+          }
+        ],
+        "offset": 0.0,
+        "min": -30.0,
+        "max": 30.0,
+        "deadband": 0.0,
+        "smooth_hz": 6.0
+      },
+      "head_z": {
+        "terms": [
+          {
+            "from": "shoulder_pitch",
+            "gain": 0.25
+          }
+        ],
+        "offset": -15.0,
+        "min": -15.0,
+        "max": 25.0,
+        "deadband": 0.0,
+        "smooth_hz": 4.0
+      },
+      "head_x": {
+        "terms": [
+          {
+            "from": "elbow_flex",
+            "gain": -0.2
+          }
+        ],
+        "offset": 20.0,
+        "min": -25.0,
+        "max": 25.0,
+        "deadband": 0.0,
+        "smooth_hz": 4.0
+      },
+      "antenna_left": {
+        "terms": [
+          {
+            "from": "hand_open",
+            "gain": 100.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -140.0,
+        "max": 140.0,
+        "deadband": 0.0,
+        "smooth_hz": 8.0
+      },
+      "antenna_right": {
+        "terms": [
+          {
+            "from": "hand_open",
+            "gain": 100.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -140.0,
+        "max": 140.0,
+        "deadband": 0.0,
+        "smooth_hz": 8.0
+      }
+    }
+  },
+  "native_clips": {
+    "dir": "clips/native",
+    "format": "json"
+  }
+}
