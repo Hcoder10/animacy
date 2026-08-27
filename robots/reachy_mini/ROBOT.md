@@ -45,9 +45,9 @@ retarget:
   # and breathes the head while the person is still; `soft_limit` (§soft) is a
   # tanh knee over the last 15% of each range.
   default:
-    head_yaw:   { from: head_yaw, gain: 1.591, deadband: 0.3, spring: { hz: 4.0, zeta: 0.6 }, soft_limit: 0.15, idle: { amp: 1.0, hz: 0.15 }, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
-    head_pitch: { from: head_pitch, gain: 1.883, deadband: 0.3, spring: { hz: 4.0, zeta: 0.6 }, soft_limit: 0.15, idle: { amp: 1.0, hz: 0.22 }, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
-    head_roll:  { from: head_roll, gain: 1.547, deadband: 0.3, spring: { hz: 4.0, zeta: 0.6 }, soft_limit: 0.15, idle: { amp: 0.8, hz: 0.17 }, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
+    head_yaw:   { from: head_yaw, gain: 1.7981, deadband: 0.3, spring: { hz: 4.0, zeta: 0.6 }, soft_limit: 0.15, idle: { amp: 1.0, hz: 0.15 }, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
+    head_pitch: { from: head_pitch, gain: 2.097, deadband: 0.3, spring: { hz: 4.0, zeta: 0.6 }, soft_limit: 0.15, idle: { amp: 1.0, hz: 0.22 }, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
+    head_roll:  { from: head_roll, gain: 1.7338, deadband: 0.3, spring: { hz: 4.0, zeta: 0.6 }, soft_limit: 0.15, idle: { amp: 0.8, hz: 0.17 }, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
     # Whole-body participation, from Pollen's library (pooled regression on the
     # 16 clips, values around the library median): the head moves forward and
     # up when it pitches up (head_x ≈ +0.31 mm/deg, head_z ≈ +0.23 mm/deg of
@@ -55,25 +55,25 @@ retarget:
     # r 0.69) — a nod is a bob, a look is a turn.
     head_x:
       mix:
-        - { from: head_x, gain: 0.1528 }  # fitted by scripts/retarget_fit.py 2026-08-27
-        - { from: head_pitch, gain: 0.5195 }   # 0.31 × the head's 1.617  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_x, gain: 0.17955 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_pitch, gain: 0.61044 }   # 0.31 × the head's 1.617  # fitted by scripts/retarget_fit.py 2026-08-27
       spring: { hz: 3.0, zeta: 0.8 }
       idle: { amp: 1.5, hz: 0.2 }
       soft_limit: 0.15
       settle: { seconds: 0.6 }
-    head_y:     { from: head_y, gain: 0.2076, spring: { hz: 3.0, zeta: 0.8 }, soft_limit: 0.15, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
+    head_y:     { from: head_y, gain: 0.23165, spring: { hz: 3.0, zeta: 0.8 }, soft_limit: 0.15, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
     head_z:
       mix:
-        - { from: head_z, gain: 0.2014 }  # fitted by scripts/retarget_fit.py 2026-08-27
-        - { from: head_pitch, gain: 0.2936 }   # 0.23 × the head's 1.617  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_z, gain: 0.22555 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_pitch, gain: 0.3288 }   # 0.23 × the head's 1.617  # fitted by scripts/retarget_fit.py 2026-08-27
       spring: { hz: 3.0, zeta: 0.8 }
       idle: { amp: 2.0, hz: 0.22 }
       soft_limit: 0.15
       settle: { seconds: 0.6 }
     body_yaw:
       mix:
-        - { from: torso_yaw, gain: 1.299 }  # fitted by scripts/retarget_fit.py 2026-08-27
-        - { from: head_yaw, gain: 0.814 }   # 0.65 × the head's 1.687: big turns bring the body along  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: torso_yaw, gain: 1.5858 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_yaw, gain: 0.99373 }   # 0.65 × the head's 1.687: big turns bring the body along  # fitted by scripts/retarget_fit.py 2026-08-27
       spring: { hz: 2.0, zeta: 0.9 }
       soft_limit: 0.15
       settle: { seconds: 0.6 }

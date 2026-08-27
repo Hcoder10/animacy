@@ -271,10 +271,13 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
              top_p: float = 0.9, archs: Optional[Sequence[str]] = None, max_runs: Optional[int] = None,
              verbose: bool = True, repeat_penalty: float = 0.0, stay_bias: float = 0.0, stay_energy: float = -0.3,
              settle_s: float = 0.0, pitch_floor: Optional[float] = None, amplitude=1.0,
-             intent_from_audio: bool = False) -> Dict:
+             intent_from_audio: bool = False, proto_weight: float = 0.0, energy_floor: Optional[float] = None) -> Dict:
     """``intent_from_audio``: the intent layer with no text - retrieval uses the query window's
     own audio arousal for its bonus, and every source's amplitude follows the amplitude rule on
-    the run's mean audio arousal (what ``animacy say`` would do without a text intent)."""
+    the run's mean audio arousal (what ``animacy say`` would do without a text intent).
+    ``proto_weight``: gesture-prototype bonus in retrieval with a pseudo-intent from the run's
+    audio arousal (> 0.6 excitement, < 0.3 thinking, else agreement) - the held-out clips have
+    no text, this is the closest honest proxy. ``energy_floor``: per-utterance floor on every source."""
     rng = np.random.default_rng(seed)
     stats = model.vq.stats
     unigram = model.info.get("unigram")
@@ -306,26 +309,31 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
         fs = block_shuffle(f, SHUFFLE_BLOCK, rng)
         ss = block_shuffle(s, SHUFFLE_BLOCK, rng)
         amp, amp_s, use_aa = amplitude, amplitude, False
-        if intent_from_audio and index is not None and len(index) and index.arousal is not None:
+        tag_run, tag_shuf = None, None
+        if (intent_from_audio or proto_weight > 0) and index is not None and len(index) and index.arousal is not None:
             from .intent import amplitude_for
 
             win = int(index.meta.get("win", 30))
             ar_run = float(np.mean([index.audio_arousal(f[i:i + win]) for i in range(0, max(1, n - win + 1), win)]))
             ar_shuf = float(np.mean([index.audio_arousal(fs[i:i + win]) for i in range(0, max(1, n - win + 1), win)]))
-            amp, amp_s, use_aa = amplitude_for(ar_run), amplitude_for(ar_shuf), True
             audio_arousal_runs.append(ar_run)
-        pp = dict(settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amp)
-        pp_s = dict(settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amp_s)
+            if intent_from_audio:
+                amp, amp_s, use_aa = amplitude_for(ar_run), amplitude_for(ar_shuf), True
+            if proto_weight > 0:
+                pseudo = lambda a: "excitement" if a > 0.6 else ("thinking" if a < 0.3 else "agreement")  # noqa: E731
+                tag_run, tag_shuf = pseudo(ar_run), pseudo(ar_shuf)
+        pp = dict(settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amp, energy_floor=energy_floor, energy_stats=stats)
+        pp_s = dict(settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amp_s, energy_floor=energy_floor, energy_stats=stats)
         kw = dict(temperature=temperature, bigram_weight=bigram_weight, top_p=top_p, seed=seed + k, repeat_penalty=repeat_penalty,
-                  stay_bias=stay_bias, stay_energy=stay_energy)
+                  stay_bias=stay_bias, stay_energy=stay_energy, settle_s=settle_s, pitch_floor=pitch_floor, energy_floor=energy_floor)
         for arch in archs:
             cn = ARCH_COND[arch]
-            gen[cn].append(generate_motion(model, f, s, causal=False, arch=arch, **kw, **pp)[0])
-            gen[f"{cn}_shuffled"].append(generate_motion(model, fs, ss, causal=False, arch=arch, **kw, **pp_s)[0])
-            gen[f"{cn}_causal"].append(generate_motion(model, f, s, causal=True, arch=arch, **kw, **pp)[0])
+            gen[cn].append(generate_motion(model, f, s, causal=False, arch=arch, amplitude=amp, **kw)[0])
+            gen[f"{cn}_shuffled"].append(generate_motion(model, fs, ss, causal=False, arch=arch, amplitude=amp_s, **kw)[0])
+            gen[f"{cn}_causal"].append(generate_motion(model, f, s, causal=True, arch=arch, amplitude=amp, **kw)[0])
         if "retrieval" in gen:
-            gen["retrieval"].append(postprocess_motion(index.query(f, s, use_audio_arousal=use_aa), s, f, **pp))
-            gen["retrieval_shuffled"].append(postprocess_motion(index.query(fs, ss, use_audio_arousal=use_aa), ss, fs, **pp_s))
+            gen["retrieval"].append(postprocess_motion(index.query(f, s, use_audio_arousal=use_aa, intent_tag=tag_run, proto_weight=proto_weight), s, f, **pp))
+            gen["retrieval_shuffled"].append(postprocess_motion(index.query(fs, ss, use_audio_arousal=use_aa, intent_tag=tag_shuf, proto_weight=proto_weight), ss, fs, **pp_s))
         gts.append(gt)
         spk.append(s)
 
@@ -378,7 +386,7 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
                      "stay_bias": stay_bias, "stay_energy": stay_energy},
         "postprocess": {"settle_s": settle_s, "pitch_floor": pitch_floor,
                         "amplitude": (float(amplitude) if np.isscalar(amplitude) else [float(x) for x in amplitude]),
-                        "intent_from_audio": intent_from_audio,
+                        "intent_from_audio": intent_from_audio, "proto_weight": proto_weight, "energy_floor": energy_floor,
                         "audio_arousal_mean": (float(np.mean(audio_arousal_runs)) if audio_arousal_runs else None)},
         "codes": codes_out,
     }

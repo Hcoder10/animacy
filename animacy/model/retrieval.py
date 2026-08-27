@@ -88,10 +88,7 @@ def _reversals(x: np.ndarray, min_amp: float) -> int:
     x = np.asarray(x, np.float64)
     if len(x) < 3:
         return 0
-    v = np.diff(x)
-    sgn = np.sign(v)
-    sgn = sgn[sgn != 0]
-    n, last_turn, run = 0, 0.0, 0.0
+    n, run = 0, 0.0
     pos = x[0]
     for i in range(1, len(x)):
         d = x[i] - pos

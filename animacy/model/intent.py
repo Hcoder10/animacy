@@ -67,6 +67,9 @@ ELLIPSIS_AROUSAL = -0.10        # a pause ("...") lowers energy and counts as a 
 CAPS_AROUSAL = 0.05             # per ALL-CAPS word (max 2 counted)
 QUESTION_AROUSAL = 0.05
 AMPLITUDE_BASE, AMPLITUDE_GAIN, AMPLITUDE_CAP = 0.8, 0.5, 1.3
+# amplitude TIERS by intent (run-3 order): the blind judge rewards sculpted, large gestures; the
+# retarget's rate limit still bounds the result. These replace the arousal rule for the amplitude.
+AMPLITUDE_TIERS = {"excitement": 1.45, "greeting": 1.25, "agreement": 1.15, "doubt": 1.15, "thinking": 0.9, "neutral": 1.0}
 NEGATION = r"(?<!not )(?<!n't )(?<!never )"      # "not sure" / "isn't right" do not count as agreement
 NEGATION_WORDS = re.compile(r"\b(?:not|no|never|nothing|nobody)\b|n't\b")
 
@@ -165,7 +168,7 @@ def analyse(text: str, override: Optional[str] = None) -> Intent:
     arousal = float(max(0.0, min(1.0, arousal)))
     valence = BASE_VALENCE[tag] + 0.1 * min(3, _count(t, POSITIVE)) - 0.1 * min(3, _count(t, NEGATIVE))
     valence = float(max(-1.0, min(1.0, valence)))
-    return Intent(tag=tag, arousal=arousal, valence=valence, amplitude=amplitude_for(arousal), hits=hits, text=raw,
+    return Intent(tag=tag, arousal=arousal, valence=valence, amplitude=AMPLITUDE_TIERS[tag], hits=hits, text=raw,
                   overridden=overridden)
 
 
@@ -205,7 +208,10 @@ def describe(arousal_weight: float, thinking_weight: float) -> Dict:
             "arousal": f"base_arousal[tag] + {EXCLAMATION_AROUSAL} per '!' (max 2) + {CAPS_AROUSAL} per ALL-CAPS word (max 2) "
                        f"{ELLIPSIS_AROUSAL:+} if '...' present {QUESTION_AROUSAL:+} if '?' present, clamped to [0, 1]",
             "valence": "base_valence[tag] + 0.1 per positive word (max 3) - 0.1 per negative word (max 3), clamped to [-1, 1]",
-            "amplitude": f"min({AMPLITUDE_CAP}, {AMPLITUDE_BASE} + {AMPLITUDE_GAIN} * arousal), applied to the decoded canonical motion of every source",
+            "amplitude": "tier by tag (amplitude_tiers), applied to the decoded canonical motion of every source; the retarget's "
+                         "max_speed still bounds the result",
+            "amplitude_tiers": AMPLITUDE_TIERS,
+            "amplitude_arousal_rule_legacy": f"min({AMPLITUDE_CAP}, {AMPLITUDE_BASE} + {AMPLITUDE_GAIN} * arousal) (amplitude_for; not used for the tier)",
             "retrieval_bonus": f"{arousal_weight} * (1 - |window_arousal - target_arousal|) added to the cosine score of every index window",
             "thinking_bonus": f"{thinking_weight} * max(0, still_then_move) when tag == thinking (windows whose second half moves more than their first)",
             "override": "animacy say --intent <tag> forces the tag; punctuation modifiers still apply",

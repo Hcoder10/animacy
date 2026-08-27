@@ -165,10 +165,34 @@ the blind judge's scores is measured by the grader, not here.
 Shipped bundle (`web/models`, float16 weights, float32 compute, verified against
 torch: AR logits diff 3.0e-3 with 100 % identical sampled codes): `a2m_ar.onnx`
 7.67 MB, `vq_decoder.onnx` 1.18 MB, `bigram.bin` 0.52 MB, `retrieval.{bin,json}`
-7.62 MB (all 96 clips, hold-outs **included**, 5000 windows, 40 % per-speaker
-cap not binding), `model.json` (archs `["ar"]`, `default_arch = ar`,
-`default_backend = retrieval`, intent + postprocess blocks). The feed-forward
-`a2m` stays in `checkpoints/` only.
+7.62 MB (5000 windows, see the index paragraph below), `model.json` (archs
+`["ar"]`, `default_arch = ar`, `default_backend = retrieval`, intent +
+postprocess blocks). The feed-forward `a2m` stays in `checkpoints/` only.
+
+**Retrieval index refresh (2026-08-27, the product path).** After the owner
+watched retrieval and the AR model side by side on the physical robot,
+retrieval was kept as the product and the index rebuilt with
+`scripts/model_index_refresh.py` from the 73 clips the fetcher marks `kept`
+(319.7 face-valid minutes; 25 clips dropped by its face-valid / duration gate;
+40 % per-speaker cap not binding, obama is 19 of 73 clips). Two indexes from
+the same windows: the **server-side** index in `checkpoints/v2a/` keeps every
+window (75,372 incl. left-right mirrors, 115 MB on disk, ~163 MB in RAM as
+float32 keys + float16 motion; one 75k x 330 matvec per 0.5 s hop) and is what
+`animacy say --checkpoint checkpoints/v2a` uses; the **web** index is a uniform
+5000-window subsample (7.62 MB). Both hold-outs are included in the shipped
+indexes; the held-out rows below use a 71-clip index that excludes them
+(shipped settle + pitch floor, amplitude 1.0, no intent bias):
+
+| held-out speaker | retrieval beat recall vs shuffled (margin) | precision | stillness (truth) | W1 rel |
+|---|---|---|---|---|
+| obama_2015 | 0.445 / 0.424 (+0.02) | 0.54 | 0.16 (0.10) | 0.20 |
+| kende | 0.455 / 0.462 (-0.01) | 0.38 | 0.15 (0.10) | 1.08 |
+
+Against the earlier 94-clip index (obama +0.01 / W1 0.25, kende -0.02 / W1
+1.20) the velocity statistics improve slightly on both speakers and nothing
+regresses; the beat margin stays at noise level, as expected for a source that
+is aligned by construction but judged against a shuffled soundtrack. The same
+command refreshes both indexes as the harvest grows the corpus.
 
 Intent lexicon integrity (`intent.v3`): `animacy/model/intent.py` holds only
 generic cue families per tag (hi/hey/hello/welcome; yes/exactly/right/agree/of

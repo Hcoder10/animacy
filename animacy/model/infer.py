@@ -84,26 +84,52 @@ def sample_codes(logits: np.ndarray, bigram_logp: Optional[np.ndarray], temperat
 PITCH_IDX = MODEL_CHANNELS.index("head_pitch")
 BASELINE_HZ = 0.3          # the same cutoff the pose channels were detrended with (data.DETREND_HZ)
 QUIET_ENERGY = -0.3        # normalised log energy below this = silence (feature 64)
+ENERGY_CHANNELS = ["head_yaw", "head_pitch", "head_roll", "head_x", "head_y", "head_z", "brow_l", "brow_r", "brow_furrow"]
+ENERGY_IDX = [MODEL_CHANNELS.index(c) for c in ENERGY_CHANNELS]
+ENERGY_FLOOR_CAP = 2.0     # the whole-utterance scale never exceeds this (and never goes below 1.0)
+
+
+def motion_energy(motion: np.ndarray, stats: Optional[Dict] = None) -> float:
+    """Per-utterance energy: RMS of the mean-removed motion over the 6 head channels + 3 brow
+    channels, each standardised by the corpus std (so mm and degrees weigh alike). This is
+    the quantity ``energy_floor`` is compared against."""
+    m = np.asarray(motion, np.float64)[:, ENERGY_IDX]
+    if len(m) == 0:
+        return 0.0
+    if stats is not None:
+        m = m / np.asarray(stats["std"], np.float64)[ENERGY_IDX]
+    m = m - m.mean(axis=0, keepdims=True)
+    return float(np.sqrt(np.mean(np.square(m))))
 
 
 def postprocess_motion(motion: np.ndarray, speaking: Optional[np.ndarray] = None, features: Optional[np.ndarray] = None,
                        settle_s: float = 0.0, pitch_floor: Optional[float] = None, amplitude=1.0,
-                       rate_hz: float = RATE_HZ) -> np.ndarray:
+                       rate_hz: float = RATE_HZ, energy_floor: Optional[float] = None,
+                       energy_stats: Optional[Dict] = None) -> np.ndarray:
     """Generation-side options on a [T, 14] canonical-unit motion (applied to every source:
-    model, AR, retrieval):
+    model, AR, retrieval), in this order:
 
-    * ``amplitude``: per-channel scale (scalar or [14]); 1.2 = a fifth more motion.
+    * ``amplitude``: per-channel scale (scalar or [14]); the intent tier (1.45 excitement ... 0.9 thinking).
+    * ``energy_floor``: if the utterance's ``motion_energy`` (standardised, mean-removed RMS over
+      head + brows) is below this reference (the corpus's 60th percentile over 3 s windows, i.e.
+      "a clearly moving human"), the WHOLE utterance is scaled by one scalar in [1, 2] to reach
+      it. 0 / None disables.
     * ``pitch_floor``: the low-frequency (``BASELINE_HZ``) mean of ``head_pitch`` is never let
-      below this many degrees - a slow droop through an affirmation reads as a bow.
-    * ``settle_s``: over the last ``settle_s`` seconds of speech (last ``speaking`` frame, else
-      last frame with energy above ``QUIET_ENERGY``, else the clip end) the motion blends to
-      neutral (0) and stays there, so a clip ends attentive instead of mid-gesture.
+      below this many degrees - the baseline is LIFTED where it is low; nothing is flattened.
+    * ``settle_s``: only after speech has ENDED (last ``speaking`` frame, else last frame with
+      energy above ``QUIET_ENERGY``; never mid-utterance) the motion blends to neutral (0)
+      over ``settle_s`` seconds and stays there, so a clip ends attentive instead of mid-gesture.
+      If speech runs to the clip end nothing is settled.
     """
     m = np.array(motion, dtype=np.float32, copy=True)
     T, C = m.shape
     amp = np.broadcast_to(np.asarray(amplitude, np.float32), (C,))
     if np.any(amp != 1.0):
         m = m * amp
+    if energy_floor and T > 1:
+        e = motion_energy(m, energy_stats)
+        if e > 1e-6 and e < energy_floor:
+            m = m * float(min(ENERGY_FLOOR_CAP, max(1.0, energy_floor / e)))
     if pitch_floor is not None and T > 0:
         p = m[:, PITCH_IDX].astype(np.float64)
         if T >= 12:
@@ -122,12 +148,13 @@ def postprocess_motion(motion: np.ndarray, speaking: Optional[np.ndarray] = None
         elif features is not None and len(features) == T and features.shape[1] > 64:
             idx = np.nonzero(np.asarray(features)[:, 64] > QUIET_ENERGY)[0]
             end = int(idx[-1]) + 1 if len(idx) else T
-        w = np.zeros(T, np.float32)
-        a0 = max(0, end - n)
-        if end > a0:
-            w[a0:end] = np.linspace(0.0, 1.0, n + 1, dtype=np.float32)[1:][-(end - a0):]
-        w[end:] = 1.0
-        m = m * (1.0 - w)[:, None]
+        if end < T:                                   # only after speech has ended, never mid-utterance
+            w = np.zeros(T, np.float32)
+            ramp = np.linspace(0.0, 1.0, n + 1, dtype=np.float32)[1:]
+            k = min(n, T - end)
+            w[end:end + k] = ramp[:k]
+            w[end + k:] = 1.0
+            m = m * (1.0 - w)[:, None]
     return m
 
 
@@ -167,7 +194,7 @@ def generate_motion(model: MotionModel, features: np.ndarray, speaking: np.ndarr
                     smooth_hz: Optional[float] = DEFAULT_SMOOTH_HZ, arch: str = "ff",
                     top_p: float = 0.9, repeat_penalty: float = 0.0, stay_bias: float = 0.0,
                     stay_energy: float = -0.3, settle_s: float = 0.0, pitch_floor: Optional[float] = None,
-                    amplitude=1.0) -> Tuple[np.ndarray, np.ndarray]:
+                    amplitude=1.0, energy_floor: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
     """[T, 66], [T] on the 30 Hz grid -> (motion [T, 14] raw units, codes [T//2]).
     ``arch`` = "ff" (per-step logits + bigram prior) or "ar" (autoregressive: temperature, top-p,
     repeat penalty, stay bias when the audio is quieter than ``stay_energy``). The last three
@@ -194,8 +221,9 @@ def generate_motion(model: MotionModel, features: np.ndarray, speaking: np.ndarr
     if len(m) < T:                                               # odd tail tick: hold the last frame
         m = np.concatenate([m, np.repeat(m[-1:], T - len(m), axis=0)], axis=0)
     m = m[:T]
-    if settle_s or pitch_floor is not None or np.any(np.asarray(amplitude) != 1.0):
-        m = postprocess_motion(m, s, f, settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amplitude)
+    if settle_s or pitch_floor is not None or energy_floor or np.any(np.asarray(amplitude) != 1.0):
+        m = postprocess_motion(m, s, f, settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amplitude,
+                               energy_floor=energy_floor, energy_stats=model.vq.stats)
     return m.astype(np.float32), codes
 
 
@@ -204,7 +232,8 @@ def generate(model: MotionModel, features: np.ndarray, speaking: np.ndarray, cau
              smooth_hz: Optional[float] = DEFAULT_SMOOTH_HZ, arch: Optional[str] = None,
              top_p: float = 0.9, repeat_penalty: Optional[float] = None, stay_bias: Optional[float] = None,
              stay_energy: Optional[float] = None, settle_s: Optional[float] = None,
-             pitch_floor: Optional[float] = None, amplitude=None, intent=None) -> HumanClip:
+             pitch_floor: Optional[float] = None, amplitude=None, intent=None,
+             energy_floor: Optional[float] = None) -> HumanClip:
     """The public entry point: a valid ``HumanClip`` in the canonical space.
     ``arch``, the AR sampling knobs and the post-processing options default to the checkpoint's
     recorded values (``model_info.json`` -> ``sampling`` / ``postprocess``). ``intent`` (the
@@ -238,15 +267,18 @@ def generate(model: MotionModel, features: np.ndarray, speaking: np.ndarray, cau
         pitch_floor = pp.get("pitch_floor", None)
     if amplitude is None:
         amplitude = pp.get("amplitude", 1.0)
+    if energy_floor is None:
+        energy_floor = pp.get("energy_floor", None)
     m, codes = generate_motion(model, features, speaking, causal, temperature, bigram_weight, seed, smooth_hz,
                                arch=arch, top_p=top_p, repeat_penalty=repeat_penalty, stay_bias=stay_bias, stay_energy=stay_energy,
-                               settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amplitude)
+                               settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amplitude, energy_floor=energy_floor)
     clip = motion_to_clip(m, speaking, RATE_HZ, source="model", arch=arch, mode="listen" if causal else "talk",
                           seed=int(seed), temperature=float(temperature), bigram_weight=float(bigram_weight),
                           top_p=float(top_p), repeat_penalty=float(repeat_penalty), stay_bias=float(stay_bias),
                           stay_energy=float(stay_energy), settle_s=float(settle_s),
                           pitch_floor=(None if pitch_floor is None else float(pitch_floor)),
                           amplitude=(float(amplitude) if np.isscalar(amplitude) else [float(x) for x in amplitude]),
+                          energy_floor=(None if not energy_floor else float(energy_floor)), energy=motion_energy(m, model.vq.stats),
                           n_codes_sampled=int(len(codes)), distinct_codes=int(len(set(codes.tolist()))))
     if intent_obj is not None:
         clip.meta["intent"] = {k: v for k, v in intent_obj.to_dict().items() if k != "hits"}
@@ -255,16 +287,23 @@ def generate(model: MotionModel, features: np.ndarray, speaking: np.ndarray, cau
 
 def retrieve(index, features: np.ndarray, speaking: np.ndarray, model: Optional[MotionModel] = None,
              intent=None, settle_s: Optional[float] = None, pitch_floor: Optional[float] = None,
-             amplitude=None, use_audio_arousal: bool = False, **meta) -> HumanClip:
+             amplitude=None, use_audio_arousal: bool = False, proto_weight: Optional[float] = None,
+             energy_floor: Optional[float] = None, **meta) -> HumanClip:
     """The retrieval source with the same post-processing and intent handling as ``generate``:
-    text intent -> arousal bonus in the index query + amplitude rule. Without text the query
-    is plain: the audio-only arousal proxy (``use_audio_arousal``) is off by default because it
-    made retrieval stiller and less beat-aligned on both held-out speakers (v2a REPORT)."""
+    text intent -> arousal bonus + gesture-prototype bonus (``proto_weight``) in the index query,
+    amplitude tier, energy floor. Without text the query is plain: the audio-only arousal proxy
+    (``use_audio_arousal``) is off by default because it made retrieval stiller and less
+    beat-aligned on both held-out speakers (v2a REPORT). ``proto_weight`` / ``energy_floor``
+    default to the bundle's ``postprocess`` values (0 disables either)."""
     pp = (model.info.get("postprocess", {}) if model is not None else {})
     if settle_s is None:
         settle_s = float(pp.get("settle_s", 0.0))
     if pitch_floor is None:
         pitch_floor = pp.get("pitch_floor", None)
+    if proto_weight is None:
+        proto_weight = float(pp.get("proto_weight", 0.25))
+    if energy_floor is None:
+        energy_floor = pp.get("energy_floor", None)
     intent_obj, target, tag = None, None, None
     if intent is not None:
         from .intent import TAGS, Intent, analyse
@@ -277,11 +316,19 @@ def retrieve(index, features: np.ndarray, speaking: np.ndarray, model: Optional[
         amplitude = pp.get("amplitude", 1.0)
     f = np.asarray(features, np.float32)
     s = np.asarray(speaking, np.int64)
-    m = index.query(f, s, target_arousal=target, intent_tag=tag, use_audio_arousal=(target is None and use_audio_arousal))
-    m = postprocess_motion(m, s, f, settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amplitude)
+    m, ids = index.query(f, s, target_arousal=target, intent_tag=tag, use_audio_arousal=(target is None and use_audio_arousal),
+                         proto_weight=proto_weight, return_ids=True)
+    stats = model.vq.stats if model is not None else None
+    m = postprocess_motion(m, s, f, settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amplitude,
+                           energy_floor=energy_floor, energy_stats=stats)
+    proto_mean = None
+    if tag is not None and index.proto is not None and tag in index.proto and len(ids):
+        proto_mean = float(np.mean(index.proto[tag][np.asarray(ids)]))
     clip = motion_to_clip(m, s, RATE_HZ, source="retrieval", settle_s=float(settle_s),
                           pitch_floor=(None if pitch_floor is None else float(pitch_floor)),
-                          amplitude=(float(amplitude) if np.isscalar(amplitude) else [float(x) for x in amplitude]), **meta)
+                          amplitude=(float(amplitude) if np.isscalar(amplitude) else [float(x) for x in amplitude]),
+                          proto_weight=float(proto_weight), proto_mean=proto_mean,
+                          energy_floor=(None if not energy_floor else float(energy_floor)), energy=motion_energy(m, stats), **meta)
     if intent_obj is not None:
         clip.meta["intent"] = {k: v for k, v in intent_obj.to_dict().items() if k != "hits"}
     return clip

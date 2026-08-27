@@ -25,7 +25,7 @@ import torch.nn as nn
 
 from ..features import N_FEATS
 from .data import DETREND_HZ, FEATURE_CONTRACT, FRAMES_PER_CODE, MODEL_CHANNELS, NORM_CLIP, POSE_CHANNELS
-from .infer import DEFAULT_SMOOTH_HZ, MotionModel
+from .infer import DEFAULT_SMOOTH_HZ, ENERGY_CHANNELS, MotionModel
 from .retrieval import RetrievalIndex
 
 OPSET = 17
@@ -273,9 +273,17 @@ def export_vq_decoder(model: MotionModel, path: str, verify_lengths=(15, 61), to
 
 def _intent_block() -> Dict:
     from .intent import describe
-    from .retrieval import AROUSAL_BONUS, THINKING_BONUS
+    from .retrieval import AROUSAL_BONUS, PROTO_DOC, PROTO_WEIGHT, THINKING_BONUS
 
-    return describe(AROUSAL_BONUS, THINKING_BONUS)
+    d = describe(AROUSAL_BONUS, THINKING_BONUS)
+    d["gesture_prototypes"] = {"weight": PROTO_WEIGHT, "fields": "retrieval.json: proto[tag][window] in 0..1", **PROTO_DOC}
+    return d
+
+
+def _amplitude_tiers() -> Dict:
+    from .intent import AMPLITUDE_TIERS
+
+    return dict(AMPLITUDE_TIERS)
 
 
 def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: str, metrics: Optional[Dict] = None,
@@ -385,18 +393,29 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
                      "rule": "ff: softmax(logits / temperature + bigram_weight * bigram[prev]) per step, prev = last sampled code; ar: see a2m_ar.step"},
         "smoothing": {"kind": "zero-phase butterworth order 2", "cutoff_hz": DEFAULT_SMOOTH_HZ},
         "postprocess": {
-            **{"settle_s": 0.5, "pitch_floor": -3.0, "amplitude": 1.0, **(model.info.get("postprocess") or {})},
-            "order": "decode -> smooth -> amplitude (per-channel scale, scalar or [14]) -> pitch floor -> settle -> clamp to channel bounds",
-            "pitch_floor_rule": "low-pass head_pitch at 0.3 Hz (2nd-order butterworth, zero-phase); where that baseline is below pitch_floor add (pitch_floor - baseline)",
-            "settle_rule": "end = last frame with speaking=1 (else last frame with feature[64] > -0.3, else clip end); "
-                           "w ramps linearly 0->1 over the last settle_s seconds before end and stays 1 after; motion *= (1 - w)",
-            "amplitude_note": "the retarget may ask for 1.2 on speaking clips; metrics at 1.0 and 1.2 are in checkpoints/<run>/REPORT.md",
+            **{"settle_s": 0.5, "pitch_floor": -3.0, "amplitude": 1.0, "proto_weight": 0.25, "energy_floor": 0.0,
+               **(model.info.get("postprocess") or {})},
+            "order": "retrieve (cosine + continuity + speaking + arousal bonus + proto_weight * proto[intent]) or decode+smooth -> "
+                     "amplitude tier by intent -> energy floor (one scalar for the whole utterance, 1.0..2.0) -> pitch floor -> "
+                     "settle (after speech ends) -> clamp to channel bounds",
+            "amplitude_tiers": _amplitude_tiers(),
+            "energy_floor_rule": "energy = RMS over frames and the 9 channels " + str(ENERGY_CHANNELS) + " of (motion / stats.std[channel]) "
+                                 "after removing each channel's mean over the utterance; if energy < energy_floor, multiply all 14 channels by "
+                                 "min(2.0, energy_floor / energy); energy_floor = the corpus 60th percentile of that RMS over 3 s windows "
+                                 "(hop 1 s); 0 disables",
+            "energy_channels": list(ENERGY_CHANNELS),
+            "pitch_floor_rule": "low-pass head_pitch at 0.3 Hz (2nd-order butterworth, zero-phase); where that baseline is below pitch_floor add "
+                                "(pitch_floor - baseline) - the baseline is lifted, the motion on top of it is untouched",
+            "settle_rule": "end = last frame with speaking=1 (else last frame with feature[64] > -0.3, else clip end); only if end < T: "
+                           "w ramps linearly 0->1 over settle_s seconds starting AT end and stays 1 after; motion *= (1 - w); never mid-utterance",
+            "proto_rule": "proto_weight * retrieval.proto[intent][window] is added to every window's score; 0 disables (A/B knob)",
         },
         "detrend": {"channels": list(POSE_CHANNELS), "cutoff_hz": DETREND_HZ,
                     "meaning": "pose channels are the residual above cutoff_hz: output motion is centred on neutral; add the gaze overlay for where to look"},
         "neutral": {"eye_open_l": 0.6, "eye_open_r": 0.6, "gaze_yaw": 0.0, "gaze_pitch": 0.0},
         "retrieval": {"file": "retrieval.json", "bin": "retrieval.bin",
-                      "intent_fields": index.arousal is not None} if index is not None else None,
+                      "intent_fields": index.arousal is not None,
+                      "proto_fields": index.proto is not None} if index is not None else None,
         "intent": _intent_block(),
         "default_backend": verdict.get("default_backend", "retrieval"),
         "verdict": verdict,

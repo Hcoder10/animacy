@@ -83,11 +83,11 @@
         "terms": [
           {
             "from": "head_yaw",
-            "gain": -1.0363
+            "gain": -1.3771
           },
           {
             "from": "torso_yaw",
-            "gain": -1.3821
+            "gain": -1.8366
           }
         ],
         "offset": 0.0,
@@ -115,11 +115,11 @@
         "terms": [
           {
             "from": "head_yaw",
-            "gain": -1.4942
+            "gain": -1.839
           },
           {
             "from": "head_roll",
-            "gain": -0.44806
+            "gain": -0.55148
           }
         ],
         "offset": 0.0,
@@ -147,35 +147,35 @@
         "terms": [
           {
             "from": "head_pitch",
-            "gain": -1.1719
+            "gain": -1.3092
           },
           {
             "from": "brow_l",
-            "gain": -6.5132
+            "gain": -7.2759
           },
           {
             "from": "brow_r",
-            "gain": -6.5132
+            "gain": -7.2759
           },
           {
             "from": "head_pitch",
-            "gain": 0.45129
+            "gain": 0.47972
           },
           {
             "from": "torso_lean_fwd",
-            "gain": -0.51992
+            "gain": -0.63426
           },
           {
             "from": "head_x",
-            "gain": -0.12045
+            "gain": -0.14091
           },
           {
             "from": "head_z",
-            "gain": 0.42322
+            "gain": 0.47237
           },
           {
             "from": "mouth_open",
-            "gain": 3.8886
+            "gain": 4.1592
           }
         ],
         "offset": 0.0,
@@ -203,19 +203,19 @@
         "terms": [
           {
             "from": "torso_lean_fwd",
-            "gain": 1.0036
+            "gain": 1.1741
           },
           {
             "from": "head_x",
-            "gain": 0.12045
+            "gain": 0.14091
           },
           {
             "from": "head_pitch",
-            "gain": 0.44601
+            "gain": 0.52178
           },
           {
             "from": "mouth_open",
-            "gain": 3.3666
+            "gain": 3.9385
           }
         ],
         "offset": 0.0,
@@ -243,19 +243,19 @@
         "terms": [
           {
             "from": "head_z",
-            "gain": 0.42322
+            "gain": 0.47237
           },
           {
             "from": "torso_lean_fwd",
-            "gain": 0.48368
+            "gain": 0.53984
           },
           {
             "from": "mouth_open",
-            "gain": 7.2552
+            "gain": 8.0977
           },
           {
             "from": "head_pitch",
-            "gain": 0.8973
+            "gain": 1.0015
           }
         ],
         "offset": 0.0,

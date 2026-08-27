@@ -121,7 +121,7 @@
         "terms": [
           {
             "from": "head_yaw",
-            "gain": 1.591
+            "gain": 1.7981
           }
         ],
         "offset": 0.0,
@@ -149,7 +149,7 @@
         "terms": [
           {
             "from": "head_pitch",
-            "gain": 1.883
+            "gain": 2.097
           }
         ],
         "offset": 0.0,
@@ -177,7 +177,7 @@
         "terms": [
           {
             "from": "head_roll",
-            "gain": 1.547
+            "gain": 1.7338
           }
         ],
         "offset": 0.0,
@@ -205,11 +205,11 @@
         "terms": [
           {
             "from": "head_x",
-            "gain": 0.1528
+            "gain": 0.17955
           },
           {
             "from": "head_pitch",
-            "gain": 0.5195
+            "gain": 0.61044
           }
         ],
         "offset": 0.0,
@@ -237,7 +237,7 @@
         "terms": [
           {
             "from": "head_y",
-            "gain": 0.2076
+            "gain": 0.23165
           }
         ],
         "offset": 0.0,
@@ -261,11 +261,11 @@
         "terms": [
           {
             "from": "head_z",
-            "gain": 0.2014
+            "gain": 0.22555
           },
           {
             "from": "head_pitch",
-            "gain": 0.2936
+            "gain": 0.3288
           }
         ],
         "offset": 0.0,
@@ -293,11 +293,11 @@
         "terms": [
           {
             "from": "torso_yaw",
-            "gain": 1.299
+            "gain": 1.5858
           },
           {
             "from": "head_yaw",
-            "gain": 0.814
+            "gain": 0.99373
           }
         ],
         "offset": 0.0,

@@ -121,10 +121,32 @@
   "settle_s": 0.5,
   "pitch_floor": -3.0,
   "amplitude": 1.0,
-  "order": "decode -> smooth -> amplitude (per-channel scale, scalar or [14]) -> pitch floor -> settle -> clamp to channel bounds",
-  "pitch_floor_rule": "low-pass head_pitch at 0.3 Hz (2nd-order butterworth, zero-phase); where that baseline is below pitch_floor add (pitch_floor - baseline)",
-  "settle_rule": "end = last frame with speaking=1 (else last frame with feature[64] > -0.3, else clip end); w ramps linearly 0->1 over the last settle_s seconds before end and stays 1 after; motion *= (1 - w)",
-  "amplitude_note": "the retarget may ask for 1.2 on speaking clips; metrics at 1.0 and 1.2 are in checkpoints/<run>/REPORT.md"
+  "proto_weight": 0.25,
+  "energy_floor": 0.6920997007988529,
+  "order": "retrieve (cosine + continuity + speaking + arousal bonus + proto_weight * proto[intent]) or decode+smooth -> amplitude tier by intent -> energy floor (one scalar for the whole utterance, 1.0..2.0) -> pitch floor -> settle (after speech ends) -> clamp to channel bounds",
+  "amplitude_tiers": {
+   "excitement": 1.45,
+   "greeting": 1.25,
+   "agreement": 1.15,
+   "doubt": 1.15,
+   "thinking": 0.9,
+   "neutral": 1.0
+  },
+  "energy_floor_rule": "energy = RMS over frames and the 9 channels ['head_yaw', 'head_pitch', 'head_roll', 'head_x', 'head_y', 'head_z', 'brow_l', 'brow_r', 'brow_furrow'] of (motion / stats.std[channel]) after removing each channel's mean over the utterance; if energy < energy_floor, multiply all 14 channels by min(2.0, energy_floor / energy); energy_floor = the corpus 60th percentile of that RMS over 3 s windows (hop 1 s); 0 disables",
+  "energy_channels": [
+   "head_yaw",
+   "head_pitch",
+   "head_roll",
+   "head_x",
+   "head_y",
+   "head_z",
+   "brow_l",
+   "brow_r",
+   "brow_furrow"
+  ],
+  "pitch_floor_rule": "low-pass head_pitch at 0.3 Hz (2nd-order butterworth, zero-phase); where that baseline is below pitch_floor add (pitch_floor - baseline) - the baseline is lifted, the motion on top of it is untouched",
+  "settle_rule": "end = last frame with speaking=1 (else last frame with feature[64] > -0.3, else clip end); only if end < T: w ramps linearly 0->1 over settle_s seconds starting AT end and stays 1 after; motion *= (1 - w); never mid-utterance",
+  "proto_rule": "proto_weight * retrieval.proto[intent][window] is added to every window's score; 0 disables (A/B knob)"
  },
  "detrend": {
   "channels": [
@@ -150,7 +172,8 @@
  "retrieval": {
   "file": "retrieval.json",
   "bin": "retrieval.bin",
-  "intent_fields": true
+  "intent_fields": true,
+  "proto_fields": true
  },
  "intent": {
   "lexicon_version": "intent.v3",
@@ -383,7 +406,16 @@
    "match": "whole-word / whole-phrase matches on the lower-cased text ('!!' = the string; 'yes!!', 'really?' and 'hmm...' allow spaces before the punctuation); agreement cues preceded by 'not ', \"n't \" or 'never ' do not count; a written pause '...' adds one thinking hit; a bare 'hmm' adds one doubt hit, or one thinking hit when the line already has a thinking cue; two or more '!' add one excitement hit; a '?' together with a negation word (not / no / never / n't) adds one doubt hit; the tag with most hits wins, ties by tag_priority_on_ties; no hits = neutral",
    "arousal": "base_arousal[tag] + 0.1 per '!' (max 2) + 0.05 per ALL-CAPS word (max 2) -0.1 if '...' present +0.05 if '?' present, clamped to [0, 1]",
    "valence": "base_valence[tag] + 0.1 per positive word (max 3) - 0.1 per negative word (max 3), clamped to [-1, 1]",
-   "amplitude": "min(1.3, 0.8 + 0.5 * arousal), applied to the decoded canonical motion of every source",
+   "amplitude": "tier by tag (amplitude_tiers), applied to the decoded canonical motion of every source; the retarget's max_speed still bounds the result",
+   "amplitude_tiers": {
+    "excitement": 1.45,
+    "greeting": 1.25,
+    "agreement": 1.15,
+    "doubt": 1.15,
+    "thinking": 0.9,
+    "neutral": 1.0
+   },
+   "amplitude_arousal_rule_legacy": "min(1.3, 0.8 + 0.5 * arousal) (amplitude_for; not used for the tier)",
    "retrieval_bonus": "0.15 * (1 - |window_arousal - target_arousal|) added to the cosine score of every index window",
    "thinking_bonus": "0.1 * max(0, still_then_move) when tag == thinking (windows whose second half moves more than their first)",
    "override": "animacy say --intent <tag> forces the tag; punctuation modifiers still apply"
@@ -395,42 +427,42 @@
      "tag": "greeting",
      "arousal": 0.6000000000000001,
      "valence": 0.5,
-     "amplitude": 1.1
+     "amplitude": 1.25
     },
     {
      "text": "Good morning, everyone.",
      "tag": "greeting",
      "arousal": 0.55,
      "valence": 0.6,
-     "amplitude": 1.0750000000000002
+     "amplitude": 1.25
     },
     {
      "text": "Hiya! Glad you're here.",
      "tag": "greeting",
      "arousal": 0.65,
      "valence": 0.6,
-     "amplitude": 1.125
+     "amplitude": 1.25
     },
     {
      "text": "Well, look who it is, it's been a while!",
      "tag": "greeting",
      "arousal": 0.65,
      "valence": 0.5,
-     "amplitude": 1.125
+     "amplitude": 1.25
     },
     {
      "text": "Welcome back, how are you?",
      "tag": "greeting",
      "arousal": 0.6000000000000001,
      "valence": 0.5,
-     "amplitude": 1.1
+     "amplitude": 1.25
     },
     {
      "text": "Evening! Nice to see you again.",
      "tag": "greeting",
      "arousal": 0.65,
      "valence": 0.6,
-     "amplitude": 1.125
+     "amplitude": 1.25
     }
    ],
    "agreement": [
@@ -439,42 +471,42 @@
      "tag": "agreement",
      "arousal": 0.5,
      "valence": 0.4,
-     "amplitude": 1.05
+     "amplitude": 1.15
     },
     {
      "text": "Right, I think so too.",
      "tag": "agreement",
      "arousal": 0.5,
      "valence": 0.4,
-     "amplitude": 1.05
+     "amplitude": 1.15
     },
     {
      "text": "Agreed, that makes sense to me.",
      "tag": "agreement",
      "arousal": 0.5,
      "valence": 0.4,
-     "amplitude": 1.05
+     "amplitude": 1.15
     },
     {
      "text": "Absolutely, you have a good point there.",
      "tag": "agreement",
      "arousal": 0.5,
      "valence": 0.5,
-     "amplitude": 1.05
+     "amplitude": 1.15
     },
     {
      "text": "Correct, that's exactly how it works.",
      "tag": "agreement",
      "arousal": 0.5,
      "valence": 0.4,
-     "amplitude": 1.05
+     "amplitude": 1.15
     },
     {
      "text": "Sure, of course we can do that.",
      "tag": "agreement",
      "arousal": 0.5,
      "valence": 0.4,
-     "amplitude": 1.05
+     "amplitude": 1.15
     }
    ],
    "doubt": [
@@ -483,42 +515,42 @@
      "tag": "doubt",
      "arousal": 0.35,
      "valence": -0.4,
-     "amplitude": 0.9750000000000001
+     "amplitude": 1.15
     },
     {
      "text": "Hmm, that seems off to me.",
      "tag": "doubt",
      "arousal": 0.35,
      "valence": -0.5,
-     "amplitude": 0.9750000000000001
+     "amplitude": 1.15
     },
     {
      "text": "Are you sure? That can't be right.",
      "tag": "doubt",
      "arousal": 0.39999999999999997,
      "valence": -0.4,
-     "amplitude": 1.0
+     "amplitude": 1.15
     },
     {
      "text": "I'm unsure this is going to work.",
      "tag": "doubt",
      "arousal": 0.35,
      "valence": -0.4,
-     "amplitude": 0.9750000000000001
+     "amplitude": 1.15
     },
     {
      "text": "Is that so? I find it hard to believe.",
      "tag": "doubt",
      "arousal": 0.39999999999999997,
      "valence": -0.4,
-     "amplitude": 1.0
+     "amplitude": 1.15
     },
     {
      "text": "That sounds questionable, I'm not convinced.",
      "tag": "doubt",
      "arousal": 0.35,
      "valence": -0.4,
-     "amplitude": 0.9750000000000001
+     "amplitude": 1.15
     }
    ],
    "excitement": [
@@ -527,42 +559,42 @@
      "tag": "excitement",
      "arousal": 0.95,
      "valence": 0.9,
-     "amplitude": 1.275
+     "amplitude": 1.45
     },
     {
      "text": "OMG, I can't wait to see it!",
      "tag": "excitement",
      "arousal": 1.0,
      "valence": 0.8,
-     "amplitude": 1.3
+     "amplitude": 1.45
     },
     {
      "text": "Yes!! We finally did it!",
      "tag": "excitement",
      "arousal": 1.0,
      "valence": 0.8,
-     "amplitude": 1.3
+     "amplitude": 1.45
     },
     {
      "text": "That's fantastic, I'm so excited!",
      "tag": "excitement",
      "arousal": 0.95,
      "valence": 0.8,
-     "amplitude": 1.275
+     "amplitude": 1.45
     },
     {
      "text": "Unbelievable, what a win!",
      "tag": "excitement",
      "arousal": 0.95,
      "valence": 0.9,
-     "amplitude": 1.275
+     "amplitude": 1.45
     },
     {
      "text": "Awesome, I love this so much!",
      "tag": "excitement",
      "arousal": 0.95,
      "valence": 0.9,
-     "amplitude": 1.275
+     "amplitude": 1.45
     }
    ],
    "thinking": [
@@ -571,48 +603,60 @@
      "tag": "thinking",
      "arousal": 0.25,
      "valence": 0.0,
-     "amplitude": 0.925
+     "amplitude": 0.9
     },
     {
      "text": "Hang on a second, I'm still working it out.",
      "tag": "thinking",
      "arousal": 0.25,
      "valence": 0.0,
-     "amplitude": 0.925
+     "amplitude": 0.9
     },
     {
      "text": "Maybe... on the other hand, it could be the other way.",
      "tag": "thinking",
      "arousal": 0.15,
      "valence": 0.0,
-     "amplitude": 0.875
+     "amplitude": 0.9
     },
     {
      "text": "Give me a sec to weigh the options.",
      "tag": "thinking",
      "arousal": 0.25,
      "valence": 0.0,
-     "amplitude": 0.925
+     "amplitude": 0.9
     },
     {
      "text": "I'm pondering whether that would even work.",
      "tag": "thinking",
      "arousal": 0.25,
      "valence": 0.0,
-     "amplitude": 0.925
+     "amplitude": 0.9
     },
     {
      "text": "One moment, I'm thinking it through.",
      "tag": "thinking",
      "arousal": 0.25,
      "valence": 0.0,
-     "amplitude": 0.925
+     "amplitude": 0.9
     }
    ]
   },
   "example_accuracy": {
    "correct": 30,
    "total": 30
+  },
+  "gesture_prototypes": {
+   "weight": 0.25,
+   "fields": "retrieval.json: proto[tag][window] in 0..1",
+   "segment": "the 1 s window followed by its continuation window when one exists (2 s at 30 Hz); all in canonical units",
+   "agreement": "band_ratio(head_pitch, 1-3 Hz)/0.6 x min(1, pitch minima with prominence >= 1.5 deg / 2) x exp(-rms(head_yaw)/5)",
+   "doubt": "band_ratio(head_yaw, 0.5-3 Hz)/0.6 x min(1, yaw direction reversals of >= 2 deg / 2) x exp(-rms(head_pitch)/4)",
+   "excitement": "max(pitch rise, head_z rise/2 mm) in the first second /8 deg x peak |pitch velocity| in the first second /60 deg/s x (1 - mean head speed after /40)",
+   "thinking": "largest roll-or-yaw excursion from the start /8 deg x fraction of following frames with head speed < 10 deg/s x min(1, hold seconds) x (0.5 + 0.5 x return toward the start)",
+   "greeting": "0.5 x (pitch rise in the first 0.7 s /5 deg + brow rise in the first 0.7 s /0.2) x (1 - mean head speed after 0.7 s /40)",
+   "each factor is clipped to [0, 1]; band_ratio = share of mean-removed power in the band": true,
+   "query": "score += proto_weight * proto[intent_tag][window] (proto_weight default 0.25; 0 disables)"
   }
  },
  "default_backend": "retrieval",

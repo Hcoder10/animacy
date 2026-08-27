@@ -135,15 +135,20 @@ def test_intent_rule_and_retrieval_bonus(trained):
                 assert not (len(p.split()) >= 4 and p in low), (p, mv.text)
     idx = RetrievalIndex.load(os.path.join(trained["out"], "retrieval.json"))
     assert idx.arousal is not None and len(idx.arousal) == len(idx) and 0 <= idx.arousal.min() <= idx.arousal.max() <= 1
+    assert idx.proto is not None and set(idx.proto) == {"agreement", "doubt", "excitement", "thinking", "greeting"}
+    assert all(len(v) == len(idx) and 0 <= v.min() <= v.max() <= 1 for v in idx.proto.values())
     model = MotionModel.load(trained["out"], "cpu")
     frames, wav = make_synthetic_clip(seed=77, seconds=4.0, subject="synthX")
     T = len(frames)
     feats = audio_features(wav, 16000, n_ticks=T)
     speaking = frames["speaking"].to_numpy()
     calm = retrieve(idx, feats, speaking, model, intent="thinking")
-    loud = retrieve(idx, feats, speaking, model, intent="excitement")
+    loud = retrieve(idx, feats, speaking, model, intent="excitement", proto_weight=0.25, energy_floor=0.5)
     assert calm.validate() == [] and loud.validate() == []
     assert calm.meta["intent"]["tag"] == "thinking" and loud.meta["amplitude"] > calm.meta["amplitude"]
+    assert loud.meta["proto_mean"] is not None and loud.meta["energy"] is not None
+    off = retrieve(idx, feats, speaking, model, intent="excitement", proto_weight=0.0, energy_floor=0)
+    assert off.meta["proto_weight"] == 0.0 and off.validate() == []
     clip = generate(model, feats, speaking, seed=1, intent="No way, that is incredible news!")
     assert clip.validate() == [] and clip.meta["intent"]["tag"] == "excitement" and clip.meta["amplitude"] > 1.0
     # the audio-only proxy runs end to end too

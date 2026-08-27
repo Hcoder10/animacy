@@ -11,7 +11,8 @@ import pytest
 
 from animacy.grade import kimi, rubric
 from animacy.grade.movements import (HELDOUT_PATH, HELDOUT_SET, MOVEMENT_KEYS, MOVEMENTS, TUNING_SET, VENDOR, ClipSpec,
-                                     accepts_intent, candidate_table, load_heldout_movements, parse_variant, shared_phrases)
+                                     accepts_intent, candidate_table, load_heldout_movements, mark_identical_variants,
+                                     parse_variant, shared_phrases)
 from animacy.grade.probe import PROBE_PROMPT
 from animacy.grade.reel import (chunk_reels, number_and_shuffle, plan_reels, sealed_manifest, slow_audio, slow_table,
                                 speech_envelope)
@@ -525,3 +526,17 @@ def test_variant_knob_applies_only_when_explicit_and_never_via_kwargs():
         parse_variant("bad spec")
     with pytest.raises(ValueError):
         parse_variant("model=retrieval:proto_weight=0")        # collides with a real source name
+
+
+def test_identical_variant_columns_are_dropped_and_partial_ones_marked():
+    base = _fake_clip("lamp", "greeting", "retrieval", 0)
+    same = _fake_clip("lamp", "greeting", "retrieval_p0", 0)
+    v = parse_variant("retrieval_p0=retrieval:proto_weight=0")
+    out = mark_identical_variants([base, same], {v.name: v})
+    assert [c.source for c in out] == ["retrieval"], "an all-identical variant is dropped"
+    diff = _fake_clip("lamp", "greeting", "retrieval_p0", 0)
+    diff.table["base_yaw"] = diff.table["base_yaw"] + 5.0
+    out2 = mark_identical_variants([base, diff], {v.name: v})
+    assert [c.source for c in out2] == ["retrieval", "retrieval_p0"]
+    assert out2[1].meta["variant"]["identical_to_base"] is False
+    assert mark_identical_variants([base], {}) == [base]
