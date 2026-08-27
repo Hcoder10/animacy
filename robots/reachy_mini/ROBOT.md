@@ -25,11 +25,11 @@ joints:
   - { name: head_y,        unit: mm,  min: -25,  max: 25,  rest: 0, max_speed: 150 }
   - { name: head_z,        unit: mm,  min: -15,  max: 25,  rest: 0, max_speed: 150 }
   - { name: head_roll,     unit: deg, min: -30,  max: 30,  rest: 0, max_speed: 200 }
-  - { name: head_pitch,    unit: deg, min: -30,  max: 30,  rest: 0, max_speed: 200, urdf_sign: -1 }   # SDK/ROS +pitch = nose DOWN; animacy + = UP
+  - { name: head_pitch,    unit: deg, min: -30,  max: 30,  rest: 0, max_speed: 200, urdf_sign: -1 }   # visualization only: the URDF joint is daemon +pitch = nose DOWN; animacy + = UP
   - { name: head_yaw,      unit: deg, min: -60,  max: 60,  rest: 0, max_speed: 200 }
   - { name: body_yaw,      unit: deg, min: -120, max: 120, rest: 0, max_speed: 150 }
   - { name: antenna_left,  unit: deg, min: -140, max: 140, rest: 0, max_speed: 600 }
-  - { name: antenna_right, unit: deg, min: -140, max: 140, rest: 0, max_speed: 600, urdf_sign: -1 }   # mirror axis: SDK right + = inward; animacy + = outward for both
+  - { name: antenna_right, unit: deg, min: -140, max: 140, rest: 0, max_speed: 600 }   # daemon values, plain; hinges are mirror images (see prose)
 
 retarget:
   # A human head in conversation is a 6-DoF signal and Reachy's head is a 6-DoF
@@ -140,8 +140,11 @@ library; hardware evidence is listed where it exists (details and sources in
 
 ## Neutral pose
 
-Head level and centered over the body, antennas relaxed at 0, body facing
-forward — `goto_zero()` in the SDK.
+Head level and centred 0.177 m above the base frame, antennas vertical (0),
+body facing forward: the SDK's `INIT_HEAD_POSE` (identity lifted by
+`head_z_offset`), reached with `goto_target(INIT_HEAD_POSE, antennas=INIT_ANTENNAS)`
+or `POST /api/move/goto` with an all-zero pose. After `wake_up` the daemon's
+`present_head_pose` reads ≈ 0 on every axis (measured 2026-08-26).
 
 ## What each canonical channel means on this body
 
