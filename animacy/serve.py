@@ -80,39 +80,53 @@ def _speaking_from_audio(wav: np.ndarray, n: int, sr: int = 16000) -> np.ndarray
 _MODEL_CACHE: dict = {}
 
 
-def model_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkpoints/v1", seed: int = 0,
-                 listen: bool = False, temperature: float = 0.8, bigram_weight: float = 0.5) -> HumanClip:
-    """The learned audio→motion model (``animacy.model.infer``)."""
+def _load_model(checkpoint: str):
     import os
 
-    from .model.infer import MotionModel, generate
+    from .model.infer import MotionModel
 
     key = os.path.abspath(checkpoint)
     if key not in _MODEL_CACHE:
         _MODEL_CACHE[key] = MotionModel.load(checkpoint)
+    return _MODEL_CACHE[key]
+
+
+def model_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkpoints/v1", seed: int = 0,
+                 listen: bool = False, intent=None, **kw) -> HumanClip:
+    """The learned audio→motion model (``animacy.model.infer``). ``intent`` is the
+    utterance text (or an intent tag) — it sets the amplitude by the intent rule
+    recorded in the checkpoint's ``model_info.json``."""
+    from .model.infer import generate
+
+    model = _load_model(checkpoint)
     n = int(np.ceil(len(wav) / sr * RATE_HZ))
     feats = audio_features(wav, sr, n_ticks=n)
     speaking = np.zeros(n, np.int64) if listen else _speaking_from_audio(wav, n, sr)
-    return generate(_MODEL_CACHE[key], feats, speaking, causal=listen, temperature=temperature,
-                    bigram_weight=bigram_weight, seed=seed)
+    return generate(model, feats, speaking, causal=listen, seed=seed, intent=intent, **kw)
 
 
 def retrieval_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkpoints/v1", seed: int = 0,
-                     listen: bool = False) -> HumanClip:
-    """Motion matching against the corpus (``animacy.model.retrieval``)."""
+                     listen: bool = False, intent=None, **kw) -> HumanClip:
+    """Motion matching against the corpus (``animacy.model.retrieval``), with the
+    same post-processing and intent handling as the learned model (arousal-biased
+    window choice + amplitude rule)."""
     import os
 
-    from .model.infer import motion_to_clip
+    from .model.infer import retrieve
     from .model.retrieval import RetrievalIndex
 
     key = ("retrieval", os.path.abspath(checkpoint))
     if key not in _MODEL_CACHE:
         _MODEL_CACHE[key] = RetrievalIndex.load(os.path.join(checkpoint, "retrieval.json"))
+    model = None
+    try:
+        model = _load_model(checkpoint)
+    except Exception:  # noqa: BLE001 — an index-only checkpoint still works
+        pass
     n = int(np.ceil(len(wav) / sr * RATE_HZ))
     feats = audio_features(wav, sr, n_ticks=n)
     speaking = np.zeros(n, np.int64) if listen else _speaking_from_audio(wav, n, sr)
-    motion = _MODEL_CACHE[key].query(feats, speaking)
-    return motion_to_clip(motion, speaking, RATE_HZ, source="retrieval", mode="listen" if listen else "talk")
+    return retrieve(_MODEL_CACHE[key], feats, speaking, model, intent=intent, mode="listen" if listen else "talk", **kw)
 
 
 SOURCES = {"envelope": envelope_motion, "model": model_motion, "retrieval": retrieval_motion}
@@ -121,7 +135,10 @@ SOURCES = {"envelope": envelope_motion, "model": model_motion, "retrieval": retr
 # ---------------------------------------------------------------- the loop
 def say(text: str, profile: Profile, source: str = "envelope", sink_kind: Optional[str] = None,
         url: Optional[str] = None, tts_engine: str = "auto", play_audio: bool = True,
-        dry_run: bool = False, seed: int = 0, checkpoint: str = "checkpoints/v1") -> pd.DataFrame:
+        dry_run: bool = False, seed: int = 0, checkpoint: str = "checkpoints/v1",
+        intent: Optional[str] = None) -> pd.DataFrame:
+    """``intent``: an explicit tag (greeting|agreement|doubt|excitement|thinking|neutral)
+    overriding what the lexicon reads from ``text``; None = derive from the text."""
     from .tts import synth
 
     t0 = time.perf_counter()
@@ -129,7 +146,15 @@ def say(text: str, profile: Profile, source: str = "envelope", sink_kind: Option
     t_tts = time.perf_counter() - t0
     fn = SOURCES[source]
     t1 = time.perf_counter()
-    clip = fn(wav, sr, seed=seed) if source == "envelope" else fn(wav, sr, checkpoint=checkpoint, seed=seed)
+    if source == "envelope":
+        clip = fn(wav, sr, seed=seed)
+    else:
+        intent_arg = text
+        if intent:
+            from .model.intent import analyse
+
+            intent_arg = analyse(text, override=intent)
+        clip = fn(wav, sr, checkpoint=checkpoint, seed=seed, intent=intent_arg)
     t_motion = time.perf_counter() - t1
     probs = clip.validate()
     if probs:
@@ -162,7 +187,8 @@ def main(args) -> int:
         print(f"unknown source {args.source!r}; choose from {list(SOURCES)}")
         return 2
     say(args.text, profile, source=args.source, sink_kind=args.sink, url=args.url, tts_engine=args.tts,
-        play_audio=not args.no_audio, dry_run=args.dry_run, seed=args.seed, checkpoint=args.checkpoint)
+        play_audio=not args.no_audio, dry_run=args.dry_run, seed=args.seed, checkpoint=args.checkpoint,
+        intent=getattr(args, "intent", None))
     return 0
 
 

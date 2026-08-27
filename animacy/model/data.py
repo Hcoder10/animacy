@@ -11,6 +11,7 @@ layout so the whole pipeline is exercised before any capture exists.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 from dataclasses import dataclass, replace
@@ -248,9 +249,17 @@ def load_speaker_index(data_dir: str) -> Dict[str, str]:
 def apply_speaker_cap(clips: Sequence[ClipData], speakers: Dict[str, str], cap: float) -> Tuple[List[ClipData], Dict]:
     """No speaker may exceed ``cap`` of the effective training mass: an over-represented
     speaker's windows are kept with probability f = cap * rest / ((1 - cap) * own)."""
+    known = sorted({s for s in speakers.values()}, key=len, reverse=True)
+
     def spk(c: ClipData) -> str:
         base = c.name.split("~")[0]
-        return speakers.get(base) or c.subject or base
+        if base in speakers:
+            return speakers[base]
+        # the index lags the fetcher: a clip named like a known speaker ("obama_wa_2014_...") is that speaker
+        for s in known:
+            if base == s or base.startswith(s + "_"):
+                return s
+        return c.subject or base
 
     total = {}
     for c in clips:

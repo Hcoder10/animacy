@@ -35,7 +35,7 @@ from .a2m_ar import AudioToMotionAR
 from .data import (CHUNK_FRAMES, MODEL_CHANNELS, SEGMENT, a2m_chunks, apply_speaker_cap, compute_stats, load_clips,
                    load_speaker_index, make_synthetic_clips, mirror_clip, run_code_sequences, split_clips, summarise, vq_segments)
 from .infer import MotionModel
-from .metrics import ARCH_COND, evaluate
+from .metrics import ARCH_COND, compact, evaluate, postprocess_rows, promotion_verdict
 from .retrieval import RetrievalIndex
 from .vq import MotionVQVAE
 
@@ -332,14 +332,61 @@ def write_report(path: str, m: Dict, command: str) -> None:
         L.append("")
         L.append("`model` = feed-forward a2m, `ar` = autoregressive a2m_ar. The verdict uses the head-beat recall (docs/MODEL.md). "
                  "The all-channel column counts brows and mouth too.\n")
-        if m.get("sampling_sweep"):
-            L.append("### Sampling sweep (held-out; the defaults above are the reported numbers)\n")
-            L.append("| arch | temperature | bigram weight / top-p | head-beat recall | vs shuffled | precision | all-ch recall | vs shuffled | stillness | W1 rel |")
-            L.append("|---|---|---|---|---|---|---|---|---|---|")
-            for r in m["sampling_sweep"]:
-                L.append(f"| {r['arch']} | {r['temperature']} | {r['second']} | {r['head_beat_recall']:.3f} | {r['head_beat_recall_shuffled']:.3f} | "
-                         f"{r['head_beat_precision']:.3f} | {r['all_beat_recall']:.3f} | {r['all_beat_recall_shuffled']:.3f} | {r['stillness']:.3f} | {r['w1_relative_mean']:.3f} |")
+        if ev.get("per_clip") and len(ev["per_clip"]) > 1:
+            L.append("### Per held-out speaker (defaults; the promotion rule is applied here)\n")
+            L.append("| clip | condition | head-beat recall | vs shuffled | margin | stillness (gt) | W1 rel | NLL (floor) |")
+            L.append("|---|---|---|---|---|---|---|---|")
+            for name, pc in ev["per_clip"].items():
+                for cond in ("model", "ar", "retrieval"):
+                    if cond in pc["conditions"]:
+                        x, xs = pc["conditions"][cond], pc["conditions"][f"{cond}_shuffled"]
+                        L.append(f"| {name} | {cond} | {x['beat_recall']:.3f} | {xs['beat_recall']:.3f} | {x['beat_recall'] - xs['beat_recall']:+.3f} | "
+                                 f"{x['stillness']:.3f} ({pc['gt_stillness']:.3f}) | {x['w1_relative_mean']:.3f} | "
+                                 f"{_fmt(x['nll'])} ({_fmt(pc['nll_unigram_floor'])}) |")
             L.append("")
+        if m.get("sampling_sweep"):
+            L.append("### Sampling sweep (per held-out speaker; the defaults above are the reported numbers)\n")
+            L.append("| arch | temperature | bigram weight / top-p / rp / stay | mean head-beat recall | vs shuffled | mean margin | min margin | mean stillness | max stillness gap | W1 rel | per clip (margin / stillness) |")
+            L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+            for r in m["sampling_sweep"]:
+                per = "; ".join(f"{k[:14]}: {v['head_beat_recall'] - v['head_beat_recall_shuffled']:+.3f} / {v['stillness']:.3f}" for k, v in r.get("per_clip", {}).items())
+                L.append(f"| {r['arch']} | {r['temperature']} | {r['second']} | {r['head_beat_recall']:.3f} | {r['head_beat_recall_shuffled']:.3f} | "
+                         f"{r.get('mean_margin', r['head_beat_recall'] - r['head_beat_recall_shuffled']):+.3f} | {_fmt(r.get('min_margin'))} | {r['stillness']:.3f} | "
+                         f"{_fmt(r.get('max_still_gap'))} | {r['w1_relative_mean']:.3f} | {per} |")
+            L.append("")
+            smp = m.get("sampling") or {}
+            if smp.get("picked_by"):
+                L.append(f"Shipped AR sampling: T={smp['temperature']} top_p={smp['top_p']} repeat_penalty={smp['repeat_penalty']} "
+                         f"stay_bias={smp['stay_bias']} ({smp['picked_by']}).\n")
+        if m.get("postprocess_rows"):
+            L.append("### Generation-side options (utterance-final settle, head_pitch floor, amplitude), mean over held-out speakers\n")
+            L.append("Applied after decoding to every source. Shipped defaults: " + str(m.get("postprocess")) + ". "
+                     "Beat/stillness/W1 as above; `min margin` is the worse of the two speakers.\n")
+            L.append("| settle (s) | pitch floor (deg) | amplitude | source | beat recall | vs shuffled | min margin | stillness (gt) | W1 rel | per clip (margin / stillness) |")
+            L.append("|---|---|---|---|---|---|---|---|---|---|")
+            for r in m["postprocess_rows"]:
+                amp_label = f"{r['amplitude']}" + (" (intent rule on the clip's own audio arousal: " + ", ".join(
+                    f"{k[:14]} {v:.2f}" for k, v in (r.get("audio_arousal") or {}).items()) + ")" if r.get("intent_from_audio") else "")
+                for cond, v in r["conditions"].items():
+                    per = "; ".join(f"{k[:14]}: {x['margin']:+.3f} / {x['stillness']:.3f}" for k, x in v["per_clip"].items())
+                    L.append(f"| {r['settle_s']} | {r['pitch_floor']} | {amp_label} | {cond} | {v['beat_recall']:.3f} | {v['beat_recall_shuffled']:.3f} | "
+                             f"{v['margin_min']:+.3f} | {v['stillness']:.3f} ({v['gt_stillness']:.3f}) | {v['w1_relative_mean']:.3f} | {per} |")
+            L.append("")
+            try:
+                from .intent import amplitude_for, analyse, grader_lines
+                from .retrieval import AROUSAL_BONUS, THINKING_BONUS
+
+                L.append("### Intent layer (text -> arousal / valence / tag; lexicon + punctuation, no model)\n")
+                L.append(f"Amplitude rule 0.8 + 0.5 * arousal (cap 1.3); retrieval arousal bonus {AROUSAL_BONUS}, thinking bonus {THINKING_BONUS}. "
+                         "What the rule produces for the five grader lines:\n")
+                L.append("| movement | line | tag | arousal | valence | amplitude |")
+                L.append("|---|---|---|---|---|---|")
+                for k, text in grader_lines().items():
+                    it = analyse(text)
+                    L.append(f"| {k} | {text} | {it.tag} | {it.arousal:.2f} | {it.valence:+.2f} | {amplitude_for(it.arousal):.2f} |")
+                L.append("")
+            except Exception as e:  # noqa: BLE001
+                L.append(f"(intent table unavailable: {e})\n")
         cols = [k for k in ("model", "ar", "retrieval") if k in ev["velocity"]]
         L.append("Per-channel W1 (deg/s or mm/s or unit/s):\n")
         L.append("| channel | gt mean speed | " + " | ".join(cols) + " |")
@@ -362,6 +409,13 @@ def write_report(path: str, m: Dict, command: str) -> None:
                      f"stillness {_fmt(cd['stillness'])} (gt {ev['stillness']['gt']:.3f}); W1 rel {_fmt(cd['w1_relative_mean'])} -> "
                      + ("**qualifies**" if cd["qualifies"] else "**does not qualify** (" + ("shuffle margin" if not cd["beats_shuffle"] else "") + (" + " if not cd["beats_shuffle"] and not cd["below_floor"] else "") + ("NLL not below floor" if not cd["below_floor"] else "") + ")"))
         L.append(f"- retrieval head-beat recall {_fmt(vd['retrieval_beat_recall'])} vs shuffled {_fmt(vd['retrieval_shuffled_beat_recall'])}")
+        promo = vd.get("promotion")
+        if promo:
+            L.append(f"- promotion rule: {promo['rule']}")
+            for arch, cd in promo["candidates"].items():
+                L.append(f"  - {arch}: " + "; ".join(f"{n}: margin {r['margin']:+.3f}, stillness {r['stillness']:.3f} vs gt {r['gt_stillness']:.3f}, "
+                                                     f"NLL {_fmt(r['nll'])} vs floor {_fmt(r['floor'])} -> {'ok' if r['ok'] else 'fails'}"
+                                                     for n, r in cd["per_clip"].items()) + f" => {'**QUALIFIES**' if cd['qualifies'] else 'does not qualify'}")
         L.append(f"- default backend for the demo: **{vd['default_backend']}**" + (f" (model arch for the selectable 'model' source: {vd['default_arch']})" if vd.get("default_arch") else ""))
         L.append("")
     ex = m.get("export")
@@ -422,6 +476,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stay-energy", type=float, default=-0.3, help="quiet = normalised log energy below this")
     p.add_argument("--speaker-cap", type=float, default=0.4, help="max share of the training mass for one speaker (_index.json); 0 = off")
     p.add_argument("--no-fp16", action="store_true", help="export float32 weights (default: float16 initializers for the two predictors)")
+    p.add_argument("--settle-s", type=float, default=0.5, help="utterance-final settle to neutral over the last N s of speech (0 = off)")
+    p.add_argument("--pitch-floor", type=float, default=-3.0, help="low-frequency head_pitch mean never below this (deg); nan = off")
+    p.add_argument("--amplitude", type=float, default=1.0, help="scale of the decoded motion (all channels)")
     p.add_argument("--no-ar-init-encoder", action="store_true", help="do not warm-start the AR audio trunk from the trained a2m")
     p.add_argument("--init-a2m", default="", help="warm-start a2m.pt")
     p.add_argument("--init-ar", default="", help="warm-start a2m_ar.pt")
@@ -454,6 +511,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.pitch_floor is not None and args.pitch_floor != args.pitch_floor:      # nan = off
+        args.pitch_floor = None
     command = "python -m animacy.model.train " + " ".join(shlex.quote(a) for a in (argv if argv is not None else sys.argv[1:]))
     device = _device(args.device)
     torch.manual_seed(args.seed)
@@ -628,23 +687,50 @@ def main(argv=None) -> int:
             profiles.append(load_profile(p))
         except Exception as e:  # noqa: BLE001
             log(f"   could not load robot profile {r}: {e}")
+    # the headline metrics are the raw generators (no settle / floor / amplitude); those are separate rows
     ev = evaluate(model, index, val_clips, profiles, seed=args.seed, temperature=args.temperature,
                   bigram_weight=args.bigram_weight, top_p=args.top_p, repeat_penalty=args.repeat_penalty,
                   stay_bias=args.stay_bias, stay_energy=args.stay_energy, max_runs=args.max_eval_runs or None)
     for arch, cd in ev["verdict"]["candidates"].items():
         if not cd["qualifies"]:
-            flags.append(f"{ARCH_COND[arch].upper()}_DOES_NOT_QUALIFY: shuffle margin {cd['margin']:+.3f} (need >= {ev['verdict']['required_margin']}), "
+            flags.append(f"{ARCH_COND[arch].upper()}_DOES_NOT_QUALIFY (pooled): shuffle margin {cd['margin']:+.3f} (need >= {ev['verdict']['required_margin']}), "
                          f"NLL {cd['nll']:.3f} vs floor {cd['nll_unigram_floor']:.3f}")
-    if ev["verdict"]["default_backend"] == "retrieval":
-        flags.append("RETRIEVAL_IS_DEFAULT: no learned generator qualified")
+    sampling = {"temperature": args.temperature, "bigram_weight": args.bigram_weight, "top_p": args.top_p,
+                "repeat_penalty": args.repeat_penalty, "stay_bias": args.stay_bias, "stay_energy": args.stay_energy}
+    # --- per held-out clip (speaker): the promotion rule needs every speaker, not the pool
+    per_clip: Dict[str, Dict] = {}
+    if len(val_clips) > 1:
+        log("-- per held-out clip")
+        for c in val_clips:
+            e_c = evaluate(model, index, [c], [], seed=args.seed, temperature=args.temperature, bigram_weight=args.bigram_weight,
+                           top_p=args.top_p, repeat_penalty=args.repeat_penalty, stay_bias=args.stay_bias,
+                           stay_energy=args.stay_energy, verbose=False)
+            per_clip[c.name] = compact(e_c)
+            pc = per_clip[c.name]
+            for cond in ("model", "ar", "retrieval"):
+                if cond in pc["conditions"]:
+                    x, xs = pc["conditions"][cond], pc["conditions"][f"{cond}_shuffled"]
+                    log(f"   {c.name:28s} {cond:9s} beat {x['beat_recall']:.3f} vs shuffled {xs['beat_recall']:.3f} "
+                        f"({x['beat_recall'] - xs['beat_recall']:+.3f})  still {x['stillness']:.3f} (gt {pc['gt_stillness']:.3f})  "
+                        f"W1 rel {x['w1_relative_mean']:.3f}" + (f"  NLL {x['nll']:.3f} vs floor {pc['nll_unigram_floor']:.3f}" if x["nll"] is not None else ""))
+    else:
+        per_clip[val_clips[0].name] = compact(ev)
+    ev["per_clip"] = per_clip
+    promo = promotion_verdict(per_clip)
+    ev["verdict"]["promotion"] = promo
+    ev["verdict"]["default_backend"] = promo["default_backend"]
+    log(f"   promotion rule ({promo['rule']}): " + "; ".join(
+        f"{a}: {'QUALIFIES' if c['qualifies'] else 'no'} " + str({n: round(r['margin'], 3) for n, r in c['per_clip'].items()})
+        for a, c in promo["candidates"].items()) + f" -> default backend = {promo['default_backend']}")
+    if promo["default_backend"] == "retrieval":
+        flags.append("RETRIEVAL_IS_DEFAULT: no learned generator met the promotion rule on every held-out speaker")
+    else:
+        flags.append(f"PROMOTED: {promo['default_backend']} met the promotion rule on every held-out speaker")
     info["default_arch"] = ev["verdict"].get("default_arch") or info["default_arch"]
-    info["sampling"] = {"temperature": args.temperature, "bigram_weight": args.bigram_weight, "top_p": args.top_p,
-                        "repeat_penalty": args.repeat_penalty, "stay_bias": args.stay_bias, "stay_energy": args.stay_energy}
-    with open(os.path.join(args.out, "model_info.json"), "w", encoding="utf-8") as fh:
-        json.dump(info, fh, indent=1)
+
     sweep = []
     if args.sweep:
-        log("-- sampling sweep on the held-out split (learned generators only; the defaults above stay the reported numbers)")
+        log("-- sampling sweep, per held-out clip (learned generators only; the defaults above stay the reported numbers)")
         grid = []
         if a2m is not None:
             grid += [("ff", T, w, 0.0, 0.0) for T in (0.5, 0.8, 1.0) for w in (0.0, 0.5, 1.0)]
@@ -656,24 +742,54 @@ def main(argv=None) -> int:
         for arch, T, second, rp, sb in grid:
             kw = dict(temperature=T, bigram_weight=second if arch == "ff" else args.bigram_weight,
                       top_p=second if arch == "ar" else args.top_p, repeat_penalty=rp, stay_bias=sb, stay_energy=args.stay_energy)
-            e2 = evaluate(model, None, val_clips, [], seed=args.seed, archs=[arch], max_runs=args.max_eval_runs or None, verbose=False, **kw)
             cn = ARCH_COND[arch]
-            b, bA = e2["beat"], e2["beat_all_channels"]
+            rows_c = {}
+            for c in val_clips:
+                e2 = evaluate(model, None, [c], [], seed=args.seed, archs=[arch], max_runs=args.max_eval_runs or None, verbose=False, **kw)
+                b, bA = e2["beat"], e2["beat_all_channels"]
+                rows_c[c.name] = {"head_beat_recall": b[cn]["recall"], "head_beat_recall_shuffled": b[f"{cn}_shuffled"]["recall"],
+                                  "head_beat_precision": b[cn]["precision"], "all_beat_recall": bA[cn]["recall"],
+                                  "all_beat_recall_shuffled": bA[f"{cn}_shuffled"]["recall"], "stillness": e2["stillness"][cn],
+                                  "gt_stillness": e2["stillness"]["gt"], "w1_relative_mean": e2["velocity"][cn]["w1_relative_mean"]}
+            n = len(rows_c)
+            mean = {k: sum(r[k] for r in rows_c.values()) / n for k in next(iter(rows_c.values()))}
             row = {"arch": arch, "temperature": T, "second": second if arch == "ff" else f"{second} / rp {rp} / stay {sb}",
-                   "head_beat_recall": b[cn]["recall"], "head_beat_recall_shuffled": b[f"{cn}_shuffled"]["recall"],
-                   "head_beat_precision": b[cn]["precision"],
-                   "all_beat_recall": bA[cn]["recall"], "all_beat_recall_shuffled": bA[f"{cn}_shuffled"]["recall"],
-                   "stillness": e2["stillness"][cn], "w1_relative_mean": e2["velocity"][cn]["w1_relative_mean"]}
+                   "top_p": second if arch == "ar" else None, "repeat_penalty": rp, "stay_bias": sb,
+                   "per_clip": rows_c, "mean_margin": mean["head_beat_recall"] - mean["head_beat_recall_shuffled"],
+                   "min_margin": min(r["head_beat_recall"] - r["head_beat_recall_shuffled"] for r in rows_c.values()),
+                   "max_still_gap": max(abs(r["stillness"] - r["gt_stillness"]) for r in rows_c.values()), **mean}
             sweep.append(row)
-            log(f"   {arch} T={T} {'w' if arch == 'ff' else 'top_p'}={second}{'' if arch == 'ff' else f' rp={rp} stay={sb}'}: head-beat recall {row['head_beat_recall']:.3f} vs shuffled "
-                f"{row['head_beat_recall_shuffled']:.3f} (prec {row['head_beat_precision']:.3f}); all-ch {row['all_beat_recall']:.3f} vs "
-                f"{row['all_beat_recall_shuffled']:.3f}; still {row['stillness']:.3f}; W1 rel {row['w1_relative_mean']:.3f}")
+            log(f"   {arch} T={T} {'w' if arch == 'ff' else 'top_p'}={second}{'' if arch == 'ff' else f' rp={rp} stay={sb}'}: mean head-beat recall "
+                f"{row['head_beat_recall']:.3f} vs shuffled {row['head_beat_recall_shuffled']:.3f} (mean margin {row['mean_margin']:+.3f}, min {row['min_margin']:+.3f}); "
+                f"still {row['stillness']:.3f} (max gap {row['max_still_gap']:.3f}); W1 rel {row['w1_relative_mean']:.3f}  "
+                + "  ".join(f"{k[:20]} {v['head_beat_recall'] - v['head_beat_recall_shuffled']:+.3f}/still {v['stillness']:.3f}" for k, v in rows_c.items()))
+        # the shipped AR top-p: 0.9 vs 1.0 at T=1.0, picked by the mean margin over the held-out speakers
+        cand = [r for r in sweep if r["arch"] == "ar" and r["temperature"] == 1.0 and r["repeat_penalty"] == args.repeat_penalty
+                and r["stay_bias"] == args.stay_bias and r["top_p"] in (0.9, 1.0)]
+        if cand:
+            best = max(cand, key=lambda r: r["mean_margin"])
+            sampling["top_p"] = best["top_p"]
+            sampling["picked_by"] = f"mean head-beat margin over {len(val_clips)} held-out clips: " + ", ".join(
+                f"top_p {r['top_p']} -> {r['mean_margin']:+.3f}" for r in cand)
+            log(f"   shipped AR sampling: T=1.0 top_p={best['top_p']} rp={args.repeat_penalty} ({sampling['picked_by']})")
+    info["sampling"] = sampling
+    info["postprocess"] = {"settle_s": args.settle_s, "pitch_floor": args.pitch_floor, "amplitude": args.amplitude}
+    with open(os.path.join(args.out, "model_info.json"), "w", encoding="utf-8") as fh:
+        json.dump(info, fh, indent=1)
+    pp_rows = []
+    if args.sweep:
+        log("-- generation-side options (settle / pitch floor / amplitude), per held-out clip, at the shipped sampling")
+        pp_rows = postprocess_rows(model, index, val_clips, sampling, seed=args.seed)
+        for r in pp_rows:
+            log(f"   settle {r['settle_s']}s pitch_floor {r['pitch_floor']} amp {r['amplitude']}{' intent-from-audio' if r.get('intent_from_audio') else ''}: " + "; ".join(
+                f"{cond} beat {v['beat_recall']:.3f} vs {v['beat_recall_shuffled']:.3f} (min margin {v['margin_min']:+.3f}) still {v['stillness']:.3f} "
+                f"(gt {v['gt_stillness']:.3f}) W1 {v['w1_relative_mean']:.3f}" for cond, v in r["conditions"].items()))
     timing["metrics"] = time.time() - t5
 
     metrics = {"command": command, "device": device, "torch": torch.__version__, "flags": flags, "data": summary, "split": split_info,
-               "excluded": list(args.exclude), "augmentation": augmentation,
+               "excluded": list(args.exclude), "augmentation": augmentation, "sampling": sampling,
                "n_train_clips": n_train_clips, "n_val_clips": len(val_clips), "vq": vq_info, "a2m": a2m_info, "ar": ar_info,
-               "eval": ev, "sampling_sweep": sweep, "timing_s": timing}
+               "eval": ev, "sampling_sweep": sweep, "postprocess_rows": pp_rows, "postprocess": info["postprocess"], "timing_s": timing}
 
     # --- export
     if not args.no_export:

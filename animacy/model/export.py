@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import warnings
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -139,8 +139,12 @@ def _verify_a2m(wrapper, path, verify_lengths, rng):
     return worst, agree / max(n, 1)
 
 
+TOL_FP16 = 5e-3     # measured on the real v1ar: 1.1e-3 (a2m) / 2.3e-3 (a2m_ar) on logits of magnitude ~10,
+                    # with 100 % identical sampled codes vs torch; 1e-3 was too tight for a 4-layer fp16-weight stack
+
+
 def export_a2m(model: MotionModel, path: str, verify_lengths=(30, 97), tol: float = 1e-4, fp16: bool = False,
-               tol_fp16: float = 1e-3) -> Dict:
+               tol_fp16: float = TOL_FP16) -> Dict:
     a2m = model.a2m.eval().cpu()
     wrapper = _A2MWrapper(a2m).eval()
     L0 = 30
@@ -183,7 +187,7 @@ def _ar_code_agreement(ar, sess, L: int = 45, seed: int = 11) -> Dict:
 
 
 def export_ar(model: MotionModel, path: str, verify_cases=((30, 1), (97, 40), (60, 60)), tol: float = 1e-4,
-              fp16: bool = False, tol_fp16: float = 1e-3) -> Dict:
+              fp16: bool = False, tol_fp16: float = TOL_FP16) -> Dict:
     """``a2m_ar.onnx``: features [1, L, 66], speaking [1, L], causal [1], codes [1, t] (BOS then the
     codes so far) -> logits_next [1, n_codes], logits_all [1, t, n_codes]. Verified against torch at
     several (L, t) and against the windowed Python generator path."""
@@ -267,15 +271,27 @@ def export_vq_decoder(model: MotionModel, path: str, verify_lengths=(15, 61), to
             "verify_lengths": list(verify_lengths), "tol": tol}
 
 
+def _intent_block() -> Dict:
+    from .intent import describe
+    from .retrieval import AROUSAL_BONUS, THINKING_BONUS
+
+    return describe(AROUSAL_BONUS, THINKING_BONUS)
+
+
 def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: str, metrics: Optional[Dict] = None,
-                  tol: float = 1e-4, fp16: bool = False) -> Dict:
+                  tol: float = 1e-4, fp16: bool = False, archs: Optional[List[str]] = None) -> Dict:
     """Write ``a2m.onnx``, ``a2m_ar.onnx``, ``vq_decoder.onnx``, ``bigram.bin``, ``model.json`` (+ retrieval
-    index). ``fp16`` stores the two predictors' weights as float16 (compute stays float32)."""
+    index). ``fp16`` stores the predictors' weights as float16 (compute stays float32). ``archs``
+    restricts which predictors ship (e.g. ``["ar"]`` drops ``a2m.onnx``; a stale file is removed)."""
     os.makedirs(out_dir, exist_ok=True)
-    report: Dict = {}
-    if model.a2m is not None:
-        report["a2m"] = export_a2m(model, os.path.join(out_dir, "a2m.onnx"), tol=tol, fp16=fp16)
-    if model.ar is not None:
+    archs = [a for a in (archs or model.archs) if a in model.archs]
+    report: Dict = {"archs": archs}
+    a2m_path = os.path.join(out_dir, "a2m.onnx")
+    if model.a2m is not None and "ff" in archs:
+        report["a2m"] = export_a2m(model, a2m_path, tol=tol, fp16=fp16)
+    elif os.path.exists(a2m_path):
+        os.remove(a2m_path)
+    if model.ar is not None and "ar" in archs:
         report["a2m_ar"] = export_ar(model, os.path.join(out_dir, "a2m_ar.onnx"), tol=tol, fp16=fp16)
     report["vq_decoder"] = export_vq_decoder(model, os.path.join(out_dir, "vq_decoder.onnx"), tol=tol)
 
@@ -291,6 +307,8 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
     stats = model.vq.stats
     verdict = (metrics or {}).get("verdict", {})
     default_arch = verdict.get("default_arch") or model.info.get("default_arch") or ("ar" if model.ar is not None else "ff")
+    if default_arch not in archs and archs:
+        default_arch = archs[0]
     model_json = {
         "schema": "animacy.model.v1",
         "feature_contract": FEATURE_CONTRACT,
@@ -302,7 +320,7 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
         "channels": list(MODEL_CHANNELS),
         "stats": {"mean": [float(x) for x in stats["mean"]], "std": [float(x) for x in stats["std"]],
                   "norm_clip": NORM_CLIP},
-        "archs": model.archs,
+        "archs": archs,
         "default_arch": default_arch,
         "a2m": {
             "arch": "ff",
@@ -313,7 +331,7 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
             "outputs": {"logits": "float32 [1, L, 512]"},
             "weights": "float16 initializers, float32 compute" if report["a2m"].get("fp16") else "float32",
             "bytes": report["a2m"]["bytes"],
-        } if model.a2m is not None else None,
+        } if "a2m" in report else None,
         "a2m_ar": {
             "arch": "ar",
             "file": "a2m_ar.onnx",
@@ -338,7 +356,7 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
                          "stay_energy": model.info.get("sampling", {}).get("stay_energy", -0.3)},
             "weights": "float16 initializers, float32 compute" if report["a2m_ar"].get("fp16") else "float32",
             "bytes": report["a2m_ar"]["bytes"],
-        } if model.ar is not None else None,
+        } if "a2m_ar" in report else None,
         "vq_decoder": {
             "file": "vq_decoder.onnx",
             "inputs": {"codes": "int64 [1, L]"},
@@ -350,10 +368,20 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
         "sampling": {"temperature": 0.8, "bigram_weight": 0.5,
                      "rule": "ff: softmax(logits / temperature + bigram_weight * bigram[prev]) per step, prev = last sampled code; ar: see a2m_ar.step"},
         "smoothing": {"kind": "zero-phase butterworth order 2", "cutoff_hz": DEFAULT_SMOOTH_HZ},
+        "postprocess": {
+            **{"settle_s": 0.5, "pitch_floor": -3.0, "amplitude": 1.0, **(model.info.get("postprocess") or {})},
+            "order": "decode -> smooth -> amplitude (per-channel scale, scalar or [14]) -> pitch floor -> settle -> clamp to channel bounds",
+            "pitch_floor_rule": "low-pass head_pitch at 0.3 Hz (2nd-order butterworth, zero-phase); where that baseline is below pitch_floor add (pitch_floor - baseline)",
+            "settle_rule": "end = last frame with speaking=1 (else last frame with feature[64] > -0.3, else clip end); "
+                           "w ramps linearly 0->1 over the last settle_s seconds before end and stays 1 after; motion *= (1 - w)",
+            "amplitude_note": "the retarget may ask for 1.2 on speaking clips; metrics at 1.0 and 1.2 are in checkpoints/<run>/REPORT.md",
+        },
         "detrend": {"channels": list(POSE_CHANNELS), "cutoff_hz": DETREND_HZ,
                     "meaning": "pose channels are the residual above cutoff_hz: output motion is centred on neutral; add the gaze overlay for where to look"},
         "neutral": {"eye_open_l": 0.6, "eye_open_r": 0.6, "gaze_yaw": 0.0, "gaze_pitch": 0.0},
-        "retrieval": {"file": "retrieval.json", "bin": "retrieval.bin"} if index is not None else None,
+        "retrieval": {"file": "retrieval.json", "bin": "retrieval.bin",
+                      "intent_fields": index.arousal is not None} if index is not None else None,
+        "intent": _intent_block(),
         "default_backend": verdict.get("default_backend", "retrieval"),
         "verdict": verdict,
         "training": model.info.get("training", {}),
@@ -378,13 +406,14 @@ def main(argv=None) -> int:
     p.add_argument("--out", default="web/models")
     p.add_argument("--tol", type=float, default=1e-4)
     p.add_argument("--fp16", action="store_true", help="float16 weights for a2m.onnx and a2m_ar.onnx")
+    p.add_argument("--archs", nargs="*", default=None, help="which predictors to ship (default: all in the checkpoint), e.g. --archs ar")
     a = p.parse_args(argv)
     model = MotionModel.load(a.ckpt, "cpu")
     idx_path = os.path.join(a.ckpt, "retrieval.json")
     index = RetrievalIndex.load(idx_path) if os.path.exists(idx_path) else None
     m_path = os.path.join(a.ckpt, "metrics.json")
     metrics = json.load(open(m_path, encoding="utf-8")) if os.path.exists(m_path) else None
-    rep = export_bundle(model, index, a.out, (metrics or {}).get("eval"), tol=a.tol, fp16=a.fp16)
+    rep = export_bundle(model, index, a.out, (metrics or {}).get("eval"), tol=a.tol, fp16=a.fp16, archs=a.archs)
     ok = True
     for k in ("a2m", "a2m_ar", "vq_decoder"):
         if k not in rep:

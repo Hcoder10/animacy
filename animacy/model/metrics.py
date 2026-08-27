@@ -24,7 +24,7 @@ from ..profile import Profile
 from ..retarget import retarget_clip
 from ..schema import RATE_HZ
 from .data import FRAMES_PER_CODE, MODEL_CHANNELS, ClipData, normalise, pool_flag, pool_pairs
-from .infer import MotionModel, generate_motion, motion_to_clip, smooth_motion
+from .infer import MotionModel, generate_motion, motion_to_clip, postprocess_motion, smooth_motion
 from .retrieval import RetrievalIndex
 
 HEAD_IDX = [MODEL_CHANNELS.index(c) for c in ("head_yaw", "head_pitch", "head_roll")]
@@ -173,10 +173,108 @@ def compute_verdict(out: Dict) -> Dict:
     }
 
 
+STILL_TOL = 0.05            # promotion: generated stillness within this of the ground truth
+
+
+def compact(ev: Dict) -> Dict:
+    """The per-condition numbers that matter, for per-clip tables."""
+    out = {"seconds": ev["held_out"]["seconds"], "gt_stillness": ev["stillness"]["gt"],
+           "nll_unigram_floor": ev["codes"].get("nll_unigram_floor"), "conditions": {}}
+    for cond in ev.get("conditions", []):
+        if cond in ev["beat"]:
+            out["conditions"][cond] = {"beat_recall": ev["beat"][cond]["recall"], "beat_precision": ev["beat"][cond]["precision"],
+                                       "stillness": ev["stillness"][cond], "w1_relative_mean": ev["velocity"][cond]["w1_relative_mean"],
+                                       "nll": ev["codes"].get(f"nll_{cond}")}
+    return out
+
+
+def promotion_verdict(per_clip: Dict[str, Dict], floor_key: str = "nll_unigram_floor") -> Dict:
+    """The shipping rule: a learned generator becomes the default only if on EVERY held-out
+    speaker it beats its shuffled-audio control by >= BEAT_MARGIN, sits within STILL_TOL of the
+    ground-truth stillness, and its code NLL is below the unigram floor. AR preferred over ff."""
+    out = {"rule": f"on every held-out clip: margin >= {BEAT_MARGIN}, |stillness - gt| <= {STILL_TOL}, NLL < unigram floor",
+           "candidates": {}, "default_backend": "retrieval"}
+    for arch, cond in ARCH_COND.items():
+        rows = {}
+        ok_all = True
+        for name, pc in per_clip.items():
+            c = pc["conditions"].get(cond)
+            cs = pc["conditions"].get(f"{cond}_shuffled")
+            if c is None or cs is None:
+                ok_all = False
+                continue
+            margin = c["beat_recall"] - cs["beat_recall"]
+            still_gap = abs(c["stillness"] - pc["gt_stillness"])
+            below = c["nll"] is not None and pc[floor_key] is not None and c["nll"] < pc[floor_key]
+            ok = margin >= BEAT_MARGIN and still_gap <= STILL_TOL and below
+            rows[name] = {"margin": margin, "stillness": c["stillness"], "gt_stillness": pc["gt_stillness"],
+                          "still_gap": still_gap, "nll": c["nll"], "floor": pc[floor_key], "below_floor": bool(below), "ok": bool(ok)}
+            ok_all &= ok
+        if rows:
+            out["candidates"][arch] = {"per_clip": rows, "qualifies": bool(ok_all and len(rows) == len(per_clip))}
+    for arch in ("ar", "ff"):
+        if out["candidates"].get(arch, {}).get("qualifies"):
+            out["default_backend"] = "ar" if arch == "ar" else "model"
+            break
+    return out
+
+
+def postprocess_rows(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Sequence[ClipData],
+                     sampling: Dict, archs: Optional[Sequence[str]] = None, seed: int = 0,
+                     grid=((0.0, None, 1.0, False), (0.5, -3.0, 1.0, False), (0.0, None, 1.2, False), (0.5, -3.0, 1.2, False),
+                           (0.5, -3.0, 1.0, True))) -> List[Dict]:
+    """The generation-side options as separate rows, per held-out clip, at the shipped sampling:
+    (settle_s, pitch_floor, amplitude, intent_from_audio) for every learned generator and retrieval.
+    The last row is the intent layer driven by the clip's own audio (no text): retrieval arousal
+    bonus + amplitude rule."""
+    archs = list(archs) if archs is not None else model.archs
+    conds = [ARCH_COND[a] for a in archs] + (["retrieval"] if index is not None and len(index) else [])
+    rows = []
+    for settle_s, pitch_floor, amp, ifa in grid:
+        if ifa and (index is None or index.arousal is None):
+            continue
+        per = {}
+        arous = {}
+        for c in val_clips:
+            e = evaluate(model, index, [c], [], seed=seed, temperature=sampling.get("temperature", 1.0),
+                         bigram_weight=sampling.get("bigram_weight", 0.5), top_p=sampling.get("top_p", 1.0),
+                         repeat_penalty=sampling.get("repeat_penalty", 0.0), stay_bias=sampling.get("stay_bias", 0.0),
+                         stay_energy=sampling.get("stay_energy", -0.3), settle_s=settle_s, pitch_floor=pitch_floor,
+                         amplitude=amp, archs=archs, verbose=False, intent_from_audio=ifa)
+            per[c.name] = compact(e)
+            arous[c.name] = e["postprocess"].get("audio_arousal_mean")
+        row = {"settle_s": settle_s, "pitch_floor": pitch_floor, "amplitude": amp, "intent_from_audio": ifa,
+               "audio_arousal": arous if ifa else None, "conditions": {}}
+        for cond in conds:
+            vals = [pc["conditions"][cond] for pc in per.values() if cond in pc["conditions"]]
+            shuf = [pc["conditions"][f"{cond}_shuffled"] for pc in per.values() if f"{cond}_shuffled" in pc["conditions"]]
+            if not vals:
+                continue
+            n = len(vals)
+            row["conditions"][cond] = {
+                "beat_recall": sum(v["beat_recall"] for v in vals) / n,
+                "beat_recall_shuffled": sum(v["beat_recall"] for v in shuf) / n,
+                "margin_min": min(v["beat_recall"] - s["beat_recall"] for v, s in zip(vals, shuf)),
+                "stillness": sum(v["stillness"] for v in vals) / n,
+                "gt_stillness": sum(pc["gt_stillness"] for pc in per.values()) / n,
+                "w1_relative_mean": sum(v["w1_relative_mean"] for v in vals) / n,
+                "per_clip": {name: {"margin": pc["conditions"][cond]["beat_recall"] - pc["conditions"][f"{cond}_shuffled"]["beat_recall"],
+                                    "stillness": pc["conditions"][cond]["stillness"], "w1": pc["conditions"][cond]["w1_relative_mean"]}
+                             for name, pc in per.items() if cond in pc["conditions"]},
+            }
+        rows.append(row)
+    return rows
+
+
 def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Sequence[ClipData],
              profiles: Sequence[Profile], seed: int = 0, temperature: float = 0.8, bigram_weight: float = 0.5,
              top_p: float = 0.9, archs: Optional[Sequence[str]] = None, max_runs: Optional[int] = None,
-             verbose: bool = True, repeat_penalty: float = 0.0, stay_bias: float = 0.0, stay_energy: float = -0.3) -> Dict:
+             verbose: bool = True, repeat_penalty: float = 0.0, stay_bias: float = 0.0, stay_energy: float = -0.3,
+             settle_s: float = 0.0, pitch_floor: Optional[float] = None, amplitude=1.0,
+             intent_from_audio: bool = False) -> Dict:
+    """``intent_from_audio``: the intent layer with no text - retrieval uses the query window's
+    own audio arousal for its bonus, and every source's amplitude follows the amplitude rule on
+    the run's mean audio arousal (what ``animacy say`` would do without a text intent)."""
     rng = np.random.default_rng(seed)
     stats = model.vq.stats
     unigram = model.info.get("unigram")
@@ -198,6 +296,7 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
     gen: Dict[str, List[np.ndarray]] = {k: [] for k in conds}
     gts: List[np.ndarray] = []
     spk: List[np.ndarray] = []
+    audio_arousal_runs: List[float] = []
     nll: Dict[str, List[np.ndarray]] = {}
     acc: Dict[str, List[np.ndarray]] = {}
     n_steps = 0
@@ -206,16 +305,27 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
         f, s, gt = c.features[a:a + n], c.speaking[a:a + n], c.motion[a:a + n]
         fs = block_shuffle(f, SHUFFLE_BLOCK, rng)
         ss = block_shuffle(s, SHUFFLE_BLOCK, rng)
+        amp, amp_s, use_aa = amplitude, amplitude, False
+        if intent_from_audio and index is not None and len(index) and index.arousal is not None:
+            from .intent import amplitude_for
+
+            win = int(index.meta.get("win", 30))
+            ar_run = float(np.mean([index.audio_arousal(f[i:i + win]) for i in range(0, max(1, n - win + 1), win)]))
+            ar_shuf = float(np.mean([index.audio_arousal(fs[i:i + win]) for i in range(0, max(1, n - win + 1), win)]))
+            amp, amp_s, use_aa = amplitude_for(ar_run), amplitude_for(ar_shuf), True
+            audio_arousal_runs.append(ar_run)
+        pp = dict(settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amp)
+        pp_s = dict(settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amp_s)
         kw = dict(temperature=temperature, bigram_weight=bigram_weight, top_p=top_p, seed=seed + k, repeat_penalty=repeat_penalty,
                   stay_bias=stay_bias, stay_energy=stay_energy)
         for arch in archs:
             cn = ARCH_COND[arch]
-            gen[cn].append(generate_motion(model, f, s, causal=False, arch=arch, **kw)[0])
-            gen[f"{cn}_shuffled"].append(generate_motion(model, fs, ss, causal=False, arch=arch, **kw)[0])
-            gen[f"{cn}_causal"].append(generate_motion(model, f, s, causal=True, arch=arch, **kw)[0])
+            gen[cn].append(generate_motion(model, f, s, causal=False, arch=arch, **kw, **pp)[0])
+            gen[f"{cn}_shuffled"].append(generate_motion(model, fs, ss, causal=False, arch=arch, **kw, **pp_s)[0])
+            gen[f"{cn}_causal"].append(generate_motion(model, f, s, causal=True, arch=arch, **kw, **pp)[0])
         if "retrieval" in gen:
-            gen["retrieval"].append(index.query(f, s))
-            gen["retrieval_shuffled"].append(index.query(fs, ss))
+            gen["retrieval"].append(postprocess_motion(index.query(f, s, use_audio_arousal=use_aa), s, f, **pp))
+            gen["retrieval_shuffled"].append(postprocess_motion(index.query(fs, ss, use_audio_arousal=use_aa), ss, fs, **pp_s))
         gts.append(gt)
         spk.append(s)
 
@@ -266,6 +376,10 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
         "conditions": conds,
         "sampling": {"temperature": temperature, "bigram_weight": bigram_weight, "top_p": top_p, "repeat_penalty": repeat_penalty,
                      "stay_bias": stay_bias, "stay_energy": stay_energy},
+        "postprocess": {"settle_s": settle_s, "pitch_floor": pitch_floor,
+                        "amplitude": (float(amplitude) if np.isscalar(amplitude) else [float(x) for x in amplitude]),
+                        "intent_from_audio": intent_from_audio,
+                        "audio_arousal_mean": (float(np.mean(audio_arousal_runs)) if audio_arousal_runs else None)},
         "codes": codes_out,
     }
 

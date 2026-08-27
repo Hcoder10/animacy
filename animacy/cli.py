@@ -173,7 +173,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-audio", action="store_true")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--seed", type=int, default=0)
-    s.add_argument("--checkpoint", default="checkpoints/v1")
+    s.add_argument("--checkpoint", default="checkpoints/v2a")
+    s.add_argument("--intent", default=None, help="override the intent read from the text: greeting|agreement|doubt|excitement|thinking|neutral")
     s.set_defaults(fn=_cmd_say)
 
     mi = sub.add_parser("mirror", help="live: video/webcam -> trackers -> retarget -> robot (needs mediapipe)")
