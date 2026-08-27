@@ -364,4 +364,242 @@ velocity re-derivation after a clip re-injects `±max_speed`.
 (e) JS-parity readiness. Results below are the working tree against `HEAD`,
 on the corpus at the time of the run.
 
-RESULTS_PLACEHOLDER
+Two rounds. **Round 1** (2026-08-26, corpus 41–54 clips): the original hand-set
+mapping (`ffe4ed0`) → the first envelope fit with springs/idle/soft limits
+(`8e4955a`). **Round 2** (2026-08-27, corpus 90 clips / 562k frames): that fit →
+the blind-grader-driven mapping (whole-arm coupling, 1.15× target, ζ 0.6,
+vendor-RMS idle, `settle`). Numbers are comparable within a round only (the
+human corpus grew between them). Reading: round 1 fixed the two measurable
+defects (lamp gaze under lean 22° → 5°, envelope 0.42 → 0.74 / 0.51 → 0.71);
+round 2 traded a little envelope score (0.82 → 0.76 lamp: `wrist_pitch` now
+carries part of the nod as arm translation, and `base_pitch` is velocity-capped
+once the arm follows the head) for gaze error 5.4° → 1.4°, vendor-like
+translation velocities on Reachy (`head_x` W1 0.64 → 0.24, `head_z` 0.56 →
+0.34) and a body that moves — stillness 0.39 → 0.31 (lamp) and 0.49 → 0.43
+(Reachy) against the vendor's 0.59 / 0.61: the retargeted bodies are busier
+than the authored libraries, which is the amplitude/aliveness the grader
+asked for, at the cost of the vendor's holds. Legality is 0 violations in
+every cell, offline and live. Settle is not exercised by (a)–(d) (the corpus
+is continuous speech); its behaviour is the worked example in §1.0.
+
+### Round 1 — original → fit v1
+
+#### lamp: before (ffe4ed0) vs after
+
+**(a) envelope match** (retargeted human corpus vs vendor native clips)
+
+| joint       | vendor |.|p95 | before (ffe4ed0) |.|p95 (ratio) | after |.|p95 (ratio) | vendor vel p95 | before (ffe4ed0) vel p95 | after vel p95 |
+|-------------|---------------|---------------------------------|----------------------|----------------|--------------------------|---------------|
+| base_yaw    | 33.5          | 13.1 (0.39)                     | 29.5 (0.88)          | 47             | 35                       | 60            |
+| base_pitch  | 31.6          | 14.8 (0.47)                     | 17.5 (0.55)          | 29             | 36                       | 26            |
+| elbow_pitch | 25.7          | 16.0 (0.62)                     | 25.1 (0.97)          | 64             | 22                       | 28            |
+| wrist_roll  | 41.8          | 19.0 (0.45)                     | 27.8 (0.67)          | 44             | 42                       | 59            |
+| wrist_pitch | 46.6          | 12.0 (0.26)                     | 31.9 (0.68)          | 67             | 42                       | 43            |
+
+envelope score exp(−mean|log ratio|): before (ffe4ed0) = 0.42, after = 0.74
+
+**(b) gaze elevation error under lean** (URDF FK of the head's look axis, deg; 0 = still on the person)
+
+| channels                                                 | before (ffe4ed0) | after |
+|----------------------------------------------------------|------------------|-------|
+| head_x=50                                                | -6.00            | -0.00 |
+| head_x=100                                               | -12.00           | -0.00 |
+| head_x=150                                               | -18.00           | -1.58 |
+| torso_lean_fwd=10                                        | -11.00           | -0.00 |
+| torso_lean_fwd=20                                        | -22.00           | -0.00 |
+| head_z=50                                                | +17.50           | -0.11 |
+| head_z=-50                                               | -17.50           | -5.41 |
+| mouth_open=1                                             | +6.00            | +0.00 |
+| head_x=100, torso_lean_fwd=15, head_z=30, mouth_open=0.5 | -15.00           | -0.75 |
+
+max |error|: before (ffe4ed0) = 22.00 deg, after = 5.41 deg
+
+**(c) legality** (speed-cap / limit violations over the whole corpus, offline and live)
+
+| version          | speed offline | limit offline | speed live | limit live |
+|------------------|---------------|---------------|------------|------------|
+| before (ffe4ed0) | 0             | 0             | 0          | 0          |
+| after            | 0             | 0             | 0          | 0          |
+
+**(d) stillness & velocity histogram** (still = fraction of frames < 5 units/s; W1 = velocity-distribution distance to the vendor, relative to the vendor mean speed)
+
+| joint       | vendor still | before (ffe4ed0) still | after still | before (ffe4ed0) W1 | after W1 |
+|-------------|--------------|------------------------|-------------|---------------------|----------|
+| base_yaw    | 0.68         | 0.40                   | 0.27        | 0.51                | 0.79     |
+| base_pitch  | 0.62         | 0.35                   | 0.45        | 0.61                | 0.29     |
+| elbow_pitch | 0.47         | 0.50                   | 0.43        | 0.61                | 0.53     |
+| wrist_roll  | 0.71         | 0.53                   | 0.41        | 0.33                | 0.66     |
+| wrist_pitch | 0.46         | 0.32                   | 0.36        | 0.40                | 0.36     |
+
+overall stillness: vendor 0.59, before (ffe4ed0) 0.42, after 0.39
+
+**(e) JS-parity readiness** (working tree)
+
+| feature                      | used by profile | implemented in web/js/retarget.js |
+|------------------------------|-----------------|-----------------------------------|
+| spring                       | yes             | yes                               |
+| idle                         | yes             | yes                               |
+| soft_limit                   | yes             | yes                               |
+| web/robots/<name>.json fresh | -               | yes                               |
+
+#### reachy_mini: before (ffe4ed0) vs after
+
+**(a) envelope match** (retargeted human corpus vs vendor native clips)
+
+| joint         | vendor |.|p95 | before (ffe4ed0) |.|p95 (ratio) | after |.|p95 (ratio) | vendor vel p95 | before (ffe4ed0) vel p95 | after vel p95 |
+|---------------|---------------|---------------------------------|----------------------|----------------|--------------------------|---------------|
+| head_x        | 14.9          | 19.0 (1.28)                     | 14.0 (0.94)          | 29             | 15                       | 8             |
+| head_y        | 17.1          | 12.1 (0.71)                     | 12.3 (0.72)          | 33             | 14                       | 13            |
+| head_z        | 14.8          | 11.8 (0.80)                     | 11.8 (0.80)          | 24             | 13                       | 11            |
+| head_roll     | 17.0          | 9.3 (0.55)                      | 17.2 (1.01)          | 53             | 17                       | 30            |
+| head_pitch    | 20.1          | 7.8 (0.39)                      | 16.0 (0.80)          | 41             | 26                       | 49            |
+| head_yaw      | 38.8          | 14.7 (0.38)                     | 32.2 (0.83)          | 55             | 32                       | 68            |
+| body_yaw      | 28.6          | 12.5 (0.44)                     | 28.1 (0.98)          | 56             | 32                       | 57            |
+| antenna_left  | 126.6         | 41.3 (0.33)                     | 36.7 (0.29)          | 198            | 113                      | 98            |
+| antenna_right | 89.6          | 43.2 (0.48)                     | 38.5 (0.43)          | 184            | 116                      | 97            |
+
+envelope score exp(−mean|log ratio|): before (ffe4ed0) = 0.51, after = 0.71
+
+**(c) legality** (speed-cap / limit violations over the whole corpus, offline and live)
+
+| version          | speed offline | limit offline | speed live | limit live |
+|------------------|---------------|---------------|------------|------------|
+| before (ffe4ed0) | 0             | 0             | 0          | 0          |
+| after            | 0             | 0             | 0          | 0          |
+
+**(d) stillness & velocity histogram** (still = fraction of frames < 5 units/s; W1 = velocity-distribution distance to the vendor, relative to the vendor mean speed)
+
+| joint         | vendor still | before (ffe4ed0) still | after still | before (ffe4ed0) W1 | after W1 |
+|---------------|--------------|------------------------|-------------|---------------------|----------|
+| head_x        | 0.60         | 0.73                   | 0.88        | 0.41                | 0.67     |
+| head_y        | 0.46         | 0.75                   | 0.78        | 0.57                | 0.62     |
+| head_z        | 0.56         | 0.75                   | 0.80        | 0.47                | 0.57     |
+| head_roll     | 0.56         | 0.72                   | 0.56        | 0.59                | 0.30     |
+| head_pitch    | 0.48         | 0.55                   | 0.35        | 0.41                | 0.43     |
+| head_yaw      | 0.66         | 0.60                   | 0.41        | 0.33                | 0.57     |
+| body_yaw      | 0.92         | 0.41                   | 0.26        | 1.59                | 2.15     |
+| antenna_left  | 0.67         | 0.32                   | 0.17        | 0.53                | 0.66     |
+| antenna_right | 0.61         | 0.32                   | 0.17        | 0.45                | 0.60     |
+
+overall stillness: vendor 0.61, before (ffe4ed0) 0.57, after 0.49
+
+**(e) JS-parity readiness** (working tree)
+
+| feature                                     | used by profile | implemented in web/js/retarget.js |
+|---------------------------------------------|-----------------|-----------------------------------|
+| spring                                      | yes             | yes                               |
+| idle                                        | yes             | yes                               |
+| soft_limit                                  | yes             | yes                               |
+| web/robots/<name>.json fresh                | -               | yes                               |
+| both brows up → antennas (L, R) = (-55, 55) | -               | symmetric outward                 |
+
+### Round 2 — fit v1 → fit v2 (grader-driven)
+
+#### lamp: before (8e4955a) vs after
+
+**(a) envelope match** (retargeted human corpus vs vendor native clips)
+
+| joint       | vendor |.|p95 | before (8e4955a) |.|p95 (ratio) | after |.|p95 (ratio) | vendor vel p95 | before (8e4955a) vel p95 | after vel p95 |
+|-------------|---------------|---------------------------------|----------------------|----------------|--------------------------|---------------|
+| base_yaw    | 33.5          | 34.6 (1.03)                     | 35.8 (1.07)          | 47             | 63                       | 70            |
+| base_pitch  | 31.6          | 22.4 (0.71)                     | 20.1 (0.64)          | 29             | 28                       | 43            |
+| elbow_pitch | 25.7          | 27.4 (1.07)                     | 24.1 (0.94)          | 64             | 29                       | 51            |
+| wrist_roll  | 41.8          | 32.6 (0.78)                     | 33.6 (0.80)          | 44             | 60                       | 66            |
+| wrist_pitch | 46.6          | 33.9 (0.73)                     | 26.0 (0.56)          | 67             | 44                       | 38            |
+
+envelope score exp(−mean|log ratio|): before (8e4955a) = 0.82, after = 0.76
+
+**(b) gaze elevation error under lean** (URDF FK of the head's look axis, deg; 0 = still on the person)
+
+| channels                                                 | before (8e4955a) | after |
+|----------------------------------------------------------|------------------|-------|
+| head_x=50                                                | -0.00            | +0.00 |
+| head_x=100                                               | -0.00            | +0.00 |
+| head_x=150                                               | -1.58            | -0.36 |
+| torso_lean_fwd=10                                        | -0.00            | -0.00 |
+| torso_lean_fwd=20                                        | -0.00            | -0.00 |
+| head_z=50                                                | -0.11            | +0.00 |
+| head_z=-50                                               | -5.41            | -1.43 |
+| mouth_open=1                                             | +0.00            | +0.00 |
+| head_x=100, torso_lean_fwd=15, head_z=30, mouth_open=0.5 | -0.75            | +0.00 |
+
+max |error|: before (8e4955a) = 5.41 deg, after = 1.43 deg
+
+**(c) legality** (speed-cap / limit violations over the whole corpus, offline and live)
+
+| version          | speed offline | limit offline | speed live | limit live |
+|------------------|---------------|---------------|------------|------------|
+| before (8e4955a) | 0             | 0             | 0          | 0          |
+| after            | 0             | 0             | 0          | 0          |
+
+**(d) stillness & velocity histogram** (still = fraction of frames < 5 units/s; W1 = velocity-distribution distance to the vendor, relative to the vendor mean speed)
+
+| joint       | vendor still | before (8e4955a) still | after still | before (8e4955a) W1 | after W1 |
+|-------------|--------------|------------------------|-------------|---------------------|----------|
+| base_yaw    | 0.68         | 0.28                   | 0.25        | 0.81                | 1.00     |
+| base_pitch  | 0.62         | 0.44                   | 0.30        | 0.30                | 0.93     |
+| elbow_pitch | 0.47         | 0.44                   | 0.30        | 0.51                | 0.28     |
+| wrist_roll  | 0.71         | 0.42                   | 0.32        | 0.64                | 0.89     |
+| wrist_pitch | 0.46         | 0.36                   | 0.35        | 0.34                | 0.43     |
+
+overall stillness: vendor 0.59, before (8e4955a) 0.39, after 0.31
+
+**(e) JS-parity readiness** (working tree)
+
+| feature                      | used by profile | implemented in web/js/retarget.js |
+|------------------------------|-----------------|-----------------------------------|
+| spring                       | yes             | yes                               |
+| idle                         | yes             | yes                               |
+| soft_limit                   | yes             | yes                               |
+| web/robots/<name>.json fresh | -               | yes                               |
+
+#### reachy_mini: before (8e4955a) vs after
+
+**(a) envelope match** (retargeted human corpus vs vendor native clips)
+
+| joint         | vendor |.|p95 | before (8e4955a) |.|p95 (ratio) | after |.|p95 (ratio) | vendor vel p95 | before (8e4955a) vel p95 | after vel p95 |
+|---------------|---------------|---------------------------------|----------------------|----------------|--------------------------|---------------|
+| head_x        | 14.9          | 15.9 (1.07)                     | 17.1 (1.15)          | 29             | 9                        | 20            |
+| head_y        | 17.1          | 16.1 (0.94)                     | 16.1 (0.94)          | 33             | 13                       | 15            |
+| head_z        | 14.8          | 13.1 (0.89)                     | 11.1 (0.75)          | 24             | 11                       | 17            |
+| head_roll     | 17.0          | 18.0 (1.06)                     | 19.0 (1.12)          | 53             | 31                       | 34            |
+| head_pitch    | 20.1          | 17.1 (0.85)                     | 19.8 (0.99)          | 41             | 49                       | 60            |
+| head_yaw      | 38.8          | 38.3 (0.99)                     | 35.7 (0.92)          | 55             | 69                       | 69            |
+| body_yaw      | 28.6          | 33.6 (1.18)                     | 32.8 (1.15)          | 56             | 63                       | 60            |
+| antenna_left  | 126.6         | 37.1 (0.29)                     | 36.7 (0.29)          | 198            | 100                      | 101           |
+| antenna_right | 89.6          | 38.0 (0.42)                     | 37.4 (0.42)          | 184            | 99                       | 100           |
+
+envelope score exp(−mean|log ratio|): before (8e4955a) = 0.74, after = 0.72
+
+**(c) legality** (speed-cap / limit violations over the whole corpus, offline and live)
+
+| version          | speed offline | limit offline | speed live | limit live |
+|------------------|---------------|---------------|------------|------------|
+| before (8e4955a) | 0             | 0             | 0          | 0          |
+| after            | 0             | 0             | 0          | 0          |
+
+**(d) stillness & velocity histogram** (still = fraction of frames < 5 units/s; W1 = velocity-distribution distance to the vendor, relative to the vendor mean speed)
+
+| joint         | vendor still | before (8e4955a) still | after still | before (8e4955a) W1 | after W1 |
+|---------------|--------------|------------------------|-------------|---------------------|----------|
+| head_x        | 0.60         | 0.87                   | 0.63        | 0.64                | 0.24     |
+| head_y        | 0.46         | 0.78                   | 0.74        | 0.61                | 0.55     |
+| head_z        | 0.56         | 0.80                   | 0.68        | 0.56                | 0.34     |
+| head_roll     | 0.56         | 0.56                   | 0.52        | 0.28                | 0.25     |
+| head_pitch    | 0.48         | 0.36                   | 0.30        | 0.42                | 0.59     |
+| head_yaw      | 0.66         | 0.42                   | 0.41        | 0.56                | 0.57     |
+| body_yaw      | 0.92         | 0.27                   | 0.29        | 2.15                | 1.97     |
+| antenna_left  | 0.67         | 0.17                   | 0.16        | 0.65                | 0.66     |
+| antenna_right | 0.61         | 0.17                   | 0.16        | 0.59                | 0.59     |
+
+overall stillness: vendor 0.61, before (8e4955a) 0.49, after 0.43
+
+**(e) JS-parity readiness** (working tree)
+
+| feature                                     | used by profile | implemented in web/js/retarget.js |
+|---------------------------------------------|-----------------|-----------------------------------|
+| spring                                      | yes             | yes                               |
+| idle                                        | yes             | yes                               |
+| soft_limit                                  | yes             | yes                               |
+| web/robots/<name>.json fresh                | -               | yes                               |
+| both brows up → antennas (L, R) = (-55, 55) | -               | symmetric outward                 |
