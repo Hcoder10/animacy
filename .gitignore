@@ -26,3 +26,8 @@ web/dist/
 *.log
 .DS_Store
 Thumbs.db
+
+# capture artifacts
+data/models/
+data/debug/
+data/sim2real/

@@ -1,0 +1,26 @@
+[
+ {
+  "name": "obama_2015_02_07",
+  "file": "obama_2015_02_07.json",
+  "seconds": 196.7,
+  "license": "Public Domain",
+  "source_url": "https://commons.wikimedia.org/wiki/File:2015-02-07_President_Obama%27s_Weekly_Address.webm",
+  "title": "2015-02-07 President Obama's Weekly Address.webm"
+ },
+ {
+  "name": "kende_interview_2014",
+  "file": "kende_interview_2014.json",
+  "seconds": 234.9,
+  "license": "CC-BY-3.0",
+  "source_url": "https://commons.wikimedia.org/wiki/File:Internet_Hall_of_Fame_2014_Michael_Kende_interview.webm",
+  "title": "Internet Hall of Fame 2014 Michael Kende interview.webm"
+ },
+ {
+  "name": "royal_society_cloke",
+  "file": "royal_society_cloke.json",
+  "seconds": 300.0,
+  "license": "CC-BY-3.0",
+  "source_url": "https://commons.wikimedia.org/wiki/File:Interview_on_extreme_weather_with_physical_geographer_Hannah_Cloke_%E2%80%93_The_Royal_Society.webm",
+  "title": "Interview on extreme weather with physical geographer Hannah Cloke \u2013 The Royal Society.webm"
+ }
+]

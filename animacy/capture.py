@@ -52,13 +52,41 @@ yaw about +z (+ = turn left), pitch about +y (+ = nose DOWN, so
 ``head_xyz_mm = 10 * P (t - t_neutral)``. Full derivation with the axis
 checks: ``animacy/capture_math.py`` module docstring.
 
-Empirical verification (``scripts/capture_debug_frames.py`` writes annotated
-frames to ``data/debug/``; each sign was read off real frames, and every
-frame is also cross-checked against image-space landmark geometry that does
-not depend on the matrix convention: nose-vs-cheek offset for yaw, eye-line
-tilt for roll, nose-vs-ear height for pitch, face size for head_x, face
-centre for head_y/z, iris offset within the eye for gaze_yaw). See the
-capture report in the session notes for which frames confirmed what.
+Empirical verification (2026-08-26, ``scripts/capture_debug_frames.py`` on
+the first 120 s of the 2015-02-07 weekly address, 854x480, 29.97 fps, 2099
+face-valid samples). Two independent checks:
+
+1. Each canonical channel correlated against a convention-free image-space
+   cue computed from the normalized face-mesh landmarks (no matrix involved):
+   head_yaw vs nose-offset-from-cheek-midpoint r=+0.99; head_roll vs
+   right-eye-lower-than-left r=+0.98; head_pitch vs nose-above-cheek-line
+   r=+0.94; head_x vs cheek-to-cheek width r=+0.99; head_y vs face-centre x
+   r=+0.95; head_z vs face-centre height r=+1.00; gaze_yaw vs iris offset
+   within the eye r=+0.98. All positive, so nothing is mirrored.
+2. Annotated frames at the 3rd/97th percentile of each channel were read:
+   head_yaw +11.6 shows the face turned toward image right (subject's left)
+   and -12.8 toward image left; head_roll +6.3 shows the eye line lower at
+   its image-left end (subject's right eye lower, i.e. right ear dropping);
+   head_pitch +7.4 is chin-up, -7.7 chin-tucked; head_x +104 mm is the
+   closer camera shot (face visibly larger); head_z +19 mm has the head
+   near the top of the frame; gaze_yaw +14 / -14 show the irises shifted
+   toward image right / left.
+
+Repeated on the 23.976 fps Kende interview (1909 face-valid samples): yaw
++0.98, roll +0.99, pitch +0.95, head_y +0.99, head_z +0.99, gaze +0.85;
+head_x only +0.23 because that seated interviewee moves <4 mm in depth (a
+low-variance channel, not a sign failure). On the multi-shot CBP vlog all
+cues pass except head_z (-0.42): the cuts between shots at different
+distances decouple image height from metric height, so the cue itself is
+invalid there.
+
+Not visually verified: torso_* (the 3rd/97th-percentile frames differ by
+only ~7 deg of shoulder turn, too subtle to read; the sign follows from the
+pose_to_body axes, which the tests cover) and the arm chain (checked on
+synthetic landmarks in ``tests/test_capture_math.py``; on the CBP vlog
+frames, hands clasped in the lap read shoulder_pitch ~10-13, elbow_flex
+~40, hand_open 0.1-0.3, which is plausible but not measured against ground
+truth).
 
 Known limitations
 -----------------
