@@ -156,3 +156,13 @@ torch: AR logits diff 3.0e-3 with 100 % identical sampled codes): `a2m_ar.onnx`
 cap not binding), `model.json` (archs `["ar"]`, `default_arch = ar`,
 `default_backend = retrieval`, intent + postprocess blocks). The feed-forward
 `a2m` stays in `checkpoints/` only.
+
+Intent lexicon integrity (`intent.v2`): `animacy/model/intent.py` holds only
+generic cue words per tag (hi/hey/hello/welcome; yes/exactly/right/agree/of
+course; no/not sure/don't think/really?/hmm; wow/no way/incredible/amazing/!!;
+let me think/wait/consider/hmm...) plus punctuation modifiers and a negation
+rule for agreement cues. None of the blind grader's utterances is stored in the
+module or in `web/models/model.json`; the grader's five lines are read from
+`animacy.grade.movements` only when a REPORT is generated, and the rule tags
+all five correctly alongside ten fresh lines written for the module (two per
+intent; table in `checkpoints/v2a/REPORT.md`).
