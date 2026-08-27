@@ -106,10 +106,12 @@ def model_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkpoint
 
 
 def retrieval_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkpoints/v1", seed: int = 0,
-                     listen: bool = False, intent=None, **kw) -> HumanClip:
+                     listen: bool = False, intent=None, proto_weight: Optional[float] = None,
+                     energy_floor: Optional[float] = None, **kw) -> HumanClip:
     """Motion matching against the corpus (``animacy.model.retrieval``), with the
-    same post-processing and intent handling as the learned model (arousal-biased
-    window choice + amplitude rule)."""
+    same post-processing and intent handling as the learned model (arousal- and
+    gesture-prototype-biased window choice + amplitude rule + energy floor).
+    ``proto_weight`` / ``energy_floor`` override the bundle defaults (None = bundle)."""
     import os
 
     from .model.infer import retrieve
@@ -126,6 +128,10 @@ def retrieval_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkp
     n = int(np.ceil(len(wav) / sr * RATE_HZ))
     feats = audio_features(wav, sr, n_ticks=n)
     speaking = np.zeros(n, np.int64) if listen else _speaking_from_audio(wav, n, sr)
+    if proto_weight is not None:
+        kw["proto_weight"] = proto_weight
+    if energy_floor is not None:
+        kw["energy_floor"] = energy_floor
     return retrieve(_MODEL_CACHE[key], feats, speaking, model, intent=intent, mode="listen" if listen else "talk", **kw)
 
 

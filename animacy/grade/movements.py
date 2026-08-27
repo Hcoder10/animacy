@@ -214,6 +214,44 @@ def synth_cached(text: str, cache_dir: str, engine: str = "auto") -> Tuple[np.nd
     return wav, sr
 
 
+# ---------------------------------------------------------------- source variants (A/B knobs)
+@dataclass(frozen=True)
+class Variant:
+    """An extra graded column: ``base`` source called with ``kwargs`` (e.g. retrieval with proto_weight=0).
+    A knob is applied only when it is an explicit parameter of the source function; a ``**kw`` catch-all does
+    not count, because a swallowed knob would make the A/B a silent no-op."""
+    name: str
+    base: str
+    kwargs: Dict[str, float]
+
+
+def parse_variant(spec: str) -> Variant:
+    """``name=base:key=value[,key=value]`` -> Variant (values are floats, or ints when integral)."""
+    try:
+        name, rest = spec.split("=", 1)
+        base, kv = rest.split(":", 1)
+    except ValueError as e:
+        raise ValueError(f"variant {spec!r}: expected name=base:key=value[,key=value]") from e
+    kwargs: Dict[str, float] = {}
+    for item in kv.split(","):
+        k, v = item.split("=", 1)
+        x = float(v)
+        kwargs[k.strip()] = int(x) if x.is_integer() else x
+    name, base = name.strip(), base.strip()
+    if base not in SOURCES:
+        raise ValueError(f"variant {name!r}: base source {base!r} not in {list(SOURCES)}")
+    if name in SOURCES:
+        raise ValueError(f"variant name {name!r} collides with a source name")
+    return Variant(name, base, kwargs)
+
+
+def explicit_params(fn) -> set:
+    try:
+        return {n for n, p in inspect.signature(fn).parameters.items() if p.kind != inspect.Parameter.VAR_KEYWORD}
+    except (TypeError, ValueError):
+        return set()
+
+
 def accepts_intent(fn) -> bool:
     """Does a motion source take an ``intent`` keyword (the talk loop's intent conditioning)?"""
     try:
@@ -235,7 +273,7 @@ def intent_argument(text: str, tag: Optional[str]):
 
 def candidate_table(profile: Profile, source: str, wav: np.ndarray, sr: int, seed: int,
                     checkpoint: str = DEFAULT_CHECKPOINT, intent: Optional[str] = None, text: Optional[str] = None,
-                    sources: Optional[Dict] = None) -> Tuple[pd.DataFrame, Dict]:
+                    sources: Optional[Dict] = None, variant: Optional[Variant] = None) -> Tuple[pd.DataFrame, Dict]:
     """Exactly ``serve.say``'s dispatch, minus the sink: source -> HumanClip -> retarget_clip.
     The intent (``intent`` tag + the utterance ``text``) is handed to sources whose signature accepts it, in the
     same form ``animacy say --intent <tag>`` uses; the envelope heuristic and older signatures are untouched."""
@@ -243,6 +281,11 @@ def candidate_table(profile: Profile, source: str, wav: np.ndarray, sr: int, see
     kwargs: Dict = {"seed": seed}
     if source != "envelope":
         kwargs["checkpoint"] = checkpoint
+    variant_applied: Dict[str, float] = {}
+    if variant is not None:
+        allowed = explicit_params(fn)
+        variant_applied = {k: v for k, v in variant.kwargs.items() if k in allowed}
+        kwargs.update(variant_applied)
     passed_intent = source != "envelope" and bool(intent) and accepts_intent(fn)
     if passed_intent:
         kwargs["intent"] = intent_argument(text or "", intent)
@@ -253,14 +296,20 @@ def candidate_table(profile: Profile, source: str, wav: np.ndarray, sr: int, see
     table = retarget_clip(clip, profile)
     meta = {k: v for k, v in clip.meta.items() if isinstance(v, (str, int, float, bool))}
     meta["intent_passed"] = intent if passed_intent else None
+    if variant is not None:
+        meta["variant"] = {"name": variant.name, "base": variant.base, "requested": dict(variant.kwargs),
+                           "applied": variant_applied, "no_op": not variant_applied}
     if isinstance(clip.meta.get("intent"), dict):
         meta["intent"] = {k: v for k, v in clip.meta["intent"].items() if isinstance(v, (str, int, float, bool))}
     return table, meta
 
 
 def candidate_clip(profile: Profile, mv: Movement, source: str, seed: int, wav: np.ndarray, sr: int,
-                   checkpoint: str = DEFAULT_CHECKPOINT) -> ClipSpec:
-    table, meta = candidate_table(profile, source, wav, sr, seed, checkpoint, intent=mv.intent_tag, text=mv.text)
+                   checkpoint: str = DEFAULT_CHECKPOINT, variant: Optional[Variant] = None) -> ClipSpec:
+    """``variant`` makes the clip's ``source`` the variant's name (an extra column) while the motion comes from the
+    variant's base source with its knobs."""
+    base = variant.base if variant is not None else source
+    table, meta = candidate_table(profile, base, wav, sr, seed, checkpoint, intent=mv.intent_tag, text=mv.text, variant=variant)
     return ClipSpec(id=f"{profile.name}/{mv.label}/{source}/s{seed}", robot=profile.name, movement=mv.key, source=source,
                     seed=seed, card_line=f'The robot says: "{mv.text}"', table=table, audio=wav, sr=sr, meta=meta,
                     line_set=mv.line_set)
@@ -272,12 +321,14 @@ DETERMINISTIC_SOURCES = ("retrieval", "envelope")   # retrieval ignores the seed
 def build_clips(robots: Sequence[str], sources: Sequence[str], seeds: int, run_dir: str,
                 checkpoint: str = DEFAULT_CHECKPOINT, movements: Sequence[Movement] = MOVEMENTS,
                 with_vendor: bool = True, tts_engine: str = "auto", seeds_by_source: Optional[Dict[str, int]] = None,
-                heldout: Optional[Sequence[Movement]] = None, log=print) -> List[ClipSpec]:
+                heldout: Optional[Sequence[Movement]] = None, variants: Optional[Sequence[Variant]] = None,
+                log=print) -> List[ClipSpec]:
     """Every clip for the run: candidates for each (robot, movement, source, seed) + one vendor clip per
     (robot, movement). ``seeds_by_source`` overrides the seed count per source (deterministic sources need one).
     Joint tables and utterance audio are saved under ``<run_dir>/clips`` for the record."""
     seeds_by_source = dict(seeds_by_source or {})
-    bad = [s for s in sources if s not in SOURCES]
+    variants = {v.name: v for v in (variants or [])}
+    bad = [s for s in sources if s not in SOURCES and s not in variants]
     if bad:
         raise ValueError(f"unknown sources {bad}; choose from {list(SOURCES)}")
     clips: List[ClipSpec] = []
@@ -291,8 +342,10 @@ def build_clips(robots: Sequence[str], sources: Sequence[str], seeds: int, run_d
         for mv in all_movements:
             wav, sr = wavs[(mv.line_set, mv.key)]
             for source in sources:
-                for seed in range(seeds_by_source.get(source, seeds)):
-                    c = candidate_clip(profile, mv, source, seed, wav, sr, checkpoint)
+                v = variants.get(source)
+                n_seeds = seeds_by_source.get(source, seeds_by_source.get(v.base, seeds) if v else seeds)
+                for seed in range(n_seeds):
+                    c = candidate_clip(profile, mv, source, seed, wav, sr, checkpoint, variant=v)
                     clips.append(c)
                     log(f"[clips] {c.id}: {len(c.table)} frames, {c.duration:.2f}s")
             if with_vendor and mv.line_set == TUNING_SET:      # one calibration clip per intent, shared by both sets

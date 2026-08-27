@@ -33,7 +33,7 @@ from typing import Dict, List, Optional, Sequence
 
 from . import kimi, rubric
 from .movements import (DEFAULT_CHECKPOINT, DETERMINISTIC_SOURCES, HELDOUT_PATH, HELDOUT_SET, MOVEMENT_KEYS, MOVEMENTS,
-                        TUNING_SET, VENDOR, build_clips, load_heldout_movements)
+                        TUNING_SET, VENDOR, build_clips, load_heldout_movements, parse_variant)
 from .probe import run_probe
 from .reel import MAX_REEL_SECONDS, Reel, plan_reels, render_reels, write_sealed_manifest
 from .render import ROOT, ViewerRenderer, contact_sheet, joint_plot
@@ -428,6 +428,7 @@ def summarise(records: Sequence[Dict], robots: Sequence[str], sources: Sequence[
     out: Dict = {"robots": {}, "gate_source": gate_source, "gate_lines": gate_lines, "line_sets": sets}
     for robot in robots:
         tables = {s: _score_table(records, robot, sources, s) for s in sets}
+        out["critiques"] = critiques(records, sources)
         out["robots"][robot] = {
             "tables": tables,
             "table": tables.get(TUNING_SET, tables[gate_lines]),        # run-1 compatible view
@@ -437,6 +438,73 @@ def summarise(records: Sequence[Dict], robots: Sequence[str], sources: Sequence[
             "contamination_gap": contamination_gap(tables, gate_source),
             "calibration": calibration(records, robot), "consistency": consistency(records, robot)}
     return out
+
+
+CRITIQUE_DIMS = ("lifelike", "timing", "appeal")
+CRITIQUE_LOW = 5.0
+_STOP = set("""the and that with this from into onto over under about which while when then than there their they them
+ have been being were was are for but not nor its it's his her our your you also very just only more most some any
+ each both such same other another after before during through toward towards between across along out off down
+ up all one two three four five six seven eight nine ten first second last next each per via like as at by in on of
+ to is be an a or so if no yes does did do done doing has had having can could would should may might must will
+ shall it he she we i me my mine himself herself itself themselves what who whom whose where why how much many few
+ lamp robot clip head still line voice speech says said phrase card end start ends starts begins mid throughout
+ arm base shade body antenna antennas ears""".split())
+
+
+def critiques(records: Sequence[Dict], sources: Sequence[str], low: float = CRITIQUE_LOW, quotes: int = 5) -> Dict:
+    """What the judge keeps saying about candidate clips, per dimension: how many scored <= ``low`` (by source),
+    the recurring content words in its reasons/descriptions for those clips, and verbatim reason quotes
+    (lowest scores first, spread across robots and sources). Fixers work from this."""
+    out: Dict = {"low_threshold": low, "dimensions": {}}
+    cands = [r for r in records if r["source"] != VENDOR and r.get("scores")]
+    for dim in CRITIQUE_DIMS:
+        lows = [r for r in cands if r["scores"].get(dim) is not None and r["scores"][dim] <= low]
+        by_source = {src: sum(1 for r in lows if r["source"] == src) for src in sources}
+        n_by_source = {src: sum(1 for r in cands if r["source"] == src and r["scores"].get(dim) is not None) for src in sources}
+        words: Dict[str, int] = {}
+        for r in lows:
+            for w in re.findall(r"[a-z]+", (str(r.get("reason", "")) + " " + str(r.get("description", ""))).lower()):
+                if len(w) > 3 and w not in _STOP:
+                    words[w] = words.get(w, 0) + 1
+        top_words = sorted(words.items(), key=lambda kv: (-kv[1], kv[0]))[:12]
+        # verbatim quotes: lowest score first, then prefer unseen (robot, source) pairs
+        ranked = sorted(lows, key=lambda r: (r["scores"][dim], r["robot"], r["number"]))
+        picked: List[Dict] = []
+        seen = set()
+        for pref_unseen in (True, False):
+            for r in ranked:
+                if len(picked) >= quotes:
+                    break
+                key = (r["robot"], r["source"])
+                if r in picked or (pref_unseen and key in seen) or not str(r.get("reason", "")).strip():
+                    continue
+                seen.add(key)
+                picked.append(r)
+        out["dimensions"][dim] = {
+            "n_low": len(lows), "n": len(cands), "low_by_source": by_source, "n_by_source": n_by_source,
+            "top_words": top_words,
+            "quotes": [{"robot": r["robot"], "number": r["number"], "source": r["source"], "movement": r["movement"],
+                        "line_set": _set(r), "score": r["scores"][dim], "reason": r.get("reason", "")} for r in picked]}
+    return out
+
+
+def _critiques_markdown(cr: Dict, red) -> List[str]:
+    L = ["## What the judge keeps saying (verbatim, by dimension)\n",
+         f"Candidate clips (vendor excluded) that scored <= {cr['low_threshold']:g} on a dimension, the words that recur in "
+         "the judge's reasons for them, and its reasons quoted verbatim (lowest scores first, spread over robots and "
+         "sources). Sealed lines are redacted.\n"]
+    for dim, d in cr["dimensions"].items():
+        share = " / ".join(f"{src} {d['low_by_source'].get(src, 0)}/{d['n_by_source'].get(src, 0)}" for src in d["low_by_source"])
+        words = ", ".join(f"{w} x{n}" for w, n in d["top_words"][:10])
+        L.append(f"**{dim}**: {d['n_low']}/{d['n']} candidate clips at or below {cr['low_threshold']:g} ({share}). "
+                 f"Recurring words: {words or '-'}.")
+        for q in d["quotes"]:
+            L.append(f"- [{q['robot']} #{q['number']} {q['source']} {q['movement']}"
+                     f"{'@' + q['line_set'] if q['line_set'] != TUNING_SET else ''} {dim}={q['score']:g}] "
+                     f"\"{red(q['reason'])}\"")
+        L.append("")
+    return L
 
 
 def _tables_of(s: Dict) -> Dict[str, Dict]:
@@ -629,6 +697,7 @@ def markdown_report(run_name: str, meta: Dict, summary: Dict, records: Sequence[
         L.append("")
     if comparison:
         L.extend(_comparison_markdown(comparison, meta["sources"]))
+    L.extend(_critiques_markdown(summary.get("critiques") or critiques(records, meta["sources"]), red))
     L.append("## Every clip, unsealed\n")
     L.append("| robot | # | origin | overall | lifelike | intent | timing | physical | appeal | what the judge saw |")
     L.append("|---|---|---|---|---|---|---|---|---|---|")
@@ -677,7 +746,7 @@ def run(robots: Sequence[str], sources: Sequence[str], seeds: int, out_dir: str,
         tts_engine: str = "auto", evidence_dir: str = EVIDENCE_DIR, zoom: float = 0.9, speed: float = 1.0,
         seeds_deterministic: Optional[int] = None, label: str = "", compare: Optional[str] = None,
         gate_source: str = "auto", gate_lines: str = "auto", heldout_path: str = HELDOUT_PATH,
-        require_lexicon: Optional[str] = None, log=print) -> Dict:
+        require_lexicon: Optional[str] = None, variants: Sequence[str] = (), log=print) -> Dict:
     t_start = time.perf_counter()
     run_dir = os.path.abspath(out_dir)
     os.makedirs(run_dir, exist_ok=True)
@@ -685,19 +754,24 @@ def run(robots: Sequence[str], sources: Sequence[str], seeds: int, out_dir: str,
     try:
         return _run_locked(robots, sources, seeds, run_dir, t_start, checkpoint, seed, max_reel_seconds, kimi_timeout,
                            parallel, gpu, speech_strip, no_kimi, force_probe, tts_engine, evidence_dir, zoom, speed,
-                           seeds_deterministic, label, compare, gate_source, gate_lines, heldout_path, require_lexicon, log)
+                           seeds_deterministic, label, compare, gate_source, gate_lines, heldout_path, require_lexicon,
+                           variants, log)
     finally:
         release_run_lock(run_dir)
 
 
 def _run_locked(robots, sources, seeds, run_dir, t_start, checkpoint, seed, max_reel_seconds, kimi_timeout, parallel, gpu,
                 speech_strip, no_kimi, force_probe, tts_engine, evidence_dir, zoom, speed, seeds_deterministic, label,
-                compare, gate_source, gate_lines, heldout_path, require_lexicon, log) -> Dict:
+                compare, gate_source, gate_lines, heldout_path, require_lexicon, variants, log) -> Dict:
     run_name = os.path.basename(run_dir.rstrip("/\\"))
+    variant_objs = [parse_variant(v) for v in (variants or [])]
+    sources = list(sources) + [v.name for v in variant_objs if v.name not in sources]
     workspace_root = judge_workspace_root(run_name)
     command = "python scripts/grade_run.py " + " ".join(sys.argv[1:]) if sys.argv and "grade_run" in sys.argv[0] else "animacy.grade.run.run(...)"
     seeds_by_source = {s: seeds_deterministic for s in sources if s in DETERMINISTIC_SOURCES} if seeds_deterministic else {}
     gsi = resolve_gate_source(gate_source, sources)
+    if gsi["source"] in {v.name for v in variant_objs}:
+        raise ValueError("the gate source must be a real source, never an A/B variant")
     lexicon = bundle_lexicon_version()
     if require_lexicon and lexicon != require_lexicon:
         raise RuntimeError(f"web/models/model.json intent.lexicon_version is {lexicon!r}, required {require_lexicon!r}; not starting")
@@ -715,6 +789,7 @@ def _run_locked(robots, sources, seeds, run_dir, t_start, checkpoint, seed, max_
             "gate_source": gsi["source"], "gate_source_info": gsi, "gate_lines": gate_lines,
             "heldout_file": heldout_path if heldout else None, "n_heldout_lines": len(heldout),
             "lexicon_version": lexicon, "intent_resolution": intent_resolution(MOVEMENTS, heldout),
+            "variants": [{"name": v.name, "base": v.base, "kwargs": v.kwargs} for v in variant_objs],
             "provenance": provenance(checkpoint, run_dir, robots)}
     log(f"[run] gate source: {gsi['source']} ({gsi['why']}); gate lines: {gate_lines} "
         f"({len(heldout)} sealed held-out lines); bundle lexicon {lexicon}")
@@ -737,8 +812,15 @@ def _run_locked(robots, sources, seeds, run_dir, t_start, checkpoint, seed, max_
 
         # 2. clips
         clips = build_clips(robots, sources, seeds, run_dir, checkpoint=checkpoint, tts_engine=tts_engine,
-                            seeds_by_source=seeds_by_source, heldout=heldout,
+                            seeds_by_source=seeds_by_source, heldout=heldout, variants=variant_objs,
                             log=lambda m: log(m if "@heldout" not in m else m.split(":")[0] + ": (sealed line)"))
+        for v in variant_objs:
+            noop = [c.id for c in clips if c.source == v.name and (c.meta.get("variant") or {}).get("no_op")]
+            if noop:
+                meta.setdefault("notes", []).append(
+                    f"Variant `{v.name}` ({v.base} with {v.kwargs}): the knob is NOT an explicit parameter of the "
+                    f"{v.base} source, so its clips are identical to plain {v.base} ({len(noop)} clips). Not an A/B.")
+                log(f"[variant] {v.name}: knob {list(v.kwargs)} not exposed by {v.base}; column will equal {v.base}")
 
         # 3. blind plan + reels
         plans = plan_reels(clips, seed, max_reel_seconds)
@@ -910,6 +992,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--heldout", default=HELDOUT_PATH, help="sealed held-out lines file")
     ap.add_argument("--require-lexicon", default=None, metavar="VERSION",
                     help="refuse to start unless web/models/model.json intent.lexicon_version equals VERSION (e.g. intent.v2)")
+    ap.add_argument("--variant", action="append", default=[], metavar="NAME=SOURCE:KEY=VALUE",
+                    help="extra graded column: a source with a knob, e.g. retrieval_p0=retrieval:proto_weight=0 "
+                         "(applied only if the knob is an explicit parameter; never the gate)")
     ap.add_argument("--slow-variant", action="store_true",
                     help="after the run, render + judge the same clips at 0.5x as a SEPARATE sub-run (<out>_slow); never gated")
     ap.add_argument("--out", default=None, help="run directory (default data/grading/<timestamp>)")
@@ -942,7 +1027,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   parallel=a.parallel, gpu=not a.software, speech_strip=not a.no_speech_strip, no_kimi=a.no_kimi,
                   force_probe=a.force_probe, tts_engine=a.tts, zoom=a.zoom,
                   seeds_deterministic=(a.seeds_deterministic or None), gate_source=a.gate_source,
-                  gate_lines=a.gate_lines, heldout_path=a.heldout, require_lexicon=a.require_lexicon)
+                  gate_lines=a.gate_lines, heldout_path=a.heldout, require_lexicon=a.require_lexicon, variants=a.variant)
     results = run(a.robots, a.sources, a.seeds, out, speed=a.speed, label=a.label, compare=a.compare, **common)
     verdict = 0 if all(results["gate"][r]["pass"] for r in a.robots) else 1
     if a.slow_variant and not a.no_kimi:

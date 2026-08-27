@@ -346,3 +346,56 @@ def test_crop_to_full_translation_identity_and_scaling():
     # crop centre below the image centre -> y (up) decreases
     out = cm.crop_to_full_translation(t, (347, 200, 160), (854, 480))  # centre (427, 280): 40 px below
     assert out[1] == pytest.approx(-2.0 - 40 * 40.0 / f_crop) and out[0] == pytest.approx(3.0)
+
+
+# ---------------------------------------------------------------- --pose-every N
+def _synthetic_samples(n=150, pose_every=1, dropout=None):
+    """30 fps samples: face on every frame, pose only on every ``pose_every``-th frame
+    (``dropout`` = (a, b) range of frames with no pose at all, a real tracking hole)."""
+    samples = []
+    for i in range(n):
+        t = i / 30.0
+        s = {"t": t, "face_ok": True, "pose_ok": False, "arm_ok": False, "frame_idx": i,
+             "head_angles": (10 * np.sin(2 * np.pi * 0.4 * t), 3 * np.cos(2 * np.pi * 0.3 * t), 1.0),
+             "head_trans": np.array([-400 + 15 * np.sin(2 * np.pi * 0.5 * t), 50.0, 60.0]),
+             "face_raw": cm.face_raw_from_blendshapes({"jawOpen": 0.3 + 0.2 * np.sin(2 * np.pi * 2 * t)})}
+        has_pose = (i % pose_every == 0) and not (dropout and dropout[0] <= i < dropout[1])
+        s["pose_skipped"] = i % pose_every != 0
+        if has_pose:
+            s["pose_ok"] = s["arm_ok"] = True
+            s["torso_vals"] = {"torso_lean_fwd": 20 + 4 * np.sin(2 * np.pi * 0.5 * t), "torso_lean_side": 1.0,
+                               "torso_yaw": -3 + 5 * np.cos(2 * np.pi * 0.4 * t)}
+            s["arm_vals"] = {"shoulder_yaw": 10 + 8 * np.sin(2 * np.pi * 0.6 * t), "shoulder_pitch": 80.0, "elbow_flex": 30.0,
+                             "wrist_roll": 5.0, "wrist_pitch": -10.0, "hand_open": 0.5 + 0.3 * np.sin(2 * np.pi * 0.5 * t)}
+        samples.append(s)
+    return samples
+
+
+@pytest.mark.parametrize("n_every", [2, 3, 4])
+def test_pose_every_keeps_face_and_interpolates_torso(n_every):
+    from animacy.capture import build_frames
+    from animacy.schema import ARM_CHANNELS, FACE_CHANNELS, TORSO_CHANNELS, HumanClip
+
+    full, _ = build_frames(_synthetic_samples(pose_every=1), neutral_seconds=0.0, pose_every=1)
+    dec, extra = build_frames(_synthetic_samples(pose_every=n_every), neutral_seconds=0.0, pose_every=n_every)
+    assert HumanClip.from_frames(dec, source="synthetic").validate() == []
+    # face channels: identical (the face never skipped a frame)
+    for c in FACE_CHANNELS + ["face_valid"]:
+        assert np.allclose(full[c].to_numpy(), dec[c].to_numpy(), atol=1e-5, equal_nan=True), c
+    # torso/arm: every grid frame bridged (real detections N frames apart, not dropouts) ...
+    assert not dec[TORSO_CHANNELS].isna().any().any()
+    assert dec["arm_valid"].to_numpy().all()
+    # ... and linear interpolation of a slow sinusoid lands within tolerance of the every-frame result
+    for c in TORSO_CHANNELS + ARM_CHANNELS:
+        err = np.nanmax(np.abs(full[c].to_numpy() - dec[c].to_numpy()))
+        assert err < (0.05 if c == "hand_open" else 0.6), (c, err)
+    assert extra["stats"]["torso_valid_frac"] == 1.0
+
+
+def test_pose_every_does_not_bridge_a_real_hole():
+    from animacy.capture import build_frames
+
+    dec, _ = build_frames(_synthetic_samples(pose_every=2, dropout=(60, 90)), neutral_seconds=0.0, pose_every=2)
+    tv = ~dec["torso_lean_fwd"].isna().to_numpy()
+    assert tv[:58].all() and tv[92:].all()
+    assert not tv[64:86].any()  # a 1 s hole stays NaN: the widened gap (0.12 s for N=2) does not cover it

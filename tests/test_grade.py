@@ -11,13 +11,13 @@ import pytest
 
 from animacy.grade import kimi, rubric
 from animacy.grade.movements import (HELDOUT_PATH, HELDOUT_SET, MOVEMENT_KEYS, MOVEMENTS, TUNING_SET, VENDOR, ClipSpec,
-                                     accepts_intent, candidate_table, load_heldout_movements, shared_phrases)
+                                     accepts_intent, candidate_table, load_heldout_movements, parse_variant, shared_phrases)
 from animacy.grade.probe import PROBE_PROMPT
 from animacy.grade.reel import (chunk_reels, number_and_shuffle, plan_reels, sealed_manifest, slow_audio, slow_table,
                                 speech_envelope)
 from animacy.grade.render import resample_table, urdf_frames
 from animacy.grade.run import CALIBRATION_MIN, GATE_THRESHOLD, calibration, check_workspace, consistency, gate, \
-    acquire_run_lock, contamination_gap, intent_resolution, judge_workspace_root, pid_alive, release_run_lock, prepare_workspace, redact_lines, resolve_gate_source, summarise, unseal
+    acquire_run_lock, contamination_gap, critiques, intent_resolution, judge_workspace_root, pid_alive, release_run_lock, prepare_workspace, redact_lines, resolve_gate_source, summarise, unseal
 from animacy.profile import find_robot
 
 REQUIRED_FORBIDDEN = {"animacy", "model", "retrieval", "generated", "vendor"}
@@ -474,3 +474,54 @@ def test_run_lock_refuses_a_second_live_writer_and_replaces_a_stale_one(tmp_path
     time.sleep(0.2)
     acquire_run_lock(d)                              # now dead -> replaced
     release_run_lock(d)
+
+
+def test_critiques_quote_the_judge_verbatim_and_count_low_scores_by_source():
+    recs = []
+    for i, (src, sc, reason) in enumerate([("model", 3, "Frozen hold under an affirmative line."),
+                                            ("model", 5, "Too slight to sell warmth."),
+                                            ("retrieval", 7, "Reads well."),
+                                            ("envelope", 4, "Understated, drifts only slightly.")]):
+        recs.append({"robot": "lamp", "number": i + 1, "movement": "greeting", "source": src, "seed": 0, "overall": sc,
+                     "scores": {"lifelike": sc, "timing": sc, "appeal": sc, "overall": sc}, "reason": reason, "description": "d"})
+    recs.append({"robot": "lamp", "number": 9, "movement": "greeting", "source": VENDOR, "seed": None, "overall": 2,
+                 "scores": {"lifelike": 2, "timing": 2, "appeal": 2, "overall": 2}, "reason": "vendor is excluded", "description": "d"})
+    cr = critiques(recs, ["model", "retrieval", "envelope"])
+    d = cr["dimensions"]["lifelike"]
+    assert d["n_low"] == 3 and d["n"] == 4 and d["low_by_source"] == {"model": 2, "retrieval": 0, "envelope": 1}
+    assert [q["score"] for q in d["quotes"]] == [3, 4, 5]                     # lowest first, sources spread
+    assert d["quotes"][0]["reason"] == "Frozen hold under an affirmative line."
+    assert all("vendor" not in q["reason"] for q in d["quotes"])
+    assert any(w == "frozen" for w, _ in d["top_words"])
+
+
+def test_variant_knob_applies_only_when_explicit_and_never_via_kwargs():
+    from animacy.schema import HumanClip, empty_frames
+
+    prof = find_robot("lamp")
+    calls = {}
+
+    def _clip():
+        f = empty_frames(30)
+        f["face_valid"] = 1.0
+        return HumanClip.from_frames(f, source="fake")
+
+    def explicit(wav, sr, checkpoint="x", seed=0, intent=None, proto_weight=1.0):
+        calls["explicit"] = proto_weight
+        return _clip()
+
+    def swallow(wav, sr, checkpoint="x", seed=0, intent=None, **kw):
+        calls["swallow"] = kw
+        return _clip()
+
+    v = parse_variant("retrieval_p0=retrieval:proto_weight=0")
+    assert v.name == "retrieval_p0" and v.base == "retrieval" and v.kwargs == {"proto_weight": 0}
+    wav = np.zeros(16000, np.float32)
+    _, m1 = candidate_table(prof, "retrieval", wav, 16000, 0, "x", sources={"retrieval": explicit}, variant=v)
+    assert calls["explicit"] == 0 and m1["variant"]["applied"] == {"proto_weight": 0} and not m1["variant"]["no_op"]
+    _, m2 = candidate_table(prof, "retrieval", wav, 16000, 0, "x", sources={"retrieval": swallow}, variant=v)
+    assert calls["swallow"] == {} and m2["variant"]["no_op"] is True
+    with pytest.raises(ValueError):
+        parse_variant("bad spec")
+    with pytest.raises(ValueError):
+        parse_variant("model=retrieval:proto_weight=0")        # collides with a real source name

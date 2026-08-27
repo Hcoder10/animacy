@@ -150,6 +150,26 @@ def test_intent_rule_and_retrieval_bonus(trained):
     assert idx.query(feats, speaking, use_audio_arousal=True).shape == (T, 14)
 
 
+def test_server_index_uncapped_and_fp16_in_ram(trained, tmp_path):
+    """max_windows=0 keeps every window (the server-side index); float16 motion in RAM
+    gives the same query result as float32 up to half precision."""
+    from animacy.model.data import load_clips
+    from animacy.model.retrieval import RetrievalIndex
+
+    clips = load_clips(os.path.join(trained["out"], "synthetic_clips"), verbose=False)
+    full = RetrievalIndex.build(clips, max_windows=0)
+    capped = RetrievalIndex.build(clips, max_windows=50)
+    assert len(full) == full.meta["n_source_windows"] > 50 == len(capped)
+    assert full.memory_estimate(len(full))["total_mb"] > 0
+    full.save(str(tmp_path), "retrieval")
+    a = RetrievalIndex.load(str(tmp_path / "retrieval.json"))
+    b = RetrievalIndex.load(str(tmp_path / "retrieval.json"), motion_fp16=True)
+    assert b.motion.dtype == np.float16 and len(a) == len(b) == len(full)
+    c = clips[0]
+    ma, mb = a.query(c.features[:90], c.speaking[:90]), b.query(c.features[:90], c.speaking[:90])
+    assert ma.shape == mb.shape == (90, 14) and np.abs(ma - mb).max() < 0.05
+
+
 def test_ar_onnx_step_matches_python_generation(trained):
     """The browser loop (ONNX single-step, full recompute) reproduces AudioToMotionAR.generate
     exactly when fed the same samples, in talk and listen mode."""
