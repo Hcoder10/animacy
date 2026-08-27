@@ -119,7 +119,7 @@ robots/<name>/         ROBOT.md + urdf/ + meshes/ + clips/     docs/            
 
 ## Status — what is done, what is not
 
-Done and verified: the canonical schema and `ROBOT.md` contract with `animacy check`; capture from video/webcam/browser; retargeting with an exact speed-cap guarantee; Lamp and Reachy Mini URDFs; Reachy Mini sim-to-real on a physical unit; the browser viewer with talk mode (Kokoro TTS in the page); two LeRobot datasets validated with the real loader; 111 tests.
+Done and verified: the canonical schema and `ROBOT.md` contract with `animacy check`; capture from video/webcam/browser; retargeting with an exact speed-cap guarantee; Lamp and Reachy Mini URDFs; Reachy Mini sim-to-real on a physical unit; the browser viewer with talk mode (Kokoro TTS in the page); two LeRobot datasets validated with the real loader; 170+ tests.
 
 Not done, or not verified — read before quoting anything above:
 
