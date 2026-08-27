@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# captured data and model artifacts live on HF, not in git
+data/clips/
+data/raw/
+data/corpus/
+checkpoints/
+*.onnx
+*.pt
+*.ckpt
+*.wav
+*.mp4
+*.webm
+
+# web build outputs
+web/node_modules/
+web/dist/
+
+# scratch
+*.log
+.DS_Store
+Thumbs.db
