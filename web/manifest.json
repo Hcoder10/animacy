@@ -1,5 +1,5 @@
 {
- "generated": "2026-08-26T22:18:58",
+ "generated": "2026-08-26T23:07:46",
  "robots": {
   "lamp": {
    "urdf": "urdf/lamp.urdf",
@@ -7,6 +7,10 @@
   },
   "reachy_mini": {
    "urdf": "urdf/reachy_mini.urdf",
+   "exists": true
+  },
+  "so101": {
+   "urdf": "urdf/so101.urdf",
    "exists": true
   }
  },
@@ -249,7 +253,8 @@
     "name": "yes1",
     "description": "A long affirmative response. You nod to confirm what your interlocutor said."
    }
-  ]
+  ],
+  "so101": []
  },
  "clips": [
   {
@@ -272,9 +277,24 @@
    "bytes": 7622914
   },
   {
+   "file": "a2m_ar.onnx",
+   "name": "a2m_ar",
+   "bytes": 15204737
+  },
+  {
    "file": "vq_decoder.onnx",
    "name": "vq_decoder",
    "bytes": 1177445
   }
- ]
+ ],
+ "bundle": {
+  "model_json": true,
+  "a2m": true,
+  "vq_decoder": true,
+  "bigram": true,
+  "retrieval": true,
+  "default_backend": "retrieval",
+  "arch": "a2m",
+  "verdict": ""
+ }
 }

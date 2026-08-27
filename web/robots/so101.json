@@ -1,0 +1,308 @@
+{
+  "schema": "animacy.robot.v1",
+  "name": "so101",
+  "display_name": "SO-101 arm",
+  "vendor": "TheRobotStudio / LeRobot (Hugging Face)",
+  "license": "Apache-2.0",
+  "rate_hz": 30.0,
+  "description": {
+    "urdf": "urdf/so101.urdf",
+    "mesh_scale": 1.0,
+    "up_axis": "z",
+    "viewer": {
+      "camera_distance": 0.9,
+      "ground": true
+    }
+  },
+  "joints": [
+    {
+      "name": "shoulder_pan",
+      "unit": "deg",
+      "min": -109.0,
+      "max": 109.0,
+      "rest": 0.0,
+      "max_speed": 120.0,
+      "urdf_joint": "shoulder_pan",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "shoulder_lift",
+      "unit": "deg",
+      "min": -99.0,
+      "max": 99.0,
+      "rest": -90.0,
+      "max_speed": 120.0,
+      "urdf_joint": "shoulder_lift",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "elbow_flex",
+      "unit": "deg",
+      "min": -96.0,
+      "max": 96.0,
+      "rest": 45.0,
+      "max_speed": 120.0,
+      "urdf_joint": "elbow_flex",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "wrist_flex",
+      "unit": "deg",
+      "min": -94.0,
+      "max": 94.0,
+      "rest": 30.0,
+      "max_speed": 150.0,
+      "urdf_joint": "wrist_flex",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "wrist_roll",
+      "unit": "deg",
+      "min": -157.0,
+      "max": 162.0,
+      "rest": 0.0,
+      "max_speed": 150.0,
+      "urdf_joint": "wrist_roll",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    },
+    {
+      "name": "gripper",
+      "unit": "deg",
+      "min": -9.0,
+      "max": 99.0,
+      "rest": 10.0,
+      "max_speed": 200.0,
+      "urdf_joint": "gripper",
+      "urdf_sign": 1.0,
+      "urdf_offset": 0.0
+    }
+  ],
+  "retarget": {
+    "default": {
+      "shoulder_pan": {
+        "terms": [
+          {
+            "from": "head_yaw",
+            "gain": -0.8
+          }
+        ],
+        "offset": 0.0,
+        "min": -109.0,
+        "max": 109.0,
+        "deadband": 0.3,
+        "smooth_hz": 6.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      },
+      "wrist_flex": {
+        "terms": [
+          {
+            "from": "head_pitch",
+            "gain": -0.6
+          },
+          {
+            "from": "brow_l",
+            "gain": -6.0
+          },
+          {
+            "from": "brow_r",
+            "gain": -6.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -94.0,
+        "max": 94.0,
+        "deadband": 0.3,
+        "smooth_hz": 6.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      },
+      "shoulder_lift": {
+        "terms": [
+          {
+            "from": "torso_lean_fwd",
+            "gain": 0.6
+          },
+          {
+            "from": "head_x",
+            "gain": 0.1
+          },
+          {
+            "from": "head_z",
+            "gain": -0.1
+          }
+        ],
+        "offset": 0.0,
+        "min": -99.0,
+        "max": 99.0,
+        "deadband": 0.0,
+        "smooth_hz": 4.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      },
+      "elbow_flex": {
+        "terms": [
+          {
+            "from": "torso_lean_fwd",
+            "gain": -0.4
+          },
+          {
+            "from": "head_x",
+            "gain": -0.1
+          }
+        ],
+        "offset": 0.0,
+        "min": -96.0,
+        "max": 96.0,
+        "deadband": 0.0,
+        "smooth_hz": 4.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      },
+      "wrist_roll": {
+        "terms": [
+          {
+            "from": "head_roll",
+            "gain": 0.6
+          }
+        ],
+        "offset": 0.0,
+        "min": -157.0,
+        "max": 162.0,
+        "deadband": 0.0,
+        "smooth_hz": 6.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      },
+      "gripper": {
+        "terms": [
+          {
+            "from": "mouth_open",
+            "gain": 30.0
+          },
+          {
+            "from": "smile",
+            "gain": 10.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -9.0,
+        "max": 99.0,
+        "deadband": 0.0,
+        "smooth_hz": 8.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      }
+    },
+    "puppet": {
+      "shoulder_pan": {
+        "terms": [
+          {
+            "from": "shoulder_yaw",
+            "gain": -1.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -109.0,
+        "max": 109.0,
+        "deadband": 0.0,
+        "smooth_hz": null,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      },
+      "shoulder_lift": {
+        "terms": [
+          {
+            "from": "shoulder_pitch",
+            "gain": -1.0
+          }
+        ],
+        "offset": 180.0,
+        "min": -99.0,
+        "max": 40.0,
+        "deadband": 0.0,
+        "smooth_hz": null,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      },
+      "elbow_flex": {
+        "terms": [
+          {
+            "from": "elbow_flex",
+            "gain": -1.0
+          }
+        ],
+        "offset": -45.0,
+        "min": -96.0,
+        "max": 96.0,
+        "deadband": 0.0,
+        "smooth_hz": null,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      },
+      "wrist_flex": {
+        "terms": [
+          {
+            "from": "wrist_pitch",
+            "gain": -1.0
+          }
+        ],
+        "offset": -30.0,
+        "min": -94.0,
+        "max": 94.0,
+        "deadband": 0.0,
+        "smooth_hz": null,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      },
+      "wrist_roll": {
+        "terms": [
+          {
+            "from": "wrist_roll",
+            "gain": 1.0
+          }
+        ],
+        "offset": 0.0,
+        "min": -157.0,
+        "max": 162.0,
+        "deadband": 0.0,
+        "smooth_hz": null,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      },
+      "gripper": {
+        "terms": [
+          {
+            "from": "hand_open",
+            "gain": 100.0
+          }
+        ],
+        "offset": -10.0,
+        "min": -9.0,
+        "max": 99.0,
+        "deadband": 0.0,
+        "smooth_hz": null,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
+      }
+    }
+  },
+  "native_clips": null
+}
