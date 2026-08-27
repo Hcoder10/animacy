@@ -401,15 +401,18 @@ def contiguous_runs(mask: np.ndarray) -> List[Tuple[int, int]]:
 
 def resample_to_grid(t_src: np.ndarray, values: np.ndarray, valid: np.ndarray,
                      rate_hz: float, duration: Optional[float] = None,
-                     max_gap: float = 0.12) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+                     max_gap: float = 0.12, hold: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Irregular samples -> uniform grid at ``rate_hz`` starting at t=0.
 
     For each grid time take the nearest *valid* sample on either side. If both
     exist and are at most ``max_gap`` seconds apart, interpolate linearly
     (this bridges a single missed detection, ~1-3 source frames); otherwise
-    use the nearer one if it is within half a grid period; otherwise the grid
-    frame is invalid (NaN). A detection gap longer than ``max_gap`` is never
-    interpolated across.
+    use the nearer one if it is within ``hold`` seconds (default: half a grid
+    period, i.e. only the sample that belongs to this frame); otherwise the
+    grid frame is invalid (NaN). A detection gap longer than ``max_gap`` is
+    never interpolated across. Deliberately decimated groups (pose every N
+    frames) pass ``max_gap``/``hold`` widened to N frames so run edges are
+    held rather than dropped.
 
     Returns ``(t_grid, values_grid [N, C], valid_grid [N])``.
     """
@@ -428,7 +431,7 @@ def resample_to_grid(t_src: np.ndarray, values: np.ndarray, valid: np.ndarray,
     if len(vidx) == 0:
         return t_grid, out, ok
     tv, vv = t_src[vidx], values[vidx]
-    tol = 0.5 / rate_hz
+    tol = 0.5 / rate_hz if hold is None else max(float(hold), 0.5 / rate_hz)
     hi = np.searchsorted(tv, t_grid, side="right")  # first valid sample with t > grid time
     lo = hi - 1
     for k in range(n):

@@ -386,9 +386,19 @@ def test_pose_every_keeps_face_and_interpolates_torso(n_every):
     assert not dec[TORSO_CHANNELS].isna().any().any()
     assert dec["arm_valid"].to_numpy().all()
     # ... and linear interpolation of a slow sinusoid lands within tolerance of the every-frame result
+    # in the interior; the last frames past the final pose sample are HELD (edge rule), so they may
+    # lag by up to one frame of motion (a 4 deg / 0.5 Hz sinusoid moves 0.42 deg per frame)
+    # (torso channels are neutral-zeroed by the median over the pose samples, so a 1-in-N subsample
+    # shifts them by a small constant; that offset is bounded separately and removed before comparing)
     for c in TORSO_CHANNELS + ARM_CHANNELS:
-        err = np.nanmax(np.abs(full[c].to_numpy() - dec[c].to_numpy()))
-        assert err < (0.05 if c == "hand_open" else 0.6), (c, err)
+        d = full[c].to_numpy() - dec[c].to_numpy()
+        offset = float(np.nanmedian(d)) if c in TORSO_CHANNELS else 0.0
+        assert abs(offset) < 0.6, (c, offset)
+        diff = np.abs(d - offset)
+        interior, edge = np.nanmax(diff[: -n_every - 1]), np.nanmax(diff[-n_every - 1:])
+        assert interior < (0.03 if c == "hand_open" else 0.35), (c, interior)
+        # held edge: at most N-1 frames of lag; the fastest synthetic signal moves ~1 deg (0.03 hand_open) per frame
+        assert edge < (0.05 if c == "hand_open" else 1.1) * n_every, (c, edge)
     assert extra["stats"]["torso_valid_frac"] == 1.0
 
 

@@ -161,6 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--no-audio", action="store_true")
     cap.add_argument("--preview", action="store_true", help="show a window while capturing")
     cap.add_argument("--neutral-seconds", type=float, default=1.0, help="seconds of neutral pose at the start used for zeroing")
+    cap.add_argument("--pose-every", type=int, default=1, help="run PoseLandmarker on every N-th frame (torso/arm interpolated between)")
     cap.set_defaults(fn=_cmd_capture)
 
     s = sub.add_parser("say", help="robot speaks + moves in sync (text -> TTS -> motion source -> retarget -> robot)")

@@ -475,15 +475,7 @@ class Mirror:
                     continue
                 want_pose = (self.tracked % self.pose_every) == 0
                 t0 = self.clock.now()
-                if want_pose:
-                    s = trackers.detect(frame, t, arm=self.arm)
-                else:  # Trackers has no skip flag (capture.py is frozen for this task): park the pose model
-                    pose_model, trackers.pose = trackers.pose, None
-                    try:
-                        s = trackers.detect(frame, t, arm=self.arm)
-                    finally:
-                        trackers.pose = pose_model
-                    s["pose_skipped"] = True
+                s = trackers.detect(frame, t, arm=self.arm, want_pose=want_pose)
                 self.track_ms.append((self.clock.now() - t0) * 1000.0)
                 self.tracked += 1
                 self.face_hits += int(s["face_ok"])

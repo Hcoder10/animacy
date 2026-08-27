@@ -240,6 +240,26 @@ Vendor excursions are measured around the library median (where the clips
 live), retargeted ones around `rest` (where the mapping lives): both are
 gesture sizes around the pose the motion returns to.
 
+**Round 3 (shipped, 2026-08-27).** The blind grader still called the 1.15×
+fit "small, slight, understated" with physical plausibility at 8.0, so the
+shipped mappings were re-fitted with `--target 1.4 --vel-cap 2.0 --headroom
+1.0`. At the script defaults the 1.4× target was a no-op — every multiplier
+was pinned at 1.00–1.06 by the velocity cap (lamp base_yaw, base_pitch,
+wrist_roll) or the 0.9 headroom (everything else) — so the caps were the
+knob, not the target: 2× the vendor's velocity p95 is inside the vendor
+library's own p99 (105–160 units/s) and far under `max_speed`; headroom 1.0
+lets the p99 reach the mapping bound, where the soft limit absorbs it. Result
+(`--before` = the 1.15× mapping, 90-clip corpus): lamp envelope ratios
+base_yaw 1.05 → 1.40, base_pitch 0.63 → 0.73, elbow 0.93 → 1.03, wrist_roll
+0.79 → 0.97, wrist_pitch 0.55 → 0.62 (score 0.75 → 0.79), velocity p95
+base_yaw 69 → 93, wrist_roll 65 → 79 (vendor 47 / 44), gaze error under lean
+max 1.4° → 2.8° (lean-in still 0.00°), stillness 0.31 → 0.27, 0 violations;
+Reachy ratios head_x 1.33, head_y 1.04, head_z 0.82, roll 1.26, pitch 1.10,
+yaw 1.03, body 1.40 (score 0.72 → 0.69: several joints now above 1.0 by
+design), 0 violations, stillness 0.43 → 0.41. What still limits the lamp is
+the mapping bounds and `rest`'s position inside them (base_pitch 29° above
+its `min`, wrist_pitch 22.6° from its up-bound), not the gains.
+
 ### 2.2 Gaze preservation (lamp) — URDF FK
 
 Elevation/azimuth of the head's look axis (`[0.70, 0, −0.71]` in the `head`

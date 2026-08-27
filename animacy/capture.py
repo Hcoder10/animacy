@@ -6,6 +6,7 @@ Run
     animacy capture --source data/raw/talk.webm -o data/clips/talk --duration 120
     animacy capture --source data/raw/ -o data/clips/               # every video -> <o>/<stem>/
     options: --arm right|left|none  --no-audio  --neutral-seconds 1.0 (0 = whole-clip median)
+             --pose-every N (PoseLandmarker on every N-th frame; torso/arm interpolated between; default 1)
 
 Output: ``<o>/motion.parquet`` (30 Hz canonical frames, smoothed), ``audio.wav``
 (16 kHz mono, same clock), ``meta.json`` (source, license evidence copied from
@@ -307,8 +308,12 @@ class Trackers:
         self.crop_frames += 1
         return out
 
-    def detect(self, frame_bgr: np.ndarray, t_s: float, arm: str = "right") -> Dict:
-        """One frame -> raw sample dict (absolute, un-zeroed values)."""
+    def detect(self, frame_bgr: np.ndarray, t_s: float, arm: str = "right", want_pose: bool = True) -> Dict:
+        """One frame -> raw sample dict (absolute, un-zeroed values).
+
+        ``want_pose=False`` skips the PoseLandmarker for this frame (``--pose-every N``);
+        the sample then carries ``pose_skipped=True`` and no torso/arm values.
+        """
         import cv2
 
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -328,7 +333,8 @@ class Trackers:
             face = self._face_cropped(frame_bgr, rgb, ts)
         if face is not None:
             s.update(face)
-        if self.pose is not None:
+        s["pose_skipped"] = bool(self.pose is not None and not want_pose)
+        if self.pose is not None and want_pose:
             try:
                 pr = self.pose.detect_for_video(img, ts)
             except Exception:
@@ -436,8 +442,13 @@ def source_record(video_path: str) -> Dict:
 
 # ------------------------------------------------------------------ run
 def run_source(source: str, arm: str, duration: float, preview: bool, want_audio: bool,
-               on_sample=None) -> Tuple[List[Dict], Optional[np.ndarray], Dict]:
-    """Decode ``source``, run the trackers, return (samples, audio, info)."""
+               on_sample=None, pose_every: int = 1) -> Tuple[List[Dict], Optional[np.ndarray], Dict]:
+    """Decode ``source``, run the trackers, return (samples, audio, info).
+
+    ``pose_every=N`` runs the PoseLandmarker on every N-th processed frame only (the face
+    runs on every frame); ``build_frames`` interpolates torso/arm across the skipped frames.
+    """
+    pose_every = max(1, int(pose_every))
     import cv2
 
     from .audio import MicRecorder, extract_audio
@@ -450,7 +461,9 @@ def run_source(source: str, arm: str, duration: float, preview: bool, want_audio
     src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     if not is_cam and src_fps <= 0:
         src_fps = 30.0
-    proc_hz = min(src_fps, 30.0) if src_fps > 0 else 30.0
+    # Decimate >36 fps sources by frame INDEX (60 -> every 2nd, 50 -> every 2nd). A time-based
+    # rule against ms-rounded POS_MSEC stamps skipped every 3rd frame of 29.97 fps video.
+    stride = max(1, int(round(src_fps / 30.0))) if (not is_cam and src_fps > 36.0) else 1
     info: Dict = {"source": "webcam" if is_cam else "video", "src_fps": src_fps,
                   "face_model": trackers.face_model, "pose_model": trackers.pose_model,
                   "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}
@@ -467,7 +480,7 @@ def run_source(source: str, arm: str, duration: float, preview: bool, want_audio
             info["audio_backend"] = "none"
 
     samples: List[Dict] = []
-    idx, last_pos, next_proc, t0_cam = 0, -1.0, 0.0, None
+    idx, last_pos, t0_cam = 0, -1.0, None
     n_src = 0
     t_start_wall = time.perf_counter()
     try:
@@ -490,10 +503,9 @@ def run_source(source: str, arm: str, duration: float, preview: bool, want_audio
             idx += 1
             if duration > 0 and t > duration:
                 break
-            if not is_cam and t + 1e-6 < next_proc:
-                continue  # decimate >30 fps sources
-            next_proc = t + 1.0 / proc_hz - 1e-6
-            s = trackers.detect(frame, t, arm=arm)
+            if stride > 1 and (idx - 1) % stride:
+                continue  # decimate >36 fps sources
+            s = trackers.detect(frame, t, arm=arm, want_pose=(len(samples) % pose_every == 0))
             s["frame_idx"] = idx - 1
             samples.append(s)
             if on_sample is not None:
@@ -511,6 +523,8 @@ def run_source(source: str, arm: str, duration: float, preview: bool, want_audio
             cv2.destroyAllWindows()
     info["n_src_frames"] = n_src
     info["wall_s"] = time.perf_counter() - t_start_wall
+    info["pose_every"] = pose_every
+    info["frame_stride"] = stride
     if not samples:
         return samples, None, info
     clip_len = samples[-1]["t"]
@@ -538,8 +552,14 @@ def neutral_window(samples: List[Dict], key_ok: str, neutral_seconds: float) -> 
 
 
 def build_frames(samples: List[Dict], neutral_seconds: float, rate_hz: float = RATE_HZ,
-                 duration: Optional[float] = None) -> Tuple[pd.DataFrame, Dict]:
-    """Raw samples -> canonical 30 Hz frame table (no ``speaking`` yet) + neutral/stats."""
+                 duration: Optional[float] = None, pose_every: int = 1) -> Tuple[pd.DataFrame, Dict]:
+    """Raw samples -> canonical 30 Hz frame table (no ``speaking`` yet) + neutral/stats.
+
+    ``pose_every`` widens the interpolation window for the torso/arm groups so that pose
+    samples deliberately taken every N frames are bridged (they are real detections, not
+    dropouts): ``max_gap = max(0.12 s, 1.5 * N / rate_hz)``, and run edges hold the nearest
+    pose sample within that window. Face channels keep the default 0.12 s rule.
+    """
     t_src = np.array([s["t"] for s in samples], dtype=float)
     face_ok = np.array([s["face_ok"] for s in samples], dtype=bool)
     pose_ok = np.array([s.get("pose_ok", False) for s in samples], dtype=bool)
@@ -579,8 +599,10 @@ def build_frames(samples: List[Dict], neutral_seconds: float, rate_hz: float = R
     if duration is None:
         duration = float(t_src[-1])
     t_grid, face_g, face_v = cm.resample_to_grid(t_src, face_rows, face_ok, rate_hz, duration)
-    _, torso_g, torso_v = cm.resample_to_grid(t_src, torso_rows, pose_ok, rate_hz, duration)
-    _, arm_g, arm_v = cm.resample_to_grid(t_src, arm_rows, arm_ok, rate_hz, duration)
+    pose_gap = max(0.12, 1.5 * max(1, int(pose_every)) / rate_hz)
+    # edges of a pose run (and the clip's last frames) hold the nearest pose sample within the gap
+    _, torso_g, torso_v = cm.resample_to_grid(t_src, torso_rows, pose_ok, rate_hz, duration, max_gap=pose_gap, hold=pose_gap)
+    _, arm_g, arm_v = cm.resample_to_grid(t_src, arm_rows, arm_ok, rate_hz, duration, max_gap=pose_gap, hold=pose_gap)
     face_g = cm.smooth_runs(face_g, face_v, SMOOTH_CUTOFF_HZ, rate_hz)
     torso_g = cm.smooth_runs(torso_g, torso_v, SMOOTH_CUTOFF_HZ, rate_hz)
     arm_g = cm.smooth_runs(arm_g, arm_v, SMOOTH_CUTOFF_HZ, rate_hz)
@@ -633,15 +655,15 @@ def tool_versions() -> Dict[str, str]:
 
 
 def capture_one(source: str, output: str, arm: str = "right", duration: float = 0.0, no_audio: bool = False,
-                preview: bool = False, neutral_seconds: float = 1.0) -> HumanClip:
+                preview: bool = False, neutral_seconds: float = 1.0, pose_every: int = 1) -> HumanClip:
     from .schema import AUDIO_SR
     from .vad import speaking_mask
 
-    samples, audio, info = run_source(source, arm, duration, preview, want_audio=not no_audio)
+    samples, audio, info = run_source(source, arm, duration, preview, want_audio=not no_audio, pose_every=pose_every)
     if not samples:
         raise SystemExit("no frames decoded")
     is_cam = info["source"] == "webcam"
-    frames, extra = build_frames(samples, neutral_seconds, RATE_HZ)
+    frames, extra = build_frames(samples, neutral_seconds, RATE_HZ, pose_every=pose_every)
     n = len(frames)
     if audio is not None:
         want = int(round(n / RATE_HZ * AUDIO_SR))  # audio spans the last frame's period too
@@ -667,6 +689,7 @@ def capture_one(source: str, output: str, arm: str = "right", duration: float = 
         "neutral": extra["neutral"],
         "tool_versions": tool_versions(),
         "models": {"face": info["face_model"], "pose": info["pose_model"], "models_dir": models_dir()},
+        "pose_every": int(info.get("pose_every", 1)),
         "vad": vad_backend,
         "audio_backend": info.get("audio_backend", "none"),
         "src_fps": info["src_fps"], "src_size": [info["width"], info["height"]], "n_src_frames": info["n_src_frames"],
@@ -709,7 +732,8 @@ def main(args) -> int:
         print(f"== {src} -> {out}")
         try:
             clip = capture_one(src, out, arm=args.arm, duration=args.duration, no_audio=args.no_audio,
-                               preview=args.preview, neutral_seconds=args.neutral_seconds)
+                               preview=args.preview, neutral_seconds=args.neutral_seconds,
+                               pose_every=int(getattr(args, "pose_every", 1) or 1))
         except SystemExit as exc:
             print(f"   FAILED: {exc}")
             rc = 1
