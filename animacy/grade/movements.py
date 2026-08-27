@@ -180,19 +180,29 @@ def accepts_intent(fn) -> bool:
     return "intent" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
+def intent_argument(text: str, tag: Optional[str]):
+    """What ``serve.say(text, intent=tag)`` hands the source: ``analyse(text, override=tag)`` (the tag's base
+    arousal plus the line's punctuation) when the intent module exists, else the bare tag."""
+    try:
+        from ..model.intent import analyse
+    except ImportError:
+        return tag
+    return analyse(text, override=tag) if tag else text
+
+
 def candidate_table(profile: Profile, source: str, wav: np.ndarray, sr: int, seed: int,
-                    checkpoint: str = DEFAULT_CHECKPOINT, intent: Optional[str] = None,
+                    checkpoint: str = DEFAULT_CHECKPOINT, intent: Optional[str] = None, text: Optional[str] = None,
                     sources: Optional[Dict] = None) -> Tuple[pd.DataFrame, Dict]:
     """Exactly ``serve.say``'s dispatch, minus the sink: source -> HumanClip -> retarget_clip.
-    ``intent`` is passed only to sources whose signature accepts it (so a user's talk-mode conditioning is
-    exercised exactly as ``animacy say --intent`` would, and older sources are untouched)."""
+    The intent (``intent`` tag + the utterance ``text``) is handed to sources whose signature accepts it, in the
+    same form ``animacy say --intent <tag>`` uses; the envelope heuristic and older signatures are untouched."""
     fn = (sources or SOURCES)[source]
     kwargs: Dict = {"seed": seed}
     if source != "envelope":
         kwargs["checkpoint"] = checkpoint
-    passed_intent = bool(intent) and accepts_intent(fn)
+    passed_intent = source != "envelope" and bool(intent) and accepts_intent(fn)
     if passed_intent:
-        kwargs["intent"] = intent
+        kwargs["intent"] = intent_argument(text or "", intent)
     clip = fn(wav, sr, **kwargs)
     probs = clip.validate()
     if probs:
@@ -200,12 +210,14 @@ def candidate_table(profile: Profile, source: str, wav: np.ndarray, sr: int, see
     table = retarget_clip(clip, profile)
     meta = {k: v for k, v in clip.meta.items() if isinstance(v, (str, int, float, bool))}
     meta["intent_passed"] = intent if passed_intent else None
+    if isinstance(clip.meta.get("intent"), dict):
+        meta["intent"] = {k: v for k, v in clip.meta["intent"].items() if isinstance(v, (str, int, float, bool))}
     return table, meta
 
 
 def candidate_clip(profile: Profile, mv: Movement, source: str, seed: int, wav: np.ndarray, sr: int,
                    checkpoint: str = DEFAULT_CHECKPOINT) -> ClipSpec:
-    table, meta = candidate_table(profile, source, wav, sr, seed, checkpoint, intent=mv.intent_tag)
+    table, meta = candidate_table(profile, source, wav, sr, seed, checkpoint, intent=mv.intent_tag, text=mv.text)
     return ClipSpec(id=f"{profile.name}/{mv.key}/{source}/s{seed}", robot=profile.name, movement=mv.key, source=source,
                     seed=seed, card_line=f'The robot says: "{mv.text}"', table=table, audio=wav, sr=sr, meta=meta)
 

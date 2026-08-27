@@ -339,8 +339,10 @@ def _provenance_markdown(prov: Optional[Dict]) -> List[str]:
          + f". Checkpoint `{prov.get('checkpoint')}`.\n",
          "| file | sha1 | modified |", "|---|---|---|"]
     for rel, f in prov.get("files", {}).items():
-        L.append(f"| `{rel}` | `{f['sha1'][:12]}` | {f['mtime']} |")
+        L.append(f"| `{rel}` | `{f['sha1'][:12]}` | {f['mtime']}{' (' + f['note'] + ')' if f.get('note') else ''} |")
     L.append("")
+    if prov.get("note"):
+        L.append(f"{prov['note']}\n")
     return L
 
 
