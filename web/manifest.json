@@ -1,5 +1,5 @@
 {
- "generated": "2026-08-27T02:30:20",
+ "generated": "2026-08-27T02:49:00",
  "robots": {
   "lamp": {
    "urdf": "urdf/lamp.urdf",
@@ -305,11 +305,6 @@
  ],
  "models": [
   {
-   "file": "a2m.onnx",
-   "name": "a2m",
-   "bytes": 3841920
-  },
-  {
    "file": "a2m_ar.onnx",
    "name": "a2m_ar",
    "bytes": 7672665
@@ -322,17 +317,16 @@
  ],
  "bundle": {
   "model_json": true,
-  "a2m": true,
+  "a2m": false,
   "a2m_ar": true,
   "vq_decoder": true,
   "bigram": true,
   "retrieval": true,
   "default_backend": "retrieval",
   "archs": [
-   "ff",
    "ar"
   ],
-  "default_arch": "ff",
+  "default_arch": "ar",
   "verdict": ""
  }
 }

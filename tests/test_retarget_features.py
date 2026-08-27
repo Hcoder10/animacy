@@ -210,15 +210,47 @@ def test_lamp_gaze_stays_on_the_person_under_lean():
 
 
 def test_lamp_compensation_terms_are_consistent_with_the_planar_chain():
-    """wrist_pitch gain for every channel feeding base/elbow must be −g_base + g_elbow."""
+    """The `tag: gaze_comp` wrist_pitch term for every channel feeding base/elbow must be −g_base + g_elbow."""
+    from animacy.retarget_fit import gaze_comp_terms
+
     p = load_profile(os.path.join(robots_root(), "lamp"))
     mp = p.mapping("default")
     base = {t.from_: t.gain for t in mp["base_pitch"].terms()}
     elbow = {t.from_: t.gain for t in mp["elbow_pitch"].terms()}
-    wrist = {t.from_: t.gain for t in mp["wrist_pitch"].terms()}
+    comp = gaze_comp_terms(p, "default", "wrist_pitch")
     for ch in set(base) | set(elbow):
-        assert ch in wrist, f"wrist_pitch lacks a gaze-comp term for {ch}"
-        assert abs(wrist[ch] - (-base.get(ch, 0.0) + elbow.get(ch, 0.0))) < 5e-4, ch
+        assert ch in comp, f"wrist_pitch lacks a `tag: gaze_comp` term for {ch}"
+        assert abs(comp[ch] - (-base.get(ch, 0.0) + elbow.get(ch, 0.0))) < 1e-3, ch   # gains are written to 5 significant digits
+
+
+def test_settle_numeric_example_in_docs():
+    """docs/RETARGET.md §settle: joint rest 0, ±60, 300/s, from head_yaw gain 1,
+    settle {0.6, 0.4, still 12}; head_yaw = 20 held, then 40 at frame 32."""
+    spec = _spec(**{"from": "head_yaw", "gain": 1.0, "settle": {"seconds": 0.6, "quiet": 0.4, "still": 12.0}})
+    p = Profile(**spec)
+    rt = LiveRetargeter(p)
+    us = []
+    for i in range(40):
+        rt.step({"head_yaw": 20.0 if i < 31 else 40.0}, DT)
+        us.append((rt.quiet["a"], rt.blend["a"]))
+    q, b = us[0]
+    assert q == 0.0 and b == 0.0                       # frame 1: a = 600 ≥ 12 → quiet resets
+    assert abs(us[12][0] - 12 * DT) < 1e-9 and us[12][1] < 1e-12  # frame 13: quiet = 0.4 = Q → b still 0
+    assert abs(us[13][1] - (13 * DT - 0.4) / 0.6) < 1e-9          # frame 14: b = 0.0556
+    assert abs(us[30][1] - 1.0) < 1e-9                             # frame 31: quiet 1.0 → fully settled
+    assert abs(us[31][1] - (1.0 - 4 * DT / 0.6)) < 1e-9 and us[31][0] == 0.0   # frame 32: motion → release 0.7778
+    assert abs(us[34][1] - (1.0 - 16 * DT / 0.6)) < 1e-9          # frame 35: 0.1111
+    assert us[35][1] == 0.0                                        # frame 36: released
+    # offline path uses the same rule: a still clip settles to rest after Q + S
+    f = empty_frames(150)
+    f["face_valid"] = 1.0
+    f["head_yaw"] = 20.0
+    f["speaking"] = 0.0
+    off = retarget_clip(HumanClip.from_frames(f, source="synthetic"), p)["a"].to_numpy()
+    assert abs(off[-1]) < 0.05 and off[5] > 15.0
+    f["speaking"] = 1.0                                             # talking: never settles
+    off = retarget_clip(HumanClip.from_frames(f, source="synthetic"), p)["a"].to_numpy()
+    assert off[-1] > 19.0
 
 
 def test_reachy_antennas_splay_symmetrically_and_droop_on_furrow():

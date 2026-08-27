@@ -27,7 +27,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .profile import Idle, Mapping, Profile, Spring
+from .profile import Idle, Mapping, Profile, Settle, Spring
 from .schema import HumanClip
 
 # ---------------------------------------------------------------- constants
@@ -251,6 +251,25 @@ def idle_offline(u: np.ndarray, dt: float, idle: Idle, joint_index: int, lo: flo
     return out
 
 
+def settle_update(u: float, speaking: float, dt: float, settle: Settle, home: float, still: float,
+                  p_s: float, q: float, b: float) -> Tuple[float, float, float, float]:
+    """Step 5b (docs/RETARGET.md §settle): returns (u', p_s', q', b')."""
+    a = abs(u - p_s) / dt
+    quiet_now = a < still and speaking < 0.5
+    q = q + dt if quiet_now else 0.0
+    b_up = min(max((q - settle.quiet) / settle.seconds, 0.0), 1.0)
+    b = max(b_up, b - 4.0 * dt / settle.seconds)
+    return u + b * (home - u), u, q, b
+
+
+def settle_offline(u: np.ndarray, speaking: np.ndarray, dt: float, settle: Settle, home: float, still: float) -> np.ndarray:
+    out = np.empty_like(u)
+    p_s, q, b = home, 0.0, 0.0
+    for i in range(len(u)):
+        out[i], p_s, q, b = settle_update(float(u[i]), float(speaking[i]), dt, settle, home, still, p_s, q, b)
+    return out
+
+
 def _advance(x: np.ndarray, frames: float) -> np.ndarray:
     """``x`` shifted earlier by ``frames`` (fractional, linear interpolation, end held)."""
     if frames <= 0 or len(x) < 2:
@@ -279,14 +298,19 @@ def retarget_clip(clip: HumanClip, profile: Profile, mode: str = "default",
     ``rate_hz`` grid, speed-legal for every joint, smoothed."""
     frames = clip.frames
     raw = raw_joint_targets(frames, profile, mode)
+    # the settle rule needs the subject's speaking flag on the robot grid
+    raw["_speaking"] = np.nan_to_num(frames["speaking"].to_numpy(dtype=np.float64), nan=0.0) if "speaking" in frames else 0.0
     t_stretched = stretch_timeline(raw["t"].to_numpy(), raw, profile)
     on_grid = resample(t_stretched, raw, profile.rate_hz)
+    speaking = on_grid.pop("_speaking").to_numpy(dtype=np.float64)
     mp = profile.mapping(mode)
     dt = 1.0 / profile.rate_hz
     for idx, j in enumerate(profile.joints):
         m = mp.get(j.name)
         lo, hi = mapping_bounds(j, m)
         u = on_grid[j.name].to_numpy(dtype=np.float64)
+        if m is not None and m.settle is not None:
+            u = settle_offline(u, speaking, dt, m.settle, j.rest + m.offset, m.settle.still_speed(lo, hi))
         if m is not None and m.spring is not None:
             # offline only: feed the spring a target advanced by its low-frequency
             # lag so the output stays on the audio clock (live cannot see ahead)
@@ -327,9 +351,17 @@ class LiveRetargeter:
         self.env: Dict[str, float] = {j.name: 0.0 for j in self.profile.joints}
         self.prev_target: Dict[str, float] = {j.name: j.rest for j in self.profile.joints}
         self.clock: Dict[str, float] = {j.name: 0.0 for j in self.profile.joints}
+        # settle state: previous raw target, quiet time, blend
+        self.settle_prev: Dict[str, float] = {j.name: j.rest for j in self.profile.joints}
+        self.quiet: Dict[str, float] = {j.name: 0.0 for j in self.profile.joints}
+        self.blend: Dict[str, float] = {j.name: 0.0 for j in self.profile.joints}
 
     def step(self, channels: Dict[str, float], dt: float) -> Dict[str, float]:
         out: Dict[str, float] = {}
+        speaking = channels.get("speaking", 0.0)
+        if speaking is None or (isinstance(speaking, float) and math.isnan(speaking)):
+            speaking = 0.0
+        speaking = float(speaking)
         for idx, j in enumerate(self.profile.joints):
             m = self.mp.get(j.name)
             lo, hi = mapping_bounds(j, m)
@@ -349,6 +381,10 @@ class LiveRetargeter:
                 u = soft_clip(u, lo, hi, m.soft_limit)
                 u = min(max(u, lo), hi)
                 cutoff = self.default_smooth_hz if m.smooth_hz is None else m.smooth_hz
+                if m.settle is not None:
+                    u, self.settle_prev[j.name], self.quiet[j.name], self.blend[j.name] = settle_update(
+                        u, speaking, dt, m.settle, j.rest + m.offset, m.settle.still_speed(lo, hi),
+                        self.settle_prev[j.name], self.quiet[j.name], self.blend[j.name])
                 if m.idle is not None:
                     a = abs(u - self.prev_target[j.name]) / dt
                     self.prev_target[j.name] = u

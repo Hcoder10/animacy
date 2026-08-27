@@ -45,18 +45,38 @@ retarget:
   # and breathes the head while the person is still; `soft_limit` (§soft) is a
   # tanh knee over the last 15% of each range.
   default:
-    head_yaw:   { from: head_yaw, gain: 1.687, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
-    head_pitch: { from: head_pitch, gain: 1.617, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15, idle: { amp: 0.5, hz: 0.22 } }  # fitted by scripts/retarget_fit.py 2026-08-26
-    head_roll:  { from: head_roll, gain: 1.45, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15, idle: { amp: 0.4, hz: 0.17 } }  # fitted by scripts/retarget_fit.py 2026-08-26
-    head_x:     { from: head_x, gain: 0.1471, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
-    head_y:     { from: head_y, gain: 0.2033, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
-    head_z:     { from: head_z, gain: 0.2538, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15, idle: { amp: 1.0, hz: 0.22 } }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_yaw:   { from: head_yaw, gain: 1.591, deadband: 0.3, spring: { hz: 4.0, zeta: 0.6 }, soft_limit: 0.15, idle: { amp: 1.0, hz: 0.15 }, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
+    head_pitch: { from: head_pitch, gain: 1.883, deadband: 0.3, spring: { hz: 4.0, zeta: 0.6 }, soft_limit: 0.15, idle: { amp: 1.0, hz: 0.22 }, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
+    head_roll:  { from: head_roll, gain: 1.547, deadband: 0.3, spring: { hz: 4.0, zeta: 0.6 }, soft_limit: 0.15, idle: { amp: 0.8, hz: 0.17 }, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
+    # Whole-body participation, from Pollen's library (pooled regression on the
+    # 16 clips, values around the library median): the head moves forward and
+    # up when it pitches up (head_x ≈ +0.31 mm/deg, head_z ≈ +0.23 mm/deg of
+    # daemon pitch) and the body follows big turns (body_yaw ≈ 0.65 × head_yaw,
+    # r 0.69) — a nod is a bob, a look is a turn.
+    head_x:
+      mix:
+        - { from: head_x, gain: 0.1528 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_pitch, gain: 0.5195 }   # 0.31 × the head's 1.617  # fitted by scripts/retarget_fit.py 2026-08-27
+      spring: { hz: 3.0, zeta: 0.8 }
+      idle: { amp: 1.5, hz: 0.2 }
+      soft_limit: 0.15
+      settle: { seconds: 0.6 }
+    head_y:     { from: head_y, gain: 0.2076, spring: { hz: 3.0, zeta: 0.8 }, soft_limit: 0.15, settle: { seconds: 0.6 } }  # fitted by scripts/retarget_fit.py 2026-08-27
+    head_z:
+      mix:
+        - { from: head_z, gain: 0.2014 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_pitch, gain: 0.2936 }   # 0.23 × the head's 1.617  # fitted by scripts/retarget_fit.py 2026-08-27
+      spring: { hz: 3.0, zeta: 0.8 }
+      idle: { amp: 2.0, hz: 0.22 }
+      soft_limit: 0.15
+      settle: { seconds: 0.6 }
     body_yaw:
       mix:
-        - { from: torso_yaw, gain: 1.755 }  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: head_yaw, gain: 0.5485 }   # big turns bring the body along  # fitted by scripts/retarget_fit.py 2026-08-26
-      spring: { hz: 2.0, zeta: 1.0 }
+        - { from: torso_yaw, gain: 1.299 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_yaw, gain: 0.814 }   # 0.65 × the head's 1.687: big turns bring the body along  # fitted by scripts/retarget_fit.py 2026-08-27
+      spring: { hz: 2.0, zeta: 0.9 }
       soft_limit: 0.15
+      settle: { seconds: 0.6 }
     # Antennas. The two hinges are MIRROR images on the vendor URDF/daemon
     # (+right = outward, +left = inward, both toward −y), so a symmetric "ears
     # out" is antenna_left = −antenna_right — Pollen's whole library is
@@ -72,7 +92,7 @@ retarget:
     #   laughing1/yes1/cheerful1 perk 14/16/21 → a full mouth open = 15;
     #   head down drags the ears down: pooled slope −2.2 splay/deg of pitch,
     #     damped to −0.8 so ordinary nods only flutter them;
-    #   common-mode tilt vs head roll: pooled slope −0.67 (counter-rotation).
+    #   common-mode tilt vs head roll: pooled slope −0.67, within-clip −0.47 → −0.5 (counter-rotation).
     # Hardware array order ([left, right] on this unit vs the SDK's
     # [right, left]) is the sink's business, not this mapping's: the signs
     # here are per named joint.
@@ -82,20 +102,22 @@ retarget:
         - { from: brow_furrow, gain: -85 }
         - { from: mouth_open, gain: -15 }
         - { from: head_pitch, gain: 0.8 }
-        - { from: head_roll, gain: -0.67 }
+        - { from: head_roll, gain: -0.5 }
       spring: { hz: 3.5, zeta: 0.45 }
-      idle: { amp: 3.0, hz: 0.3 }
+      idle: { amp: 6.0, hz: 0.3 }
       soft_limit: 0.15
+      settle: { seconds: 0.6 }
     antenna_right:
       mix:
         - { from: brow_r, gain: 55 }
         - { from: brow_furrow, gain: 85 }
         - { from: mouth_open, gain: 15 }
         - { from: head_pitch, gain: -0.8 }
-        - { from: head_roll, gain: -0.67 }
+        - { from: head_roll, gain: -0.5 }
       spring: { hz: 3.5, zeta: 0.45 }
-      idle: { amp: 3.0, hz: 0.3 }
+      idle: { amp: 6.0, hz: 0.3 }
       soft_limit: 0.15
+      settle: { seconds: 0.6 }
   # Puppet mode: the hand is the head (fist-bump / high-five behaviours).
   puppet:
     head_yaw:   { from: shoulder_yaw, gain: 0.6, smooth_hz: 6 }

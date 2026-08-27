@@ -83,11 +83,11 @@
         "terms": [
           {
             "from": "head_yaw",
-            "gain": -1.009
+            "gain": -1.034
           },
           {
             "from": "torso_yaw",
-            "gain": -1.345
+            "gain": -1.379
           }
         ],
         "offset": 0.0,
@@ -97,20 +97,29 @@
         "smooth_hz": null,
         "spring": {
           "hz": 2.5,
-          "zeta": 1.0
+          "zeta": 0.85
         },
-        "idle": null,
-        "soft_limit": 0.15
+        "idle": {
+          "amp": 1.0,
+          "hz": 0.15,
+          "still": 1.5
+        },
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 18.0
+        }
       },
       "wrist_roll": {
         "terms": [
           {
             "from": "head_yaw",
-            "gain": -1.446
+            "gain": -1.491
           },
           {
             "from": "head_roll",
-            "gain": -0.4336
+            "gain": -0.4471
           }
         ],
         "offset": 0.0,
@@ -119,45 +128,54 @@
         "deadband": 0.3,
         "smooth_hz": null,
         "spring": {
-          "hz": 4.0,
-          "zeta": 0.7
+          "hz": 3.5,
+          "zeta": 0.6
         },
         "idle": {
-          "amp": 5.0,
+          "amp": 11.0,
           "hz": 0.2,
-          "still": 10.0
+          "still": 22.0
         },
-        "soft_limit": 0.15
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 13.0
+        }
       },
       "wrist_pitch": {
         "terms": [
           {
             "from": "head_pitch",
-            "gain": -1.17
+            "gain": -1.172
           },
           {
             "from": "brow_l",
-            "gain": -6.501
+            "gain": -6.514
           },
           {
             "from": "brow_r",
-            "gain": -6.501
+            "gain": -6.514
+          },
+          {
+            "from": "head_pitch",
+            "gain": 0.4502
           },
           {
             "from": "torso_lean_fwd",
-            "gain": -0.5622
+            "gain": -0.5212
           },
           {
             "from": "head_x",
-            "gain": -0.1431
+            "gain": -0.1205
           },
           {
             "from": "head_z",
-            "gain": 0.5519
+            "gain": 0.4228
           },
           {
             "from": "mouth_open",
-            "gain": 9.461
+            "gain": 3.881
           }
         ],
         "offset": 0.0,
@@ -166,25 +184,38 @@
         "deadband": 0.0,
         "smooth_hz": null,
         "spring": {
-          "hz": 4.0,
-          "zeta": 0.7
+          "hz": 3.0,
+          "zeta": 0.6
         },
         "idle": {
-          "amp": 3.0,
+          "amp": 8.0,
           "hz": 0.2,
-          "still": 6.0
+          "still": 16.0
         },
-        "soft_limit": 0.08
+        "soft_limit": 0.08,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 11.5
+        }
       },
       "base_pitch": {
         "terms": [
           {
             "from": "torso_lean_fwd",
-            "gain": 1.193
+            "gain": 1.004
           },
           {
             "from": "head_x",
-            "gain": 0.1431
+            "gain": 0.1205
+          },
+          {
+            "from": "head_pitch",
+            "gain": 0.4462
+          },
+          {
+            "from": "mouth_open",
+            "gain": 3.368
           }
         ],
         "offset": 0.0,
@@ -193,25 +224,38 @@
         "deadband": 0.0,
         "smooth_hz": null,
         "spring": {
-          "hz": 2.0,
-          "zeta": 1.0
+          "hz": 3.0,
+          "zeta": 0.6
         },
-        "idle": null,
-        "soft_limit": 0.15
+        "idle": {
+          "amp": 2.5,
+          "hz": 0.25,
+          "still": 6.25
+        },
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 7.5
+        }
       },
       "elbow_pitch": {
         "terms": [
           {
             "from": "head_z",
-            "gain": 0.5519
+            "gain": 0.4228
           },
           {
             "from": "torso_lean_fwd",
-            "gain": 0.6307
+            "gain": 0.4832
           },
           {
             "from": "mouth_open",
-            "gain": 9.461
+            "gain": 7.248
+          },
+          {
+            "from": "head_pitch",
+            "gain": 0.8964
           }
         ],
         "offset": 0.0,
@@ -220,15 +264,20 @@
         "deadband": 0.0,
         "smooth_hz": null,
         "spring": {
-          "hz": 2.5,
-          "zeta": 0.9
+          "hz": 3.0,
+          "zeta": 0.6
         },
         "idle": {
-          "amp": 1.5,
+          "amp": 3.8,
           "hz": 0.25,
-          "still": 3.75
+          "still": 9.5
         },
-        "soft_limit": 0.15
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 6.7
+        }
       }
     },
     "puppet": {
@@ -246,7 +295,8 @@
         "smooth_hz": 6.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "base_pitch": {
         "terms": [
@@ -262,7 +312,8 @@
         "smooth_hz": 6.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "elbow_pitch": {
         "terms": [
@@ -278,7 +329,8 @@
         "smooth_hz": 6.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "wrist_roll": {
         "terms": [
@@ -294,7 +346,8 @@
         "smooth_hz": 8.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "wrist_pitch": {
         "terms": [
@@ -310,7 +363,8 @@
         "smooth_hz": 8.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       }
     }
   },

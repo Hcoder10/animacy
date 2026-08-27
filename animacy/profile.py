@@ -61,6 +61,9 @@ class Joint(BaseModel):
 class MixTerm(BaseModel):
     from_: str = Field(..., alias="from")
     gain: float = 1.0
+    # free-text label ignored by the runtime; `gaze_comp` marks a term derived by
+    # scripts/retarget_fit.py (URDF FK compensation) rather than an expressive gain
+    tag: Optional[str] = None
 
     model_config = {"populate_by_name": True}
 
@@ -78,12 +81,26 @@ class Idle(BaseModel):
     sway of peak amplitude ``amp`` (joint units) around ``hz``, added while the
     mapped target is near-still; ``still`` (units/s) is the target speed at
     which it is fully suppressed (default ``10 * amp * hz``)."""
-    amp: float = Field(..., ge=0)
+    amp: float = Field(..., gt=0)
     hz: float = Field(..., gt=0)
     still: Optional[float] = Field(None, gt=0)
 
     def still_speed(self) -> float:
         return self.still if self.still is not None else 10.0 * self.amp * self.hz
+
+
+class Settle(BaseModel):
+    """Return-to-rest (docs/RETARGET.md §settle): once the mapped target has
+    been still (below ``still`` units/s, default 10 % of the mapping range per
+    second) and the subject silent (``speaking`` < 0.5) for ``quiet`` seconds,
+    the target blends to ``rest + offset`` over ``seconds``; it releases over
+    ``seconds/4`` as soon as motion resumes."""
+    seconds: float = Field(..., gt=0)
+    quiet: float = Field(0.4, ge=0)
+    still: Optional[float] = Field(None, gt=0)
+
+    def still_speed(self, lo: float, hi: float) -> float:
+        return self.still if self.still is not None else 0.1 * (hi - lo)
 
 
 class Mapping(BaseModel):
@@ -99,6 +116,7 @@ class Mapping(BaseModel):
     spring: Optional[Spring] = None
     idle: Optional[Idle] = None
     soft_limit: Optional[float] = Field(None, ge=0.0, lt=0.5)
+    settle: Optional[Settle] = None
 
     model_config = {"populate_by_name": True}
 
@@ -275,6 +293,10 @@ class Profile(BaseModel):
                         "spring": None if m.spring is None else {"hz": m.spring.hz, "zeta": m.spring.zeta},
                         "idle": None if m.idle is None else {"amp": m.idle.amp, "hz": m.idle.hz, "still": m.idle.still_speed()},
                         "soft_limit": m.soft_limit,
+                        "settle": None if m.settle is None else {
+                            "seconds": m.settle.seconds, "quiet": m.settle.quiet,
+                            "still": m.settle.still_speed(self.joint(jn).min if m.min is None else m.min,
+                                                          self.joint(jn).max if m.max is None else m.max)},
                     }
                     for jn, m in mp.items()
                 }

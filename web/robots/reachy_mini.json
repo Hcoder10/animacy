@@ -121,7 +121,7 @@
         "terms": [
           {
             "from": "head_yaw",
-            "gain": 1.687
+            "gain": 1.591
           }
         ],
         "offset": 0.0,
@@ -131,16 +131,25 @@
         "smooth_hz": null,
         "spring": {
           "hz": 4.0,
-          "zeta": 0.7
+          "zeta": 0.6
         },
-        "idle": null,
-        "soft_limit": 0.15
+        "idle": {
+          "amp": 1.0,
+          "hz": 0.15,
+          "still": 1.5
+        },
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 12.0
+        }
       },
       "head_pitch": {
         "terms": [
           {
             "from": "head_pitch",
-            "gain": 1.617
+            "gain": 1.883
           }
         ],
         "offset": 0.0,
@@ -150,20 +159,25 @@
         "smooth_hz": null,
         "spring": {
           "hz": 4.0,
-          "zeta": 0.7
+          "zeta": 0.6
         },
         "idle": {
-          "amp": 0.5,
+          "amp": 1.0,
           "hz": 0.22,
-          "still": 1.1
+          "still": 2.2
         },
-        "soft_limit": 0.15
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 6.0
+        }
       },
       "head_roll": {
         "terms": [
           {
             "from": "head_roll",
-            "gain": 1.45
+            "gain": 1.547
           }
         ],
         "offset": 0.0,
@@ -173,20 +187,29 @@
         "smooth_hz": null,
         "spring": {
           "hz": 4.0,
-          "zeta": 0.7
+          "zeta": 0.6
         },
         "idle": {
-          "amp": 0.4,
+          "amp": 0.8,
           "hz": 0.17,
-          "still": 0.68
+          "still": 1.36
         },
-        "soft_limit": 0.15
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 6.0
+        }
       },
       "head_x": {
         "terms": [
           {
             "from": "head_x",
-            "gain": 0.1471
+            "gain": 0.1528
+          },
+          {
+            "from": "head_pitch",
+            "gain": 0.5195
           }
         ],
         "offset": 0.0,
@@ -195,17 +218,26 @@
         "deadband": 0.0,
         "smooth_hz": null,
         "spring": {
-          "hz": 2.5,
-          "zeta": 1.0
+          "hz": 3.0,
+          "zeta": 0.8
         },
-        "idle": null,
-        "soft_limit": 0.15
+        "idle": {
+          "amp": 1.5,
+          "hz": 0.2,
+          "still": 3.0
+        },
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 5.0
+        }
       },
       "head_y": {
         "terms": [
           {
             "from": "head_y",
-            "gain": 0.2033
+            "gain": 0.2076
           }
         ],
         "offset": 0.0,
@@ -214,17 +246,26 @@
         "deadband": 0.0,
         "smooth_hz": null,
         "spring": {
-          "hz": 2.5,
-          "zeta": 1.0
+          "hz": 3.0,
+          "zeta": 0.8
         },
         "idle": null,
-        "soft_limit": 0.15
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 5.0
+        }
       },
       "head_z": {
         "terms": [
           {
             "from": "head_z",
-            "gain": 0.2538
+            "gain": 0.2014
+          },
+          {
+            "from": "head_pitch",
+            "gain": 0.2936
           }
         ],
         "offset": 0.0,
@@ -233,25 +274,30 @@
         "deadband": 0.0,
         "smooth_hz": null,
         "spring": {
-          "hz": 2.5,
-          "zeta": 1.0
+          "hz": 3.0,
+          "zeta": 0.8
         },
         "idle": {
-          "amp": 1.0,
+          "amp": 2.0,
           "hz": 0.22,
-          "still": 2.2
+          "still": 4.4
         },
-        "soft_limit": 0.15
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 4.0
+        }
       },
       "body_yaw": {
         "terms": [
           {
             "from": "torso_yaw",
-            "gain": 1.755
+            "gain": 1.299
           },
           {
             "from": "head_yaw",
-            "gain": 0.5485
+            "gain": 0.814
           }
         ],
         "offset": 0.0,
@@ -261,10 +307,15 @@
         "smooth_hz": null,
         "spring": {
           "hz": 2.0,
-          "zeta": 1.0
+          "zeta": 0.9
         },
         "idle": null,
-        "soft_limit": 0.15
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 24.0
+        }
       },
       "antenna_left": {
         "terms": [
@@ -286,7 +337,7 @@
           },
           {
             "from": "head_roll",
-            "gain": -0.67
+            "gain": -0.5
           }
         ],
         "offset": 0.0,
@@ -299,11 +350,16 @@
           "zeta": 0.45
         },
         "idle": {
-          "amp": 3.0,
+          "amp": 6.0,
           "hz": 0.3,
-          "still": 9.0
+          "still": 18.0
         },
-        "soft_limit": 0.15
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 28.0
+        }
       },
       "antenna_right": {
         "terms": [
@@ -325,7 +381,7 @@
           },
           {
             "from": "head_roll",
-            "gain": -0.67
+            "gain": -0.5
           }
         ],
         "offset": 0.0,
@@ -338,11 +394,16 @@
           "zeta": 0.45
         },
         "idle": {
-          "amp": 3.0,
+          "amp": 6.0,
           "hz": 0.3,
-          "still": 9.0
+          "still": 18.0
         },
-        "soft_limit": 0.15
+        "soft_limit": 0.15,
+        "settle": {
+          "seconds": 0.6,
+          "quiet": 0.4,
+          "still": 28.0
+        }
       }
     },
     "puppet": {
@@ -360,7 +421,8 @@
         "smooth_hz": 6.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "head_pitch": {
         "terms": [
@@ -376,7 +438,8 @@
         "smooth_hz": 6.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "head_roll": {
         "terms": [
@@ -392,7 +455,8 @@
         "smooth_hz": 6.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "head_z": {
         "terms": [
@@ -408,7 +472,8 @@
         "smooth_hz": 4.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "head_x": {
         "terms": [
@@ -424,7 +489,8 @@
         "smooth_hz": 4.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "antenna_left": {
         "terms": [
@@ -440,7 +506,8 @@
         "smooth_hz": 8.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "antenna_right": {
         "terms": [
@@ -456,7 +523,8 @@
         "smooth_hz": 8.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       }
     }
   },

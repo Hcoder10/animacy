@@ -62,63 +62,81 @@ retarget:
   default:
     base_yaw:
       mix:
-        - { from: head_yaw, gain: -1.009 }  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: torso_yaw, gain: -1.345 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: head_yaw, gain: -1.034 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: torso_yaw, gain: -1.379 }  # fitted by scripts/retarget_fit.py 2026-08-27
       deadband: 0.3
-      spring: { hz: 2.5, zeta: 1.0 }
+      spring: { hz: 2.5, zeta: 0.85 }
+      idle: { amp: 1.0, hz: 0.15 }
       soft_limit: 0.15
+      settle: { seconds: 0.6 }
     wrist_roll:
       # With the head pitched down toward the desk, rolling about the forearm
       # axis pans the lamp head left/right — that is the vendor's own
       # "headshake". So gaze yaw lives here, not on base_yaw.
       mix:
-        - { from: head_yaw, gain: -1.446 }  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: head_roll, gain: -0.4336 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: head_yaw, gain: -1.491 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_roll, gain: -0.4471 }  # fitted by scripts/retarget_fit.py 2026-08-27
       deadband: 0.3
       min: -60
       max: 70
-      spring: { hz: 4.0, zeta: 0.7 }
-      idle: { amp: 5.0, hz: 0.2 }
+      spring: { hz: 3.5, zeta: 0.6 }
+      idle: { amp: 11.0, hz: 0.2 }
       soft_limit: 0.15
+      settle: { seconds: 0.6 }
     wrist_pitch:
       # Gaze pitch + affect, plus GAZE COMPENSATION. The lamp's pitch chain is
       # planar, so (URDF FK, docs/RETARGET.md §gaze) the head's elevation is
       # exactly rest_elev − Δbase_pitch + Δelbow_pitch − Δwrist_pitch. Every
-      # channel that moves base_pitch or elbow_pitch therefore carries the
-      # cancelling term here, gain = −g_base + g_elbow, written by
-      # scripts/retarget_fit.py; "lean in", "rise" and the talking lift keep
-      # the head pointed at the person.
+      # channel that moves base_pitch or elbow_pitch therefore carries a
+      # cancelling `tag: gaze_comp` term here, gain = −g_base + g_elbow, written
+      # by scripts/retarget_fit.py (never scaled by the envelope fit); "lean
+      # in", "rise", the nod's arm bob and the talking lift keep the head
+      # pointed at the person. All three pitch joints share one spring so the
+      # cancellation also holds mid-motion.
       mix:
-        - { from: head_pitch, gain: -1.17 }  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: brow_l, gain: -6.501 }  # brow raise = "perk up" (head tips up a touch)  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: brow_r, gain: -6.501 }  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: torso_lean_fwd, gain: -0.5622 }  # gaze-comp  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: head_x, gain: -0.1431 }  # gaze-comp  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: head_z, gain: 0.5519 }  # gaze-comp  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: mouth_open, gain: 9.461 }  # gaze-comp  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: head_pitch, gain: -1.172 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: brow_l, gain: -6.514 }  # brow raise = "perk up" (head tips up a touch)  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: brow_r, gain: -6.514 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_pitch, gain: 0.4502, tag: gaze_comp }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: torso_lean_fwd, gain: -0.5212, tag: gaze_comp }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_x, gain: -0.1205, tag: gaze_comp }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_z, gain: 0.4228, tag: gaze_comp }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: mouth_open, gain: 3.881, tag: gaze_comp }  # fitted by scripts/retarget_fit.py 2026-08-27
       min: -85
       max: 30
-      spring: { hz: 4.0, zeta: 0.7 }
-      idle: { amp: 3.0, hz: 0.2 }
+      spring: { hz: 3.0, zeta: 0.6 }
+      idle: { amp: 8.0, hz: 0.2 }
       soft_limit: 0.08
+      settle: { seconds: 0.6 }
     base_pitch:
+      # Lean, plus WHOLE-ARM PARTICIPATION: in the vendor's own nod / listening
+      # / happy_wiggle clips the arm moves with the head (base_pitch ≈ −0.45 ×
+      # wrist_pitch, elbow_pitch ≈ −1.0 × wrist_pitch, R² 0.9–1.0; pooled over
+      # all 31 clips −0.25 / −0.15), so head_pitch and mouth_open drive the arm
+      # at those ratios while the gaze_comp terms above keep the pointing.
       mix:
-        - { from: torso_lean_fwd, gain: 1.193 }  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: head_x, gain: 0.1431 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: torso_lean_fwd, gain: 1.004 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_x, gain: 0.1205 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_pitch, gain: 0.4462 }   # −0.45 × the wrist's −1.17  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: mouth_open, gain: 3.368 }  # fitted by scripts/retarget_fit.py 2026-08-27
       min: 0
       max: 75
-      spring: { hz: 2.0, zeta: 1.0 }
+      spring: { hz: 3.0, zeta: 0.6 }
+      idle: { amp: 2.5, hz: 0.25 }
       soft_limit: 0.15
+      settle: { seconds: 0.6 }
     elbow_pitch:
       mix:
-        - { from: head_z, gain: 0.5519 }  # rise up / droop down  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: torso_lean_fwd, gain: 0.6307 }  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: mouth_open, gain: 9.461 }   # a little lift while talking  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: head_z, gain: 0.4228 }  # rise up / droop down  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: torso_lean_fwd, gain: 0.4832 }  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: mouth_open, gain: 7.248 }   # a little lift while talking  # fitted by scripts/retarget_fit.py 2026-08-27
+        - { from: head_pitch, gain: 0.8964 }    # −1.0 × the wrist's −1.17: the nod bobs the arm  # fitted by scripts/retarget_fit.py 2026-08-27
       min: -5
       max: 62
-      spring: { hz: 2.5, zeta: 0.9 }
-      idle: { amp: 1.5, hz: 0.25 }
+      spring: { hz: 3.0, zeta: 0.6 }
+      idle: { amp: 3.8, hz: 0.25 }
       soft_limit: 0.15
+      settle: { seconds: 0.6 }
   # Puppet mode: your own arm IS the lamp. Shoulder → base, elbow → elbow,
   # wrist → neck/head. Offsets put a relaxed forearm-forward pose at the
   # vendor's rest.

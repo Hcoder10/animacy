@@ -98,7 +98,8 @@
         "smooth_hz": 6.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "wrist_flex": {
         "terms": [
@@ -122,7 +123,8 @@
         "smooth_hz": 6.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "shoulder_lift": {
         "terms": [
@@ -146,7 +148,8 @@
         "smooth_hz": 4.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "elbow_flex": {
         "terms": [
@@ -166,7 +169,8 @@
         "smooth_hz": 4.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "wrist_roll": {
         "terms": [
@@ -182,7 +186,8 @@
         "smooth_hz": 6.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "gripper": {
         "terms": [
@@ -202,7 +207,8 @@
         "smooth_hz": 8.0,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       }
     },
     "puppet": {
@@ -220,7 +226,8 @@
         "smooth_hz": null,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "shoulder_lift": {
         "terms": [
@@ -236,7 +243,8 @@
         "smooth_hz": null,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "elbow_flex": {
         "terms": [
@@ -252,7 +260,8 @@
         "smooth_hz": null,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "wrist_flex": {
         "terms": [
@@ -268,7 +277,8 @@
         "smooth_hz": null,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "wrist_roll": {
         "terms": [
@@ -284,7 +294,8 @@
         "smooth_hz": null,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       },
       "gripper": {
         "terms": [
@@ -300,7 +311,8 @@
         "smooth_hz": null,
         "spring": null,
         "idle": null,
-        "soft_limit": null
+        "soft_limit": null,
+        "settle": null
       }
     }
   },

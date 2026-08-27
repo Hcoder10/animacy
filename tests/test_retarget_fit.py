@@ -115,6 +115,7 @@ def test_rewrite_gains_preserves_layout_and_only_touches_the_mode():
     assert "- { from: torso_yaw, gain: -0.6 }   # keep me" in out                  # untouched, no stamp
     assert "- { from: torso_lean_fwd, gain: -0.373 }  # fitted by" in out         # gain inserted where there was none
     assert "head_z:     { from: head_z, gain: 0.5, smooth_hz: 4 }  # fitted by" in out
+    assert "gain: -1.335 }" in rewrite_gains(TEXT, "default", {"base_yaw": {"head_yaw": -1.33499}}, "d")   # 5 significant digits
     assert "base_yaw:    { from: shoulder_yaw, gain: -1.0, smooth_hz: 6 }" in out  # puppet untouched
     assert "wrist_pitch: { from: wrist_pitch, gain: -1.0 }" in out
     assert "prose with gain: -0.45 in it" in out
@@ -124,3 +125,14 @@ def test_rewrite_gains_preserves_layout_and_only_touches_the_mode():
     assert line.count("fitted by") == 1 and "2027-01-01" in line and "gain: -2.0" in line
     with pytest.raises(KeyError):
         rewrite_gains(TEXT, "default", {"base_yaw": {"nope": 1.0}}, "x")
+
+
+def test_rewrite_gains_targets_tagged_comp_terms_separately():
+    text = TEXT.replace("        - { from: torso_lean_fwd }\n",
+                        "        - { from: torso_lean_fwd }\n        - { from: head_pitch, gain: 0.0, tag: gaze_comp }\n")
+    out = rewrite_gains(text, "default", {"wrist_pitch": {("head_pitch", True): 0.64}}, "d")
+    assert "- { from: head_pitch, gain: -0.9 }" in out                       # expressive term untouched
+    assert "- { from: head_pitch, gain: 0.64, tag: gaze_comp }  # fitted by" in out
+    out = rewrite_gains(text, "default", {"wrist_pitch": {("head_pitch", False): -1.5}}, "d")
+    assert "- { from: head_pitch, gain: -1.5 }  # fitted by" in out
+    assert "- { from: head_pitch, gain: 0.0, tag: gaze_comp }" in out
