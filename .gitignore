@@ -34,3 +34,6 @@ data/sim2real/
 data/lerobot/
 data/hf_stage/
 .venv-lerobot/
+
+# blind grading runs: videos, sealed manifests and held-out lines never enter git; only docs/evidence/grading/*.md does
+data/grading/
