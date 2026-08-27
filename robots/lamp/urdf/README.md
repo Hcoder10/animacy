@@ -9,9 +9,14 @@ numbers in those scripts. Nothing has been verified on hardware yet.
 
 The vendor ships two things in `robots/lamp/cad_src/` (Autonomous OS,
 Apache-2.0): per-part STLs and `lamp.glb`, a 22 MB Blender export of the full
-assembly. The STLs are **not** usable for placement: the base and arm parts are
+assembly. The STLs are clean watertight printed-part shells (millimetres) but
+are **not** usable for placement on their own: the base and arm parts are
 exported in local, centred frames while the head parts are in an assembly
-frame, so nothing tells you where a part sits. The GLB is the useful file:
+frame, so nothing tells you where a part sits. The GLB's solids are the
+opposite — correctly placed but fragmented open surfaces (the base drum alone
+has 14 k boundary edges) that render as shards. So the GLB provides placement
+and the STLs provide surfaces (see *Meshes* below). The GLB is the useful file
+for kinematics:
 
 - it is one skinned mesh per moving part, in assembled world coordinates
   (glTF y-up, metres, lamp facing +x), named `0_base`, `1_base_yaw`,
@@ -150,8 +155,20 @@ directions and topology are not affected.
 
 ## Meshes
 
-`../meshes/*.stl`, metres, one per link, extracted from `lamp.glb` (see
-`../meshes/ATTRIBUTION.md`). The base keeps only the drum shell, top plate and
-feet (the 66 internal electronics solids are dropped — invisible and 300 k
-faces); other links are decimated per solid with `fast_simplification`.
+`../meshes/*.stl`, metres, one per link (see `../meshes/ATTRIBUTION.md`).
+Surfaces are the vendor's per-part STLs; each part-assembly that shares a
+local frame (`base`+`base-cap`+`button`; the three `swivel-part`s; the two
+halves of each arm; `neck`; `cap-servo`; the three `head-part`s + `light-cover`)
+is placed by rigid registration onto the matching solid of `lamp.glb`
+(PCA-initialised point-to-point ICP, four proper sign combinations, best
+kept; the script prints the residuals). Median registration residuals are
+~2 mm for the base, servo cap and head and ~1 mm for the arms, swivel and
+neck (the STL and GLB tessellations differ, so ~1 mm is the floor; ICP samples
+are random so the numbers move by a few tenths between runs). Only the base
+shell (25 k faces) is decimated (`fast_simplification`, to 10 k); nothing
+else is touched — removing the vendor parts' micro-triangles was tried and it
+opens holes (0 → 390 boundary edges on the head), so they stay. Result:
+3.3 MB, 0 boundary edges on every link except 35 on the head (the vendor's
+`light-cover.stl` is not closed).
+Servos, PCBs and screws are not modelled (they exist only in the GLB).
 Masses/inertias in the URDF are nominal placeholders.

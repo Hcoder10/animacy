@@ -144,7 +144,10 @@ Direction of a **positive** value on each joint, taken from Autonomous's
 device-measured notes (`hal/drivers/tracking/constants.py`, unit lamp-ac82,
 2026-08-25) and reproduced by the URDF (`tests/test_lamp_urdf.py`):
 
-- `base_yaw` + → the head pans to the lamp's **right** (clockwise from above).
+- `base_yaw` + → the head pans to the lamp's **right** (clockwise from above);
+  the vendor's nudge API (`hal/models.py ServoNudgeRequest`, "negative=left,
+  positive=right", mapped onto `base_yaw`) says the same. Sim-verified against
+  the URDF; hardware pending.
 - `wrist_roll` + → pans **right** as well; it rolls the head about the neck
   axis, and because the head looks perpendicular to the neck that swings the
   gaze sideways (the vendor's `headshake`). Note: these two are the *opposite*

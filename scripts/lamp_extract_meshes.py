@@ -28,7 +28,7 @@ import sys
 
 import numpy as np
 import trimesh
-import trimesh.registration as reg
+from scipy.spatial import cKDTree
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -59,11 +59,12 @@ UNITS = [
     ("upper_arm", ["arm-2-part1", "arm-2-part2"], []),
     ("neck", ["neck"], []),
     ("neck", ["cap-servo"], []),
-    ("head", ["head-part2", "head-part3"], ["head-part1", "light-cover"]),
+    ("head", ["head-part1", "head-part2", "head-part3", "light-cover"], []),
 ]
 # faces kept per part after decimation (only parts above this are decimated)
-MAX_FACES = 9000
-SAMPLES = 4000
+MAX_FACES = 10000
+SRC_SAMPLES = 3000
+TGT_SAMPLES = 12000
 
 
 def load_glb_groups():
@@ -96,18 +97,46 @@ def _pca_frame(pts):
     return c, V
 
 
+def _icp(src_pts, tree, tgt_pts, T0, iters=60):
+    """Point-to-point ICP (Kabsch) from ``T0``; returns (T, median nn distance)."""
+    T = T0.copy()
+    d = None
+    for _ in range(iters):
+        p = src_pts @ T[:3, :3].T + T[:3, 3]
+        d, idx = tree.query(p)
+        q = tgt_pts[idx]
+        pc, qc = p.mean(axis=0), q.mean(axis=0)
+        H = (p - pc).T @ (q - qc)
+        U, _, Vt = np.linalg.svd(H)
+        R = Vt.T @ U.T
+        if np.linalg.det(R) < 0:
+            Vt[2] *= -1
+            R = Vt.T @ U.T
+        t = qc - R @ pc
+        Tinc = np.eye(4)
+        Tinc[:3, :3] = R
+        Tinc[:3, 3] = t
+        T = Tinc @ T
+    return T, float(np.median(d))
+
+
 def register(src: trimesh.Trimesh, tgt: trimesh.Trimesh):
-    """Rigid transform (4x4) taking ``src`` onto ``tgt`` and the mean residual (m)."""
-    sp = src.sample(SAMPLES)
+    """Rigid transform (4x4) taking ``src`` onto ``tgt`` and the median residual (m).
+
+    Initialised from the principal axes of both point clouds (4 proper sign
+    combinations), best ICP result kept."""
+    sp = src.sample(SRC_SAMPLES)
+    tp = tgt.sample(TGT_SAMPLES)
+    tree = cKDTree(tp)
     cs, Vs = _pca_frame(sp)
-    ct, Vt = _pca_frame(tgt.sample(SAMPLES))
+    ct, Vt = _pca_frame(tp)
     best = None
     for signs in [(1, 1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1)]:
         R0 = Vt @ (Vs * np.array(signs)).T
         T0 = np.eye(4)
         T0[:3, :3] = R0
         T0[:3, 3] = ct - R0 @ cs
-        M, _, cost = reg.icp(sp, tgt, initial=T0, max_iterations=60, threshold=1e-7, scale=False)
+        M, cost = _icp(sp, tree, tp, T0)
         if best is None or cost < best[1]:
             best = (M, cost)
     return best
@@ -122,12 +151,14 @@ def main() -> int:
         for m in parts.values():
             m.apply_scale(MM)
         src = trimesh.util.concatenate([parts[n] for n in reg_parts])
-        ext = np.sort(src.extents)
-        # candidate GLB solids: same group, comparable size
+        ext = np.sort(src.bounding_box_oriented.primitive.extents)
+        # candidate GLB solids: same group, comparable oriented-bounding-box size
         best = None
         for gname, g in groups[LINKS[link][0]]:
-            ge = np.sort(g.extents)
-            if len(g.faces) < 300 or np.any(ge < 0.5 * ext) or np.any(ge > 1.6 * ext):
+            if len(g.faces) < 300:
+                continue
+            ge = np.sort(g.bounding_box_oriented.primitive.extents)
+            if np.any(ge < 0.6 * ext) or np.any(ge > 1.7 * ext):
                 continue
             M, cost = register(src, g)
             if best is None or cost < best[1]:
@@ -135,7 +166,7 @@ def main() -> int:
         if best is None:
             raise SystemExit(f"{link}: no GLB solid matches {reg_parts} (extents {np.round(ext*1000,1)} mm)")
         M, cost, gname = best
-        print(f"{link:10s} {'+'.join(reg_parts):40s} -> {gname:14s} residual {cost*1000:5.2f} mm")
+        print(f"{link:10s} {'+'.join(reg_parts):40s} -> {gname:14s} median residual {cost*1000:5.2f} mm")
         for n, m in parts.items():
             m.apply_transform(M)
             link_parts[link].append((n, m))
@@ -146,6 +177,8 @@ def main() -> int:
         for n, m in link_parts[link]:
             if len(m.faces) > MAX_FACES:
                 m = m.simplify_quadric_decimation(face_count=MAX_FACES)
+            # no sliver/degenerate cleanup: the vendor parts are closed and removing
+            # their micro-triangles opens holes (measured: 0 -> 390 boundary edges)
             m.apply_translation(-origin)
             outm.append(m)
         m = trimesh.util.concatenate(outm)
