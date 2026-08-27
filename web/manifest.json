@@ -1,5 +1,5 @@
 {
- "generated": "2026-08-26T23:18:29",
+ "generated": "2026-08-26T23:38:03",
  "robots": {
   "lamp": {
    "urdf": "urdf/lamp.urdf",
@@ -290,11 +290,16 @@
  "bundle": {
   "model_json": true,
   "a2m": true,
+  "a2m_ar": true,
   "vq_decoder": true,
   "bigram": true,
   "retrieval": true,
   "default_backend": "retrieval",
-  "arch": "a2m",
+  "archs": [
+   "ff",
+   "ar"
+  ],
+  "default_arch": "ar",
   "verdict": ""
  }
 }

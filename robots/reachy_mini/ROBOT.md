@@ -45,16 +45,16 @@ retarget:
   # and breathes the head while the person is still; `soft_limit` (§soft) is a
   # tanh knee over the last 15% of each range.
   default:
-    head_yaw:   { from: head_yaw, gain: 2.363, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
-    head_pitch: { from: head_pitch, gain: 2.014, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15, idle: { amp: 0.5, hz: 0.22 } }  # fitted by scripts/retarget_fit.py 2026-08-26
-    head_roll:  { from: head_roll, gain: 1.919, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15, idle: { amp: 0.4, hz: 0.17 } }  # fitted by scripts/retarget_fit.py 2026-08-26
-    head_x:     { from: head_x, gain: 0.1445, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
-    head_y:     { from: head_y, gain: 0.3705, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
-    head_z:     { from: head_z, gain: 0.2551, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15, idle: { amp: 1.0, hz: 0.22 } }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_yaw:   { from: head_yaw, gain: 1.687, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_pitch: { from: head_pitch, gain: 1.617, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15, idle: { amp: 0.5, hz: 0.22 } }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_roll:  { from: head_roll, gain: 1.45, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15, idle: { amp: 0.4, hz: 0.17 } }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_x:     { from: head_x, gain: 0.1471, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_y:     { from: head_y, gain: 0.2033, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_z:     { from: head_z, gain: 0.2538, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15, idle: { amp: 1.0, hz: 0.22 } }  # fitted by scripts/retarget_fit.py 2026-08-26
     body_yaw:
       mix:
-        - { from: torso_yaw, gain: 2.4 }  # fitted by scripts/retarget_fit.py 2026-08-26
-        - { from: head_yaw, gain: 0.75 }   # big turns bring the body along  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: torso_yaw, gain: 1.755 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: head_yaw, gain: 0.5485 }   # big turns bring the body along  # fitted by scripts/retarget_fit.py 2026-08-26
       spring: { hz: 2.0, zeta: 1.0 }
       soft_limit: 0.15
     # Antennas. The two hinges are MIRROR images on the vendor URDF/daemon

@@ -121,7 +121,7 @@
         "terms": [
           {
             "from": "head_yaw",
-            "gain": 2.363
+            "gain": 1.687
           }
         ],
         "offset": 0.0,
@@ -140,7 +140,7 @@
         "terms": [
           {
             "from": "head_pitch",
-            "gain": 2.014
+            "gain": 1.617
           }
         ],
         "offset": 0.0,
@@ -163,7 +163,7 @@
         "terms": [
           {
             "from": "head_roll",
-            "gain": 1.919
+            "gain": 1.45
           }
         ],
         "offset": 0.0,
@@ -186,7 +186,7 @@
         "terms": [
           {
             "from": "head_x",
-            "gain": 0.1445
+            "gain": 0.1471
           }
         ],
         "offset": 0.0,
@@ -205,7 +205,7 @@
         "terms": [
           {
             "from": "head_y",
-            "gain": 0.3705
+            "gain": 0.2033
           }
         ],
         "offset": 0.0,
@@ -224,7 +224,7 @@
         "terms": [
           {
             "from": "head_z",
-            "gain": 0.2551
+            "gain": 0.2538
           }
         ],
         "offset": 0.0,
@@ -247,11 +247,11 @@
         "terms": [
           {
             "from": "torso_yaw",
-            "gain": 2.4
+            "gain": 1.755
           },
           {
             "from": "head_yaw",
-            "gain": 0.75
+            "gain": 0.5485
           }
         ],
         "offset": 0.0,
