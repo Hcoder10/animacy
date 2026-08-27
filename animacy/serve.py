@@ -71,17 +71,48 @@ def envelope_motion(wav: np.ndarray, sr: int = 16000, seed: int = 0) -> HumanCli
     return HumanClip.from_frames(f, source="envelope-heuristic", rate_hz=RATE_HZ)
 
 
+def _speaking_from_audio(wav: np.ndarray, n: int, sr: int = 16000) -> np.ndarray:
+    """Talk mode: the robot is the speaker wherever its own TTS has energy."""
+    feats = audio_features(wav, sr, n_ticks=n)
+    return (feats[:, 64] > -0.3).astype(np.int64)
+
+
+_MODEL_CACHE: dict = {}
+
+
 def model_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkpoints/v1", seed: int = 0,
-                 speaking: bool = True) -> HumanClip:
-    from .model.infer import generate_from_audio  # provided by animacy.model
+                 listen: bool = False, temperature: float = 0.8, bigram_weight: float = 0.5) -> HumanClip:
+    """The learned audio→motion model (``animacy.model.infer``)."""
+    import os
 
-    return generate_from_audio(wav, sr, checkpoint=checkpoint, speaking=speaking, seed=seed)
+    from .model.infer import MotionModel, generate
+
+    key = os.path.abspath(checkpoint)
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE[key] = MotionModel.load(checkpoint)
+    n = int(np.ceil(len(wav) / sr * RATE_HZ))
+    feats = audio_features(wav, sr, n_ticks=n)
+    speaking = np.zeros(n, np.int64) if listen else _speaking_from_audio(wav, n, sr)
+    return generate(_MODEL_CACHE[key], feats, speaking, causal=listen, temperature=temperature,
+                    bigram_weight=bigram_weight, seed=seed)
 
 
-def retrieval_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkpoints/v1", seed: int = 0) -> HumanClip:
-    from .model.retrieval import retrieve_from_audio  # provided by animacy.model
+def retrieval_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkpoints/v1", seed: int = 0,
+                     listen: bool = False) -> HumanClip:
+    """Motion matching against the corpus (``animacy.model.retrieval``)."""
+    import os
 
-    return retrieve_from_audio(wav, sr, checkpoint=checkpoint, seed=seed)
+    from .model.infer import motion_to_clip
+    from .model.retrieval import RetrievalIndex
+
+    key = ("retrieval", os.path.abspath(checkpoint))
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE[key] = RetrievalIndex.load(os.path.join(checkpoint, "retrieval.json"))
+    n = int(np.ceil(len(wav) / sr * RATE_HZ))
+    feats = audio_features(wav, sr, n_ticks=n)
+    speaking = np.zeros(n, np.int64) if listen else _speaking_from_audio(wav, n, sr)
+    motion = _MODEL_CACHE[key].query(feats, speaking)
+    return motion_to_clip(motion, speaking, RATE_HZ, source="retrieval", mode="listen" if listen else "talk")
 
 
 SOURCES = {"envelope": envelope_motion, "model": model_motion, "retrieval": retrieval_motion}
