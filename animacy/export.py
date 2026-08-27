@@ -28,8 +28,8 @@ import pandas as pd
 from .profile import Profile
 
 _JOINT_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.pos$")
-AUTONOMOUS_MAX_ROWS = 20000          # server: _MAX_SERVO_RECORDING_ROWS (kept conservative)
-AUTONOMOUS_MAX_BYTES = 5 * 1024 * 1024
+AUTONOMOUS_MAX_ROWS = 20000          # server: hal/routes/servo.py _MAX_SERVO_RECORDING_ROWS
+AUTONOMOUS_MAX_BYTES = 2 * 1024 * 1024  # server: _MAX_SERVO_RECORDING_UPLOAD_BYTES (2 MB)
 
 
 def _fmt_for(profile: Profile, fmt: str) -> str:

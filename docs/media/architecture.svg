@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/>
+    </marker>
+    <style>
+      .card { fill: #0d1117; }
+      .box { fill: #161b22; stroke: #30363d; stroke-width: 1.2; rx: 8; }
+      .box.canon { stroke: #58a6ff; stroke-width: 1.8; }
+      .box.robot { stroke: #3fb950; stroke-width: 1.8; }
+      .box.out { stroke: #8b949e; }
+      .t { fill: #e6edf3; }
+      .t.b { font-weight: 600; }
+      .t.dim { fill: #8b949e; font-size: 11.5px; }
+      .t.mono { font-family: Consolas, 'SFMono-Regular', Menlo, monospace; font-size: 11.5px; fill: #c9d1d9; }
+      .t.green { fill: #3fb950; }
+      .t.blue { fill: #58a6ff; }
+      .ln { stroke: #58a6ff; stroke-width: 1.6; fill: none; marker-end: url(#arr); }
+      .ln.dim { stroke: #8b949e; }
+      .bus { stroke: #58a6ff; stroke-width: 1.6; fill: none; }
+    </style>
+  </defs>
+  <rect class="card" x="0" y="0" width="960" height="600" rx="14"/>
+
+  <!-- title -->
+  <text class="t b" x="24" y="30" font-size="15">animacy — one human motion space, one ROBOT.md per body</text>
+
+  <!-- sources -->
+  <rect class="box" x="24" y="52" width="196" height="34"/>
+  <text class="t" x="34" y="74">webcam / phone</text>
+  <rect class="box" x="24" y="94" width="196" height="34"/>
+  <text class="t" x="34" y="116">licensed video (PD, CC-BY)</text>
+  <rect class="box" x="24" y="136" width="196" height="34"/>
+  <text class="t" x="34" y="158">browser Record mode</text>
+
+  <!-- capture -->
+  <rect class="box" x="258" y="80" width="200" height="66"/>
+  <text class="t b" x="270" y="102">animacy capture</text>
+  <text class="t dim" x="270" y="120">MediaPipe face + pose, VAD</text>
+  <text class="t dim" x="270" y="136">neutral-relative, 30 Hz</text>
+  <path class="ln" d="M 220 69 L 246 69 L 246 113 L 256 113"/>
+  <path class="ln" d="M 220 111 L 256 113"/>
+  <path class="ln" d="M 220 153 L 246 153 L 246 113"/>
+
+  <!-- canonical -->
+  <rect class="box canon" x="496" y="52" width="440" height="108"/>
+  <text class="t b blue" x="510" y="76" font-size="14">canonical human motion · animacy.human.v1</text>
+  <text class="t" x="510" y="98">30 Hz · 28 channels · relative to a neutral pose</text>
+  <text class="t dim" x="510" y="116">head 6-DoF · gaze · brows · eyes · mouth · torso lean/yaw</text>
+  <text class="t dim" x="510" y="132">puppet arm chain · speaking / validity flags</text>
+  <text class="t mono" x="510" y="150">docs/CANONICAL.md · animacy/schema.py</text>
+  <path class="ln" d="M 458 113 L 494 106"/>
+
+  <!-- speech path -->
+  <rect class="box" x="24" y="206" width="230" height="62"/>
+  <text class="t b" x="34" y="228">text → speech (TTS)</text>
+  <text class="t dim" x="34" y="246">Kokoro-82M in the browser</text>
+  <text class="t dim" x="34" y="260">SAPI / espeak / kokoro-onnx on the CLI</text>
+
+  <rect class="box" x="284" y="206" width="200" height="62"/>
+  <text class="t b" x="294" y="228">audio features</text>
+  <text class="t dim" x="294" y="246">66-d log-mel + energy @ 30 Hz</text>
+  <text class="t mono" x="294" y="260">features.py ≡ features.js</text>
+  <path class="ln" d="M 254 237 L 282 237"/>
+
+  <rect class="box" x="514" y="196" width="422" height="82"/>
+  <text class="t b" x="526" y="218">motion source</text>
+  <text class="t" x="526" y="236">retrieval — motion matching against the human corpus (default)</text>
+  <text class="t" x="526" y="252">learned — VQ tokens + audio→codes transformer (selectable)</text>
+  <text class="t dim" x="526" y="268">envelope — labelled heuristic floor · roles: speaking / listening</text>
+  <path class="ln" d="M 484 237 L 512 237"/>
+  <path class="ln" d="M 716 196 L 716 162"/>
+
+  <!-- robot profiles -->
+  <text class="t dim" x="24" y="290">the same clip, every body — no retraining</text>
+  <rect class="box robot" x="60" y="316" width="230" height="46"/>
+  <text class="t b green" x="72" y="336">ROBOT.md · lamp</text>
+  <text class="t dim" x="72" y="352">5 joints, vendor names, ±90</text>
+  <rect class="box robot" x="330" y="316" width="250" height="46"/>
+  <text class="t b green" x="342" y="336">ROBOT.md · reachy_mini</text>
+  <text class="t dim" x="342" y="352">head 6-DoF, body yaw, 2 antennas</text>
+  <rect class="box robot" x="620" y="316" width="280" height="46"/>
+  <text class="t b green" x="632" y="336">ROBOT.md · so101 / your robot</text>
+  <text class="t dim" x="632" y="352">one file: joints + mappings + limits</text>
+  <path class="bus" d="M 502 160 L 502 300 M 175 300 L 760 300"/>
+  <path class="ln" d="M 175 300 L 175 314"/>
+  <path class="ln" d="M 455 300 L 455 314"/>
+  <path class="ln" d="M 760 300 L 760 314"/>
+
+  <!-- retarget rule -->
+  <text class="t mono" x="60" y="388">retarget (retarget.py ≡ retarget.js):  rest + Σ gain·channel → deadband → clamp → speed-legal (time stretch, never clip) → smooth</text>
+  <text class="t dim" x="60" y="404">signs live in ROBOT.md (gain: -1), never in captured data · docs/ROBOT_MD_SPEC.md</text>
+
+  <!-- outputs -->
+  <rect class="box out" x="24" y="428" width="282" height="76"/>
+  <text class="t b" x="36" y="450">Autonomous Lamp</text>
+  <text class="t mono" x="36" y="468">/servo/upload CSV · /servo/play</text>
+  <text class="t mono" x="36" y="484">/servo/move live (SAFETY.md 120°/s)</text>
+  <text class="t dim" x="36" y="498">not yet verified on a unit</text>
+
+  <rect class="box out" x="330" y="428" width="282" height="76"/>
+  <text class="t b" x="342" y="450">Reachy Mini</text>
+  <text class="t mono" x="342" y="468">daemon set_target @ 30 Hz</text>
+  <text class="t mono" x="342" y="484">pollen_move JSON export</text>
+  <text class="t green" x="342" y="498" font-size="11.5">hardware-verified 2026-08-26</text>
+
+  <rect class="box out" x="636" y="428" width="300" height="76"/>
+  <text class="t b" x="648" y="450">browser viewer · datasets</text>
+  <text class="t mono" x="648" y="468">three.js + urdf-loader, JS = Python 1e-6</text>
+  <text class="t mono" x="648" y="484">LeRobot v3.0 datasets on the Hub</text>
+  <text class="t dim" x="648" y="498">hcoder10.github.io/animacy/web/</text>
+
+  <path class="ln dim" d="M 175 362 L 175 426"/>
+  <path class="ln dim" d="M 455 362 L 455 426"/>
+  <path class="ln dim" d="M 760 362 L 760 426"/>
+
+  <!-- gate -->
+  <text class="t dim" x="24" y="540">acceptance gate: blind grading of rendered reels by an outside judge (animacy/grade) — pending first run</text>
+  <text class="t dim" x="24" y="558">every number in docs/RESULTS.md comes from a checkpoint REPORT.md with its exact command</text>
+</svg>
