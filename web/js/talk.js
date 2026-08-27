@@ -6,9 +6,9 @@
 // Listen mode (hook): microphone → energy VAD → causal model with speaking=0.
 // Wired as `ListenSource` below; see its docstring for what is and is not done.
 
-import { MotionSource } from './motion_source.js';
+import { MotionSource, WebcamSource } from './motion_source.js';
 import { Track } from './clips.js';
-import { CHANNELS } from './canonical.js';
+import { CHANNELS, BOUNDS, neutralFrame } from './canonical.js';
 import { audioFeatures, SR, RATE_HZ } from './features.js';
 import { MotionModel, RetrievalIndex, envelopeMotion, motionToFrames } from './model.js';
 
@@ -325,20 +325,37 @@ export class TalkSource extends MotionSource {
 }
 
 // ---------------------------------------------------------------------------
-// ListenSource (hook): microphone → VAD → causal model, speaking = 0
+// ListenSource: microphone → VAD → causal model (speaking = 0) + gaze overlay
 // ---------------------------------------------------------------------------
+// Gaze overlay (mirror this in Python; docs/MODEL.md "add the gaze overlay for
+// where to look"): the model's pose channels are detrended residuals around
+// neutral, so *where the robot looks* comes from the camera. With the face's
+// camera-space translation t (cm; +x = image right, +y = up, the scene is at
+// −z; MediaPipe facialTransformationMatrix, exposed by WebcamSource as the raw
+// head_y = 10·t.x, head_z = 10·t.y, head_x = 10·t.z):
+//   yaw_target   = −atan2(t.x, −t.z)  deg   (a face on the image's right is on the robot's
+//                                            RIGHT, and canonical +yaw is LEFT → minus)
+//   pitch_target =  atan2(t.y, −t.z)  deg   (face above the axis → look UP → +)
+//   g += (1 − exp(−2π·GAZE_HZ·dt))·(target − g)   one-pole at GAZE_HZ = 1 Hz, held while no face
+//   head_yaw_out   = head_yaw_model   + GAZE_WEIGHT·g_yaw     GAZE_WEIGHT = 0.5
+//   head_pitch_out = head_pitch_model + GAZE_WEIGHT·g_pitch   (then the schema bounds)
+// While the model queue is empty (silence) a neutral frame carries the overlay,
+// so the robot keeps facing the person between utterances.
+export const GAZE_HZ = 1.0;
+export const GAZE_WEIGHT = 0.5;
+
 /**
  * What is wired: mic capture at 16 kHz (AudioWorklet-free: ScriptProcessor for
  * portability), a 2 s rolling window, an energy VAD, and — every `hopS` while the
  * person is talking — a causal (`speaking = 0`) pass of the selected backend over
  * the window whose last `hopS` of frames are appended to a live queue that the
  * viewer drains at 30 Hz. Per-utterance feature normalisation is approximated by
- * normalising the rolling window.
- * What is NOT wired: the gaze overlay from the webcam face position (the
- * `gaze` field is reserved) and any tuning on real conversations.
+ * normalising the rolling window. Plus the gaze overlay above when a `video`
+ * element is given (the webcam runs face-only; a missing camera just disables it).
+ * Not yet done: tuning on real conversations.
  */
 export class ListenSource extends MotionSource {
-  constructor({ backends, backend = 'model', onStatus = null, windowS = 2.0, hopS = 0.5 }) {
+  constructor({ backends, backend = 'model', onStatus = null, windowS = 2.0, hopS = 0.5, video = null, overlay = null, cdn = null }) {
     super();
     this.backends = backends;
     this.backend = backend;
@@ -358,7 +375,9 @@ export class ListenSource extends MotionSource {
     this.running = false;
     this._acc = 0;
     this._busy = false;
-    this.gaze = null;           // reserved: {yaw, pitch} from the webcam face position
+    this.cam = video && cdn ? new WebcamSource({ video, overlay, arm: 'none', cdn, onStatus: () => {} }) : null;
+    this.gaze = { yaw: 0, pitch: 0, targetYaw: 0, targetPitch: 0, hasFace: false };
+    this._silentT = 0;
   }
 
   async start() {
@@ -371,6 +390,40 @@ export class ListenSource extends MotionSource {
     this.proc.connect(this.ctx.destination);
     this.running = true;
     this.onStatus('listening — talk to the robots');
+    if (this.cam) {
+      try {
+        await this.cam.start();
+        this.onStatus('listening — gaze follows your face');
+      } catch (e) {
+        console.warn('[listen] no camera for the gaze overlay:', e && e.message);
+        this.cam = null;
+      }
+    }
+  }
+
+  /** Pull the newest face position and advance the one-pole gaze filter. */
+  _updateGaze(dt) {
+    if (!this.cam) return;
+    const f = this.cam.update();
+    if (f && f.raw && f.raw.face_valid && Number.isFinite(f.raw.head_x) && Number.isFinite(f.raw.head_y)) {
+      const tx = f.raw.head_y / 10, ty = f.raw.head_z / 10, tz = f.raw.head_x / 10; // back to cm, camera frame
+      const depth = Math.max(-tz, 5);                                                 // the face is at −z
+      this.gaze.targetYaw = (-Math.atan2(tx, depth) * 180) / Math.PI;
+      this.gaze.targetPitch = (Math.atan2(ty, depth) * 180) / Math.PI;
+      this.gaze.hasFace = true;
+    } else if (f) {
+      this.gaze.hasFace = false;                                                     // hold the last target
+    }
+    const a = 1 - Math.exp(-2 * Math.PI * GAZE_HZ * dt);
+    this.gaze.yaw += a * (this.gaze.targetYaw - this.gaze.yaw);
+    this.gaze.pitch += a * (this.gaze.targetPitch - this.gaze.pitch);
+  }
+
+  _blend(frame) {
+    const clamp = (c, v) => { const [lo, hi] = BOUNDS[c]; return Math.min(Math.max(v, lo), hi); };
+    frame.head_yaw = clamp('head_yaw', (Number.isFinite(frame.head_yaw) ? frame.head_yaw : 0) + GAZE_WEIGHT * this.gaze.yaw);
+    frame.head_pitch = clamp('head_pitch', (Number.isFinite(frame.head_pitch) ? frame.head_pitch : 0) + GAZE_WEIGHT * this.gaze.pitch);
+    return frame;
   }
 
   _onAudio(chunk) {
@@ -411,12 +464,14 @@ export class ListenSource extends MotionSource {
 
   update(realDt) {
     if (!this.running) return null;
+    this._updateGaze(realDt);
     this._acc += realDt;
     if (this._acc < 1 / RATE_HZ) return null;
     this._acc = 0;
-    const f = this.queue.length ? this.queue.shift() : null;
-    if (!f) return null;
-    return { t: performance.now() / 1000, dt: 1 / RATE_HZ, channels: f };
+    // model frames while the person talks; a neutral frame (gaze only) otherwise
+    const f = this.queue.length ? { ...this.queue.shift() } : neutralFrame();
+    if (!this.queue.length) f.face_valid = 1;
+    return { t: performance.now() / 1000, dt: 1 / RATE_HZ, channels: this._blend(f) };
   }
 
   stop() {
@@ -425,6 +480,7 @@ export class ListenSource extends MotionSource {
     if (this.stream) for (const t of this.stream.getTracks()) t.stop();
     if (this.ctx) { try { this.ctx.close(); } catch (e) { /* ignore */ } }
     this.ctx = this.stream = this.proc = null;
+    if (this.cam) { try { this.cam.stop(); } catch (e) { /* ignore */ } }
     this.onStatus('stopped');
   }
 }

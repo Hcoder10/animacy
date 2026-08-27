@@ -25,7 +25,10 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 HARNESS = os.path.join(ROOT, "web", "dev", "retarget_parity.mjs")
 NODE = shutil.which("node")
 
-ROBOTS = ["lamp", "reachy_mini"]
+import glob
+
+# every profile the viewer can load (web/robots/*.json), not just the headline pair
+ROBOTS = sorted(os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(ROOT, "web", "robots", "*.json")))
 MODES = ["default", "puppet"]
 
 
@@ -57,6 +60,8 @@ def _nan_to_null(frames):
 @pytest.mark.parametrize("mode", MODES)
 def test_js_matches_python(robot: str, mode: str):
     prof = find_robot(robot)
+    if mode not in prof.retarget:
+        pytest.skip(f"{robot} has no '{mode}' mode")
     profile_json = prof.to_web_json()
     dt = 1 / 30
     frames = _frames(240, seed=hash((robot, mode)) & 0xFFFF)

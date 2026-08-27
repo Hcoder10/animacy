@@ -28,26 +28,19 @@
       <span class="tagline">one motion space, any expressive robot — human motion in, any body out</span>
     </div>
     <div class="topbar-right">
+      <select id="add-robot" class="add-robot" title="open a viewport for any robot in web/manifest.json (robots/<name>/ROBOT.md + URDF); it is driven by the same source"><option value="">+ add robot…</option></select>
       <span id="fps" class="pill" title="render frames per second">— fps</span>
       <span id="status" class="status">loading…</span>
     </div>
   </header>
 
   <main class="viewports" id="viewports">
-    <section class="viewport" id="vp-lamp" data-robot="lamp">
-      <div class="vp-label"><span class="vp-title">Autonomous Lamp</span><span class="badge" id="badge-lamp"></span></div>
-      <div class="vp-sub" id="sub-lamp"></div>
-      <div class="vp-loading" id="loading-lamp">loading URDF…</div>
-    </section>
+    <!-- robot viewports are created by js/main.js from web/manifest.json: the headline pair
+         (lamp, reachy_mini) at boot, any other robot via the "+ add robot" picker -->
     <section class="viewport ab" id="vp-lamp-ab" data-robot="lamp-ab" hidden>
       <div class="vp-label"><span class="vp-title">Lamp · B: vendor clip (raw)</span><span class="badge" id="badge-lamp-ab"></span></div>
       <div class="vp-sub" id="sub-lamp-ab">the vendor's hand-authored CSV, played as-is</div>
       <div class="vp-loading" id="loading-lamp-ab">loading URDF…</div>
-    </section>
-    <section class="viewport" id="vp-reachy_mini" data-robot="reachy_mini">
-      <div class="vp-label"><span class="vp-title">Reachy Mini</span><span class="badge" id="badge-reachy_mini"></span></div>
-      <div class="vp-sub" id="sub-reachy_mini"></div>
-      <div class="vp-loading" id="loading-reachy_mini">loading URDF…</div>
     </section>
     <div id="webcam-thumb" hidden>
       <video id="webcam-video" playsinline muted></video>
@@ -137,14 +130,7 @@
       <h3>canonical channels <span class="muted" id="channels-note">— docs/CANONICAL.md</span></h3>
       <div class="bars" id="channel-bars"></div>
     </div>
-    <div class="panel">
-      <h3>lamp joints <span class="muted">deg</span></h3>
-      <div class="bars" id="joint-bars-lamp"></div>
-    </div>
-    <div class="panel">
-      <h3>reachy mini joints <span class="muted">deg / mm</span></h3>
-      <div class="bars" id="joint-bars-reachy_mini"></div>
-    </div>
+    <!-- one joint panel per loaded robot, created by js/main.js -->
   </section>
 
   <div id="toast" hidden></div>

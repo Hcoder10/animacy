@@ -247,6 +247,37 @@ def main() -> int:
             shot("06_puppet_wave")
             ev("window.animacy.setMode('default')")
 
+            # ---- "+ add robot": every manifest robot beyond the headline pair opens a viewport --
+            extras = ev("window.animacy.manifestRobots().filter(n => !window.animacy.loadedRobots().includes(n))")
+            for extra in extras:
+                ev(f"window.__addErr = null; window.animacy.addRobot('{extra}').catch(e => {{ window.__addErr = String(e && e.message || e); }})")
+                page.wait_for_function(f"window.__addErr || window.animacy.robots['{extra}']", timeout=90_000)
+                err = ev("window.__addErr")
+                info_x = ev(f"window.animacy.robotInfo('{extra}')")
+                if err or not info_x:
+                    failures.append(f"add robot {extra}: {err}")
+                    continue
+                print(f"add robot {extra}: {info_x['urdfUrl']} standin={info_x['standin']} missing={info_x['missingJoints']} joints={info_x['urdfJoints']}")
+                if info_x["standin"] or info_x["missingJoints"]:
+                    failures.append(f"add robot {extra}: stand-in or missing joints ({info_x})")
+                # the puppet wave should move an arm; the default mode drives it from the face/torso clip
+                rest_x = {j["name"]: j["rest"] for j in ev(f"window.animacy.robots['{extra}'].profile.joints")}
+                ev("(async () => { window.animacy.setMode('puppet'); await window.animacy.setClip('synth/cal_puppet_wave'); window.animacy.seek(0.5); window.animacy.play(); })()")
+                page.wait_for_timeout(1200)
+                vx = joints(extra)
+                best_x = max(abs(vx[j] - rest_x[j]) for j in rest_x)
+                nvp = ev("document.querySelectorAll('.viewport:not([hidden])').length")
+                print(f"  {extra} on cal_puppet_wave (puppet): max |joint-rest| {best_x:.1f}; visible viewports {nvp}; modes {ev('Array.from(document.getElementById(\"mode-select\").options).map(o => o.value)')}")
+                if best_x < 1.0:
+                    failures.append(f"add robot {extra}: did not move on the puppet wave")
+                shot(f"13_add_robot_{extra}")
+                ev(f"window.animacy.removeRobot('{extra}')")
+                if ev(f"!!window.animacy.robots['{extra}']") or ev("document.querySelectorAll('.viewport:not([hidden])').length") != nvp - 1:
+                    failures.append(f"remove robot {extra} left state behind")
+                ev("window.animacy.setMode('default')")
+            if not extras:
+                print("no extra robots in the manifest (add-robot picker hidden)")
+
             # ---- A/B viewport --------------------------------------------------
             ev("(async () => { await window.animacy.setClip('synth/cal_nod'); await window.animacy.setAb(true); await window.animacy.setAbClip('lamp/nod'); })()")
             page.wait_for_function("window.animacy.ab.on && window.animacy.ab.viewer && window.animacy.ab.source", timeout=60_000)
@@ -345,7 +376,8 @@ def main() -> int:
             ev("window.animacy.setSource('listen').catch(e => { window.__listenErr = String(e && e.message || e); })")
             page.wait_for_function("window.__listenErr || window.animacy.sourceInfo().kind === 'listen'", timeout=30_000)
             page.wait_for_timeout(800)
-            li = ev("({err: window.__listenErr || null, kind: window.animacy.sourceInfo().kind, running: !!(window.animacy.source && window.animacy.source.running), stat: document.getElementById('listen-stat').textContent})")
+            page.wait_for_timeout(1500)
+            li = ev("({err: window.__listenErr || null, kind: window.animacy.sourceInfo().kind, running: !!(window.animacy.source && window.animacy.source.running), stat: document.getElementById('listen-stat').textContent, gaze: window.animacy.source && window.animacy.source.gaze, cam: !!(window.animacy.source && window.animacy.source.cam), channels: !!window.animacy.getChannels()})")
             print(f"listen tab: {li}")
             if li["err"] or not li["running"]:
                 failures.append(f"listen mode failed to initialise: {li}")

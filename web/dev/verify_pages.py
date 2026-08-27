@@ -25,6 +25,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="https://hcoder10.github.io/animacy/web/")
     ap.add_argument("--timeout", type=int, default=180_000)
+    ap.add_argument("--robots", default="", help="comma list of extra robots to open via ?robots= (e.g. so101)")
     a = ap.parse_args()
     from playwright.sync_api import sync_playwright
 
@@ -46,11 +47,15 @@ def main() -> int:
         page.on("response", on_response)
         t0 = time.time()
         print(f"open {a.url}")
-        page.goto(a.url + ("?autoplay=0" if "?" not in a.url else "&autoplay=0"), wait_until="domcontentloaded", timeout=a.timeout)
+        q = "?autoplay=0" if "?" not in a.url else "&autoplay=0"
+        if a.robots:
+            q += f"&robots={a.robots}"
+        page.goto(a.url + q, wait_until="domcontentloaded", timeout=a.timeout)
         page.wait_for_function("window.animacy && window.animacy.ready === true", timeout=a.timeout)
         print(f"ready in {time.time() - t0:.1f}s")
         page.wait_for_timeout(1000)
-        info = page.evaluate("({lamp: window.animacy.robotInfo('lamp'), reachy: window.animacy.robotInfo('reachy_mini'), native: window.animacy.clips.native.length, canonical: window.animacy.clips.canonical.map(c => c.id), errors: window.animacy.errors, status: document.getElementById('status').textContent})")
+        info = page.evaluate("({lamp: window.animacy.robotInfo('lamp'), reachy: window.animacy.robotInfo('reachy_mini'), native: window.animacy.clips.native.length, canonical: window.animacy.clips.canonical.map(c => c.id), errors: window.animacy.errors, status: document.getElementById('status').textContent, loaded: window.animacy.loadedRobots ? window.animacy.loadedRobots() : null, manifest: window.animacy.manifestRobots ? window.animacy.manifestRobots() : null})")
+        print(f"robots loaded {info['loaded']} of manifest {info['manifest']}")
         for n in ("lamp", "reachy"):
             r = info[n]
             if not r:
@@ -61,6 +66,12 @@ def main() -> int:
                 failures.append(f"{n} missing joints in URDF: {r['missingJoints']}")
             else:
                 print(f"{n}: {r['urdfUrl']} OK, joints {r['urdfJoints']}")
+        for extra in [x for x in a.robots.split(",") if x]:
+            r = page.evaluate(f"window.animacy.robotInfo('{extra}')")
+            if not r or r["standin"] or r["missingJoints"]:
+                failures.append(f"extra robot {extra} did not load cleanly on Pages: {r}")
+            else:
+                print(f"{extra}: {r['urdfUrl']} OK, joints {r['urdfJoints']}")
         print(f"native clips listed: {info['native']}, canonical: {info['canonical']}")
         if info["native"] < 40:
             failures.append(f"expected >= 47 native clips (31 lamp + 16 reachy), got {info['native']}")

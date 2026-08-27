@@ -1,17 +1,38 @@
 {
- "generated": "2026-08-26T23:55:41",
+ "generated": "2026-08-27T00:12:10",
  "robots": {
   "lamp": {
    "urdf": "urdf/lamp.urdf",
-   "exists": true
+   "exists": true,
+   "display_name": "Autonomous Lamp",
+   "vendor": "Autonomous",
+   "joints": 5,
+   "modes": [
+    "default",
+    "puppet"
+   ]
   },
   "reachy_mini": {
    "urdf": "urdf/reachy_mini.urdf",
-   "exists": true
+   "exists": true,
+   "display_name": "Reachy Mini",
+   "vendor": "Pollen Robotics / Hugging Face",
+   "joints": 9,
+   "modes": [
+    "default",
+    "puppet"
+   ]
   },
   "so101": {
    "urdf": "urdf/so101.urdf",
-   "exists": true
+   "exists": true,
+   "display_name": "SO-101 arm",
+   "vendor": "TheRobotStudio / LeRobot (Hugging Face)",
+   "joints": 6,
+   "modes": [
+    "default",
+    "puppet"
+   ]
   }
  },
  "native": {

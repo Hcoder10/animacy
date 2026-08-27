@@ -28,7 +28,10 @@ const CDN = {
   poseModel: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
 };
 
-const ROBOT_NAMES = ['lamp', 'reachy_mini'];
+// The headline layout: these two open at boot. Every other robot in
+// web/manifest.json (any robots/<name>/ROBOT.md exported to web/robots/<name>.json)
+// is offered by the "+ add robot" picker (or `?robots=lamp,reachy_mini,so101`).
+const HEADLINE_ROBOTS = ['lamp', 'reachy_mini'];
 // GitHub Pages has no directory listing; these are the 31 Autonomous OS recordings.
 const LAMP_NATIVE_FALLBACK = [
   'acknowledge', 'confused', 'curious', 'excited', 'fear', 'goodbye', 'greeting', 'happy_wiggle', 'headshake', 'idle',
@@ -50,6 +53,7 @@ let manifest = null;
 // ---------------------------------------------------------------------------
 const app = {
   ready: false,
+  robotNames: [],        // loaded robots, in viewport order
   robots: {},            // name → {profile, viewer, retargeters, alias, standin, urdfUrl, values, urdf, missingJoints}
   sourceKind: null,      // 'native' | 'canonical' | 'webcam' | 'model'
   source: null,
@@ -155,13 +159,145 @@ function applyJoints(R, values) {
 }
 
 function restAll(except = null) {
-  for (const n of ROBOT_NAMES) {
+  for (const n of app.robotNames) {
     if (n === except) continue;
     const R = app.robots[n];
     if (!R) continue;
     for (const rt of Object.values(R.retargeters)) rt.reset();
     applyJoints(R, restValues(R.profile));
   }
+}
+
+// ---------------------------------------------------------------------------
+// viewports + joint panels are created per robot (the set comes from the manifest)
+// ---------------------------------------------------------------------------
+function manifestRobots() {
+  const names = manifest && manifest.robots ? Object.keys(manifest.robots) : [];
+  return names.length ? names : HEADLINE_ROBOTS.slice();
+}
+
+function robotLabel(name) {
+  const m = manifest && manifest.robots && manifest.robots[name];
+  return (m && m.display_name) || (app.robots[name] && app.robots[name].profile.display_name) || name;
+}
+
+function createViewport(name, { before = null, removable = false } = {}) {
+  const sec = document.createElement('section');
+  sec.className = 'viewport';
+  sec.id = `vp-${name}`;
+  sec.dataset.robot = name;
+  sec.innerHTML = `<div class="vp-label"><span class="vp-title">${robotLabel(name)}</span><span class="badge" id="badge-${name}"></span></div>` +
+    `<div class="vp-sub" id="sub-${name}"></div><div class="vp-loading" id="loading-${name}">loading URDF…</div>` +
+    (removable ? `<button class="vp-close" title="close this viewport">✕</button>` : '');
+  const parent = $('viewports');
+  if (before) parent.insertBefore(sec, before); else parent.insertBefore(sec, $('webcam-thumb'));
+  if (removable) sec.querySelector('.vp-close').addEventListener('click', () => removeRobot(name));
+  return sec;
+}
+
+function createJointPanel(R) {
+  const units = [...new Set(R.profile.joints.map((j) => j.unit))].join(' / ');
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  panel.id = `panel-${R.name}`;
+  panel.innerHTML = `<h3>${robotLabel(R.name)} joints <span class="muted">${units}</span></h3><div class="bars" id="joint-bars-${R.name}"></div>`;
+  document.querySelector('.readouts').appendChild(panel);
+  const jp = panel.querySelector('.bars');
+  jp.style.gridTemplateRows = `repeat(${Math.min(7, R.profile.joints.length)}, 18px)`;
+  bars.joints[R.name] = {};
+  for (const j of R.profile.joints) {
+    const b = makeBar(jp, j.name, j.name, 'joint');
+    bars.joints[R.name][j.name] = { ...b, lo: j.min, hi: j.max, signed: j.min < 0 && j.max > 0 };
+    if (!(j.min < 0 && j.max > 0)) b.mid.style.display = 'none';
+  }
+  layoutReadouts();
+}
+
+// Two robots: 4 channel columns + 2-column joint panels in a 7-row strip. More
+// robots: narrower panels, so 3 channel columns and single-column joint panels
+// (9 rows); the strip grows a little instead of overflowing.
+function layoutReadouts() {
+  const n = app.robotNames.length;
+  const many = n > 2;
+  const ro = document.querySelector('.readouts');
+  ro.classList.toggle('many', many);
+  ro.style.gridTemplateColumns = `${many ? 1.6 : 2.1}fr repeat(${Math.max(1, n)}, 1fr)`;
+  const rows = many ? 9 : 7;
+  $('channel-bars').style.gridTemplateRows = `repeat(${Math.ceil(READOUT_CHANNELS.length / (many ? 3 : 4))}, 18px)`;
+  for (const name of app.robotNames) {
+    const jp = $(`joint-bars-${name}`);
+    if (jp) jp.style.gridTemplateRows = `repeat(${Math.min(rows, app.robots[name].profile.joints.length)}, 18px)`;
+  }
+}
+
+/** Open a viewport for `name` (from the manifest) and drive it with the current source. */
+async function addRobot(name, { headline = false, before = null } = {}) {
+  if (app.robots[name]) return app.robots[name];
+  const sec = createViewport(name, { before, removable: !headline });
+  let R;
+  try {
+    R = await loadRobot(name, sec);
+  } catch (e) {
+    sec.remove();
+    reportError(`load ${name}`, e);
+    throw e;
+  }
+  app.robots[name] = R;
+  app.robotNames.push(name);
+  describeRobot(R);
+  createJointPanel(R);
+  fillModeSelect();
+  fillAddRobotPicker();
+  if (app.sourceKind === 'native') applyJoints(R, restValues(R.profile));
+  return R;
+}
+
+function removeRobot(name) {
+  if (HEADLINE_ROBOTS.includes(name) || !app.robots[name]) return;
+  const R = app.robots[name];
+  R.viewer.dispose();
+  const sec = $(`vp-${name}`);
+  if (sec) sec.remove();
+  const panel = $(`panel-${name}`);
+  if (panel) panel.remove();
+  delete bars.joints[name];
+  delete app.robots[name];
+  app.robotNames = app.robotNames.filter((n) => n !== name);
+  layoutReadouts();
+  fillModeSelect();
+  fillAddRobotPicker();
+}
+
+function fillAddRobotPicker() {
+  const sel = $('add-robot');
+  sel.innerHTML = '<option value="">+ add robot…</option>';
+  for (const name of manifestRobots()) {
+    if (app.robots[name]) continue;
+    const m = manifest && manifest.robots && manifest.robots[name];
+    const o = document.createElement('option');
+    o.value = name;
+    o.textContent = `${robotLabel(name)}${m && m.exists === false ? ' (no URDF)' : ''}`;
+    sel.appendChild(o);
+  }
+  sel.hidden = sel.options.length <= 1;
+}
+
+/** Retarget modes = the union over loaded robots; a robot lacking the chosen mode uses its `default`. */
+function fillModeSelect() {
+  const labels = { default: 'default (face + torso)', puppet: 'puppet (your arm)' };
+  const modes = [];
+  for (const n of app.robotNames) for (const m of Object.keys(app.robots[n].profile.retarget)) if (!modes.includes(m)) modes.push(m);
+  if (!modes.length) modes.push('default');
+  const sel = $('mode-select');
+  const cur = sel.value || app.mode;
+  sel.innerHTML = '';
+  for (const m of modes) {
+    const o = document.createElement('option');
+    o.value = m;
+    o.textContent = labels[m] || m;
+    sel.appendChild(o);
+  }
+  sel.value = modes.includes(cur) ? cur : modes[0];
 }
 
 function describeRobot(R, forAb = false) {
@@ -188,16 +324,21 @@ function describeRobot(R, forAb = false) {
 const trackCache = new Map();
 
 async function discoverClips() {
-  // native clips: from the manifest; without one, probe (index.json / listing / built-in names)
-  const nativeList = async (robot, ext, fallback) => {
-    if (manifest && manifest.native && manifest.native[robot]) return normaliseListing(manifest.native[robot], ext);
-    return listDir(`../robots/${robot}/clips/native`, ext, { fallback });
+  // native clips: one list per robot from the manifest (format by extension: Autonomous CSV
+  // or animacy joint-table JSON); without a manifest, probe the two headline robots
+  const addNative = (robot, files) => {
+    for (const f of files) {
+      const fmt = f.file.endsWith('.csv') ? 'autonomous_csv' : 'joint_json';
+      app.clips.native.push({ id: `${robot}/${f.name}`, label: `${robot} · ${f.name}`, robot, url: `../robots/${robot}/clips/native/${f.file}`, fmt, description: f.description });
+    }
   };
-  for (const f of await nativeList('lamp', '.csv', LAMP_NATIVE_FALLBACK)) {
-    app.clips.native.push({ id: `lamp/${f.name}`, label: `lamp · ${f.name}`, robot: 'lamp', url: `../robots/lamp/clips/native/${f.file}`, fmt: 'autonomous_csv', description: f.description });
-  }
-  for (const f of await nativeList('reachy_mini', '.json', [])) {
-    app.clips.native.push({ id: `reachy_mini/${f.name}`, label: `reachy · ${f.name}`, robot: 'reachy_mini', url: `../robots/reachy_mini/clips/native/${f.file}`, fmt: 'joint_json', description: f.description });
+  if (manifest && manifest.native) {
+    for (const robot of Object.keys(manifest.native)) {
+      addNative(robot, [...normaliseListing(manifest.native[robot], '.csv'), ...normaliseListing(manifest.native[robot], '.json')]);
+    }
+  } else {
+    addNative('lamp', await listDir('../robots/lamp/clips/native', '.csv', { fallback: LAMP_NATIVE_FALLBACK }));
+    addNative('reachy_mini', await listDir('../robots/reachy_mini/clips/native', '.json', { fallback: [] }));
   }
   // canonical: synthetic calibration + captured (web/clips/*.json)
   for (const tr of syntheticClips()) {
@@ -300,7 +441,7 @@ async function setSource(kind) {
   const isClip = kind === 'native' || kind === 'canonical';
   $('clip-select').hidden = !isClip;
   $('webcam-controls').hidden = kind !== 'webcam';
-  $('webcam-thumb').hidden = kind !== 'webcam';
+  $('webcam-thumb').hidden = kind !== 'webcam' && kind !== 'listen';
   $('talk-controls').hidden = kind !== 'talk';
   $('listen-controls').hidden = kind !== 'listen';
   $('mode-select').disabled = kind === 'native';
@@ -322,10 +463,14 @@ async function setSource(kind) {
       const avail = app.backends.available();
       setStatus(`talk: type a line and press Say it · backends: ${avail.join(' / ')}${app.backends.hasModel ? '' : ' (no model bundle in web/models/ — envelope heuristic only)'}`, 'ok');
     } else if (kind === 'listen') {
-      const l = new ListenSource({ backends: app.backends, backend: $('listen-backend').value, onStatus: (m) => { $('listen-stat').textContent = m; setStatus(`listen: ${m}`); } });
+      const l = new ListenSource({
+        backends: app.backends, backend: $('listen-backend').value,
+        video: $('webcam-video'), overlay: $('webcam-overlay'), cdn: CDN,
+        onStatus: (m) => { $('listen-stat').textContent = m; $('webcam-status').textContent = m; setStatus(`listen: ${m}`); },
+      });
       app.source = l;
       await l.start();
-      setStatus('listen: microphone → VAD → causal model (speaking = 0) → both robots · experimental', 'ok');
+      setStatus('listen: microphone → VAD → causal model (speaking = 0) + gaze overlay from the camera → both robots · experimental', 'ok');
     }
   } catch (e) {
     reportError(`source ${kind}`, e);
@@ -583,18 +728,6 @@ function buildReadouts() {
     bars.channels[c] = { ...makeBar(cp, c, c, FLAGS.includes(c) ? 'flag' : ''), lo, hi, signed: lo < 0 };
     if (!(lo < 0)) bars.channels[c].mid.style.display = 'none';
   }
-  for (const n of ROBOT_NAMES) {
-    const R = app.robots[n];
-    const jp = $(`joint-bars-${n}`);
-    if (!R) continue;
-    jp.style.gridTemplateRows = `repeat(${Math.min(7, R.profile.joints.length)}, 18px)`;
-    bars.joints[n] = {};
-    for (const j of R.profile.joints) {
-      const b = makeBar(jp, j.name, j.name, 'joint');
-      bars.joints[n][j.name] = { ...b, lo: j.min, hi: j.max, signed: j.min < 0 && j.max > 0 };
-      if (!(j.min < 0 && j.max > 0)) b.mid.style.display = 'none';
-    }
-  }
 }
 
 function setBar(b, v, unit = '') {
@@ -618,7 +751,7 @@ function updateReadouts() {
   const ch = app.channels;
   for (const c of READOUT_CHANNELS) setBar(bars.channels[c], ch ? ch[c] : null, UNITS[c]);
   $('channels-note').textContent = app.sourceKind === 'native' ? '— (native clip: robot joint space, no canonical frame)' : '— docs/CANONICAL.md, neutral-relative';
-  for (const n of ROBOT_NAMES) {
+  for (const n of app.robotNames) {
     const R = app.robots[n];
     if (!R || !bars.joints[n]) continue;
     const mp = R.profile.retarget[app.mode] || {};
@@ -656,7 +789,7 @@ function stepRetargeter(rt, channels, dt, seek) {
 function applyFrame(frame) {
   if (frame.channels) {
     app.channels = frame.channels;
-    for (const n of ROBOT_NAMES) {
+    for (const n of app.robotNames) {
       const R = app.robots[n];
       if (!R) continue;
       const rt = R.retargeters[app.mode] || R.retargeters.default;
@@ -697,6 +830,9 @@ function loop(now) {
         const w = app.webcam;
         $('webcam-stat').textContent = `${w.fps.toFixed(0)} fps · face ${w.stats.faceMs.toFixed(0)} ms · pose ${w.stats.poseMs.toFixed(0)} ms · ${w.hasFace ? 'face' : 'no face'} · ${w.hasPose ? 'pose' : 'no pose'}${w.speaking ? ' · speaking' : ''}`;
         if (app.recorder && app.recorder.recording) $('rec-time').textContent = app.recorder.seconds.toFixed(1);
+      } else if (app.sourceKind === 'listen' && app.source instanceof ListenSource) {
+        const l = app.source;
+        $('listen-stat').textContent = `${l.talking ? 'you are talking' : 'quiet'} · queue ${l.queue.length} · gaze ${l.cam ? (l.gaze.hasFace ? `yaw ${l.gaze.yaw.toFixed(0)}° pitch ${l.gaze.pitch.toFixed(0)}°` : 'no face') : 'off (no camera)'}`;
       }
     }
     if (app.ab.on && app.ab.source && app.ab.viewer) {
@@ -709,7 +845,7 @@ function loop(now) {
       }
       app.ab.viewer.viewer.render();
     }
-    for (const n of ROBOT_NAMES) if (app.robots[n]) app.robots[n].viewer.render();
+    for (const n of app.robotNames) if (app.robots[n]) app.robots[n].viewer.render();
     readoutAcc += dt;
     if (readoutAcc >= 0.05) { readoutAcc = 0; updateReadouts(); }
     fpsAcc.n++;
@@ -775,17 +911,19 @@ async function boot() {
   setStatus('loading robots…');
   manifest = await fetchJsonOrNull('manifest.json');
   if (!manifest) console.warn('[animacy] web/manifest.json missing — probing for files instead (run python web/dev/build_manifest.py)');
-  const results = await Promise.allSettled(ROBOT_NAMES.map((n) => loadRobot(n, $(`vp-${n}`))));
-  results.forEach((r, i) => {
-    const n = ROBOT_NAMES[i];
-    if (r.status === 'fulfilled') { app.robots[n] = r.value; describeRobot(r.value); }
-    else reportError(`load ${n}`, r.reason);
-  });
+  buildReadouts();
+  // headline pair first (lamp left of the A/B slot, reachy right of it), then any ?robots=… extras
+  const wanted = (params.get('robots') || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const headline = HEADLINE_ROBOTS.filter((n) => manifestRobots().includes(n));
+  await Promise.allSettled(headline.map((n) => addRobot(n, { headline: true, before: n === 'lamp' ? $('vp-lamp-ab') : null }).catch(() => null)));
+  for (const n of wanted) if (!app.robots[n] && manifestRobots().includes(n)) await addRobot(n).catch(() => null);
   await discoverClips();
   app.backends = new MotionBackends({ baseUrl: 'models/', bundle: (manifest && manifest.bundle) || {}, onStatus: talkStatus });
-  buildReadouts();
   fillBackendSelects();
+  fillModeSelect();
+  fillAddRobotPicker();
   wireUi();
+  $('add-robot').addEventListener('change', (e) => { const n = e.target.value; e.target.value = ''; if (n) addRobot(n).catch(() => null); });
   requestAnimationFrame((t) => { lastNow = t; fpsAcc.t = t; loop(t); });
   const kind = params.get('source') || 'native';
   if (params.get('clip')) app.clipId = params.get('clip');
@@ -793,8 +931,7 @@ async function boot() {
   await setSource(kind);
   if (params.get('ab') === '1') await setAb(true);
   app.ready = true;
-  const loaded = Object.keys(app.robots);
-  if (loaded.length === ROBOT_NAMES.length && !app.errors.length) {
+  if (app.robotNames.length >= headline.length && !app.errors.length) {
     const s = $('status').textContent;
     setStatus(s || 'ready', 'ok');
   }
@@ -812,6 +949,9 @@ Object.assign(app, {
   sourceInfo: () => ({ kind: app.sourceKind, clip: app.clipId, mode: app.mode, time: app.source && app.source.time, duration: app.source && app.source.duration, playing: app.source && app.source.playing }),
   robotInfo: (name) => { const R = app.robots[name]; return R ? { urdfUrl: R.urdfUrl, standin: !!R.standin, missingJoints: R.missingJoints, urdfJoints: R.viewer.jointNames } : null; },
   setView: (kind) => { for (const R of Object.values(app.robots)) R.viewer.setView(kind); if (app.ab.viewer) app.ab.viewer.viewer.setView(kind); },
+  addRobot, removeRobot,
+  loadedRobots: () => app.robotNames.slice(),   // (app.robotNames itself is the live array)
+  manifestRobots,
   say: sayText,
   sayAudio,
   record: {

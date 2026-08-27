@@ -50,7 +50,9 @@ motion source (js/motion_source.js)          frame            per robot
   SyntheticSource calibration clips (JS) ───►                 └──► LiveRetargeter(reachy) ──► toUrdfValues ──► reachy
   WebcamSource   MediaPipe → js/canonical.js ► {channels:{…}} (same path, dt from video timestamps)
   TalkSource     text → kokoro-js → js/features.js → js/model.js ► {channels:{…}} clocked to WebAudio
-  ListenSource   mic → energy VAD → js/model.js (causal, speaking=0)  ► {channels:{…}} (experimental)
+  ListenSource   mic → energy VAD → js/model.js (causal, speaking=0) + gaze overlay from the camera
+                 (face position → yaw/pitch target, one-pole 1 Hz, weight 0.5 under the model's head_yaw/pitch;
+                  the blend is specified as a comment in js/talk.js so Python can mirror it)  ► {channels:{…}} (experimental)
 ```
 
 ### Talk mode internals (`js/talk.js`, `js/model.js`, `js/features.js`, `js/dsp.js`)
@@ -183,14 +185,22 @@ same prompts as `scripts/record_me.py` (read aloud with the Web Speech API,
 
 ## Adding a robot's viewer entry
 
+No JavaScript. The viewer's robot set is `web/manifest.json`:
+
 1. `animacy check robots/<name>` passes (URDF + meshes in `robots/<name>/`).
 2. `animacy profile export robots/<name> -o web/robots/<name>.json`.
-3. Add the name to `ROBOT_NAMES` in `js/main.js` and a `<section class="viewport" id="vp-<name>">`
-   (with `badge-`, `sub-`, `loading-` children) plus a `joint-bars-<name>` panel in `index.html`.
-   Native clips: point `native_clips.dir` in `ROBOT.md` at a folder of
-   Autonomous CSV or animacy joint-table JSON files (an `index.json` with
-   `{"clips":[{"name","description"}]}` adds descriptions).
-4. `python web/dev/build_manifest.py`, then `python web/dev/screenshot.py`.
+3. `python web/dev/build_manifest.py` — the robot now appears in the
+   **+ add robot** picker (header) and opens as an extra viewport driven by
+   the same source; `?robots=lamp,reachy_mini,<name>` opens it at load. The
+   headline pair (`HEADLINE_ROBOTS` in `js/main.js`: lamp, reachy_mini) is the
+   default layout. Retarget modes in the picker are the union over loaded
+   robots (a robot without the chosen mode uses its `default`). Native clips:
+   point `native_clips.dir` in `ROBOT.md` at a folder of Autonomous CSV or
+   animacy joint-table JSON files (an `index.json` with
+   `{"clips":[{"name","description"}]}` adds descriptions) — they show up in
+   the Native clip list by extension.
+4. `python web/dev/screenshot.py` (it adds every non-headline manifest robot,
+   plays the puppet wave on it and removes it again).
 
 Only `description.viewer.camera_distance` is read from the profile for
 framing; the viewer never moves the camera closer than what fits the robot's

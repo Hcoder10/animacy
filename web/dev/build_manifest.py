@@ -35,7 +35,9 @@ def build() -> dict:
         rdir = os.path.join(ROOT, "robots", name)
         urdf_rel = prof["description"]["urdf"]
         urdf_path = os.path.join(rdir, urdf_rel)
-        robots[name] = {"urdf": urdf_rel, "exists": os.path.isfile(urdf_path)}
+        robots[name] = {"urdf": urdf_rel, "exists": os.path.isfile(urdf_path), "display_name": prof.get("display_name", name),
+                        "vendor": prof.get("vendor", ""), "joints": len(prof.get("joints", [])),
+                        "modes": list((prof.get("retarget") or {}).keys())}
         clips = []
         ndir = os.path.join(rdir, (prof.get("native_clips") or {}).get("dir", "clips/native"))
         desc = {}
