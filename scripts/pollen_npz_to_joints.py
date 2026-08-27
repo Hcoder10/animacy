@@ -6,25 +6,28 @@ Two sources are understood, with identical channel semantics:
 * ``--json-dir``: Pollen's recorded moves as shipped in
   ``pollen-robotics/reachy-mini-emotions-library`` and ``-dances-library``
   (Apache-2.0): ``{"description", "time": [...], "set_target_data": [{"head":
-  4x4, "antennas": [right, left], "body_yaw": rad}]}`` sampled at ~50 Hz.
+  4x4, "antennas": [left, right], "body_yaw": rad}]}`` sampled at ~50 Hz.
   Preferred when available (4x the temporal resolution of the npz).
 * ``--npz-dir``: reachy-duplex's conversion of the same files
   (``training/reachy_library_to_motion.py``): ``raw`` = 9 columns
   ``[x, y, z (m), roll, pitch, yaw (deg), antennas[0], antennas[1] (rad), body_yaw (rad)]``
-  at ``fps`` = 12.5 Hz. Note reachy-duplex labels the antenna columns
-  ``antenna_l, antenna_r`` but the SDK order is ``[right, left]``
-  (``reachy_mini`` daemon joint order ``right_antenna, left_antenna``); we use
-  the SDK order.
+  at ``fps`` = 12.5 Hz.
 
-Conversion to animacy / ROBOT.md units and signs (see robots/reachy_mini/urdf/README.md):
+The antenna order ``[left, right]`` is the daemon's (hardware check
+2026-08-26: ``target_antennas[0]`` moves the robot's LEFT antenna —
+``docs/evidence/reachy_sim2real_20260826.md``); the library was recorded through
+the same API. The SDK source's ``[right, left]`` comments describe its MuJoCo sim.
 
-    head_x/y/z     = translation * 1000                (mm; SDK world frame, x fwd / y left / z up)
+Conversion to animacy / ROBOT.md units and signs. It is the exact inverse of
+``animacy.sinks.ReachyDaemonSink.target`` so a native clip replays bit-for-bit:
+
+    head_x/y/z     = translation * 1000                (mm; base frame, x fwd / y left / z up)
     head_roll      = +roll                             (deg; + = right ear down, same as canonical)
-    head_pitch     = -pitch                            (deg; SDK/ROS +pitch = nose DOWN, animacy + = UP)
+    head_pitch     = -pitch                            (deg; daemon +pitch = nose DOWN, animacy + = UP; the sink flips back)
     head_yaw       = +yaw                              (deg; + = left)
     body_yaw       = deg(body_yaw)                     (+ = left)
-    antenna_left   = +deg(antennas[1])                 (+ = swings outward/down, away from the midline)
-    antenna_right  = -deg(antennas[0])                 (mirror axis on the real robot; flipped so + = outward too)
+    antenna_left   = deg(antennas[0])                  (daemon value, plain; the two hinges are mirror images,
+    antenna_right  = deg(antennas[1])                   so a symmetric "ears out" is left = -right)
 
 Euler angles are the SDK's own convention (``create_head_pose``:
 ``Rotation.from_euler("xyz")`` = Rz(yaw) Ry(pitch) Rx(roll)); decomposition uses
@@ -104,8 +107,8 @@ def raw_to_animacy(raw: np.ndarray) -> dict:
         "head_pitch": -raw[:, 4],
         "head_yaw": raw[:, 5],
         "body_yaw": np.degrees(raw[:, 8]),
-        "antenna_left": np.degrees(raw[:, 7]),
-        "antenna_right": -np.degrees(raw[:, 6]),
+        "antenna_left": np.degrees(raw[:, 6]),
+        "antenna_right": np.degrees(raw[:, 7]),
     }
 
 
@@ -205,8 +208,9 @@ def main() -> int:
             "frame": "x forward, y robot-left, z up; head pose relative to the robot base (independent of body_yaw)",
             "head_pitch": "+ = look UP (negated from the SDK, whose +pitch is nose-down)",
             "head_yaw": "+ = turn left", "head_roll": "+ = right ear down", "body_yaw": "+ = body turns left",
-            "antennas": "+ = swings outward/down away from the head's midline; 0 = vertical. "
-                        "SDK values: antennas=[right, left] rad, right_sdk = -antenna_right, left_sdk = +antenna_left",
+            "antennas": "daemon values, plain: target_antennas = [antenna_left, antenna_right] in radians. "
+                        "0 = vertical; the hinges are mirror images (+right = outward, +left = inward), "
+                        "so a symmetric 'ears out' gesture is antenna_left = -antenna_right",
         },
         "source": SOURCE_NOTE,
         "license": "Apache-2.0",

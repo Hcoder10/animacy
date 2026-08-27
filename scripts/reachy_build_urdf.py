@@ -30,10 +30,15 @@ Frames and numbers, with their sources:
   left-to-right, so the chain is yaw -> pitch -> roll. Joint values are the
   SDK's radians (ROS body frame: +pitch = nose DOWN). ``ROBOT.md`` carries the
   animacy sign (``urdf_sign: -1`` on ``head_pitch``).
-* Antennas: the vendor model's antenna joint sign is the negative of the real
-  robot's (``daemon/backend/mujoco/backend.py`` writes ``ctrl = -target`` and
-  reads ``-qpos``). This URDF flips the axis (``0 0 -1`` in the vendor horn
-  frame) so its joint values equal the SDK's real-robot radians directly.
+* Antennas: the vendor hinge axes are kept as-is and the joint values are the
+  daemon's ``target_antennas = [left, right]`` radians, plain. Verified on the
+  physical unit 2026-08-26 (element [0] moved the robot's LEFT antenna; the
+  daemon-served URDF is byte-identical to the vendored one). The two hinges are
+  mirror images: +right swings the right antenna outward (toward -y), +left
+  swings the left antenna inward (also toward -y), so a symmetric "ears out"
+  gesture is ``left = -right`` — which is what Pollen's whole library does
+  (``SLEEP = [-3.05, 3.05]``). The SDK's MuJoCo backend negates and reorders
+  the antennas for its own sim; that is not applied here.
 * Static Stewart parts: motor angles from the SDK's analytical IK at the
   neutral pose (``+-35.90 deg`` alternating); each rod is placed from the
   motor-arm ball to the head's attachment point (distance must equal the
@@ -282,8 +287,9 @@ def build(decimate: float, skip_meshes: bool) -> None:
         j = u.joint_map[vj]
         X.append(f'  <joint name="{name}" type="revolute">')
         X.append(f"    {fmt_origin(T_head_xl @ j.origin)}")
-        # axis flipped: vendor model angle = -(real robot angle); see module docstring
-        X.append(f'    <parent link="head"/>\n    <child link="{name}_link"/>\n    <axis xyz="0 0 -1"/>')
+        # vendor hinge axis kept as-is: the daemon's antenna values drive these hinges directly
+        # (hardware check 2026-08-26, docs/evidence/reachy_sim2real_20260826.md); see module docstring
+        X.append(f'    <parent link="head"/>\n    <child link="{name}_link"/>\n    <axis xyz="0 0 1"/>')
         X.append(f'    <limit effort="10" velocity="8" lower="{-np.pi:.6f}" upper="{np.pi:.6f}"/>')
         X.append("  </joint>")
         X.append(f'  <link name="{name}_link">')

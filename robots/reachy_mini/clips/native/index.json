@@ -19,7 +19,7 @@
   "head_yaw": "+ = turn left",
   "head_roll": "+ = right ear down",
   "body_yaw": "+ = body turns left",
-  "antennas": "+ = swings outward/down away from the head's midline; 0 = vertical. SDK values: antennas=[right, left] rad, right_sdk = -antenna_right, left_sdk = +antenna_left"
+  "antennas": "daemon values, plain: target_antennas = [antenna_left, antenna_right] in radians. 0 = vertical; the hinges are mirror images (+right = outward, +left = inward), so a symmetric 'ears out' gesture is antenna_left = -antenna_right"
  },
  "source": "Pollen Robotics reachy-mini-emotions-library / reachy-mini-dances-library (Apache-2.0, https://huggingface.co/pollen-robotics), converted by scripts/pollen_npz_to_joints.py",
  "license": "Apache-2.0",

@@ -95,46 +95,56 @@ from — a clip retargeted here plays on either stack.
 
 ## Sign conventions
 
-`urdf/reachy_mini.urdf` uses the SDK's own units and signs (`create_head_pose`:
-metres, radians, `Rz(yaw)·Ry(pitch)·Rx(roll)`; antennas as
-`set_target(antennas=[right, left])` radians), so the `urdf_sign` column in the
-front matter **is the animacy↔SDK sign table**. Everything below is verified in
-simulation (`scripts/reachy_render_clip.py` → `urdf/preview/*.png`,
-`tests/test_reachy_urdf.py`) and cross-checked against Pollen's emotion
-library; hardware evidence is listed where it exists (details and sources in
-`urdf/README.md`).
+**Hardware-verified 2026-08-26** on the physical Reachy Mini Wireless
+(192.168.1.60, owner watching): `docs/evidence/reachy_sim2real_20260826.md`,
+produced by `scripts/reachy_sim2real.py` streaming this profile's `default`
+mapping through `animacy.sinks.ReachyDaemonSink` (`POST /api/move/set_target`).
 
-| joint | animacy `+` means | SDK value | evidence |
+**What the daemon receives is the plain profile value** — deg→rad, mm→m,
+`target_antennas = [antenna_left, antenna_right]` — with exactly one sign
+change, in the sink: `pitch` is negated (daemon `+pitch` = nose down). Nothing
+else flips anywhere. The `urdf_sign` column in the front matter is for the
+**visualization URDF only** (`urdf/reachy_mini.urdf` models the daemon's
+convention: its `head_pitch` joint is +down, its antennas take daemon values
+as-is), so `head_pitch: urdf_sign -1` is the viewer's copy of the sink's flip,
+not a second flip on the way to the robot. The sink never reads `urdf_sign`.
+
+| joint | animacy `+` means | sent to the daemon | evidence |
 |---|---|---|---|
-| `head_yaw` | turn toward the robot's LEFT (+y) | `+yaw` | hardware (reachy-duplex, Wireless unit, Aug 2026) |
-| `head_pitch` | look **UP** | `-pitch` (`urdf_sign: -1`) — ROS/SDK `+pitch` is nose-down | hardware (Aug 2026: negative SDK pitch looks up); library `downcast1` mean +16.7°, `laughing1` −15.5° |
-| `head_roll` | right ear drops toward the right shoulder | `+roll` | right-hand rule about +x; **unverified on hardware** |
-| `head_x/y/z` | forward / left / up, mm | metres, same base frame | vendor frames (camera at +x, right antenna at −y); **unverified on hardware** |
-| `body_yaw` | body turns left | `+body_yaw` | vendor `yaw_body` axis; **unverified on hardware** |
-| `antenna_left` | swings outward/down, away from the midline; 0 = vertical | `+left` | see below; **unverified on hardware** |
-| `antenna_right` | same, mirror | `-right` (`urdf_sign: -1`) | see below; **unverified on hardware** |
+| `head_yaw` | robot turns to ITS left | `+yaw` rad | hardware: "look left" turned to the robot's left |
+| `head_pitch` | look **UP** | `-pitch` rad (the sink's one flip) | hardware: "look up" looked up; library `downcast1` mean +16.7°, `laughing1` −15.5° (daemon frame) |
+| `head_roll` | robot's right ear drops | `+roll` rad | hardware: "roll, right ear down" dropped the right ear |
+| `head_x/y/z` | forward / left / up, mm | metres, base frame | tracked by the daemon (`lean in`); direction not eyeballed |
+| `body_yaw` | body turns to its left | `+rad` | hardware: "turn body left" turned left; head yaw read back ≈ 0 while the body sat at +30° |
+| `antenna_left` | `target_antennas[0]`, plain | rad | hardware: "left brow only" (+90 on `[0]`) moved the robot's LEFT antenna |
+| `antenna_right` | `target_antennas[1]`, plain | rad | tracked by the daemon (+90 → 61° at the mid-hold sample) |
 
+- **Antennas are mirror hinges.** In the vendor URDF (byte-identical to what
+  the daemon serves at `/api/kinematics/urdf`) `+right_antenna` swings the
+  right antenna outward (toward −y) and `+left_antenna` swings the left antenna
+  inward — also toward −y. Equal values on both are therefore *not* a symmetric
+  gesture; a symmetric "ears out" is `antenna_left = -antenna_right`. Pollen's
+  whole library is authored that way (`SLEEP = [-3.05, +3.05]`; `yes1` left
+  −18…−2 / right +13…+29; `amazed1` left −19 / right +39…+91; converted clips
+  in `clips/native/` keep the daemon's values). The `default` mapping above
+  sends the same sign to both (`brow_* × 90`), which on hardware sweeps both
+  antennas toward the robot's right — negate the `antenna_left` gains if
+  brows-up should read as "ears open". The out/in geometry itself has not been
+  eyeballed on hardware: send `target_antennas = [-1.0, +1.0]` — both antennas
+  should splay outward; if they cross instead, flip both signs in the mapping.
+- **Which motor is `[0]`** is a per-unit fact: the SDK's `hardware_config.yaml`
+  lists motor id 17 as `right_antenna` before `left_antenna`, and its MuJoCo
+  backend comments say `[right, left]` — yet this unit visibly moved the LEFT
+  antenna for element `[0]`. If another unit differs, swap the two joints in the
+  mapping, never in captured data.
 - **Head poses are base-relative, not body-relative.** The SDK solves the head
   pose in the base frame with `body_yaw` as an independent joint
   (`ik(create_head_pose(yaw=30°), body_yaw=30°)` returns the neutral Stewart
-  angles), and the URDF hangs the head chain off `base` accordingly. So the
-  `0.25·head_yaw` term in `retarget.default.body_yaw` does not over-rotate the
-  head; it only brings the body along underneath it.
-- **Antennas.** The two hinges are mirror images, so on the SDK a symmetric
-  gesture is `right = -left` (the whole library does this; `SLEEP = [-3.05,
-  3.05]`, `INIT = [-0.1745, 0.1745]`). animacy flips the right one so equal
-  values are symmetric and `+` is "outward/down" on both. The antennas rest
-  vertical, so the expressive range is 0…+180: amazed/surprised ≈ +40…+120°,
-  sad/sleep ≈ +150…+175°; "raise" has nowhere to go, "open" is the gesture.
-  The vendor model's hinge sign is the negative of the real robot's (the SDK's
-  MuJoCo backend writes `ctrl = -target`); the URDF axes are already flipped to
-  real-robot sign. To confirm on a unit: `set_target(antennas=[0, 0.8])` must
-  swing the **left** antenna outward.
-- **Exporting to the SDK** must apply the same table: head =
-  `create_head_pose(head_x/1000, head_y/1000, head_z/1000, head_roll,
-  -head_pitch, head_yaw, degrees=True)`, `antennas = [-radians(antenna_right),
-  radians(antenna_left)]` (order `[right, left]`), `body_yaw` in radians.
-  `scripts/pollen_npz_to_joints.py` is the inverse of exactly this.
+  angles; the daemon read back head yaw ≈ 0 with the body at +30°), and the
+  URDF hangs the head chain off `base` accordingly. So the `0.25·head_yaw`
+  term in `retarget.default.body_yaw` does not over-rotate the head; it only
+  brings the body along underneath it. The daemon's `present_head_pose` is this
+  offset from the neutral head frame (≈ 0 after `wake_up`).
 - If your unit differs on any row, fix it with `gain: -1` in the mapping (never
   in captured data) and say so in an issue.
 

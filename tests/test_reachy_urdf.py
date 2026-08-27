@@ -103,16 +103,25 @@ def test_head_pose_is_base_relative(urdf, profile):
     assert np.allclose(rv, [0, 0, np.pi / 2], atol=1e-9), rv
 
 
-def test_antennas_positive_is_outward(urdf, profile):
-    for name, link, sign_y in (("antenna_left", "antenna_left_link", +1), ("antenna_right", "antenna_right_link", -1)):
+def test_antennas_are_mirror_hinges(urdf, profile):
+    """Daemon antenna values drive the vendor hinges as-is (hardware: target_antennas[0] = LEFT
+    antenna, docs/evidence/reachy_sim2real_20260826.md). The hinges are mirror images: +90 on
+    either swings its tip toward the robot's RIGHT (-y) — outward for the right antenna, inward
+    over the head for the left — so a symmetric "ears out" is antenna_left = -antenna_right."""
+    for name, link in (("antenna_left", "antenna_left_link"), ("antenna_right", "antenna_right_link")):
         fk(urdf, profile)
         J0 = urdf.get_transform(link, urdf.base_link)
         p_local = np.linalg.inv(J0) @ np.append(J0[:3, 3] + [0, 0, 0.05], 1.0)  # a point 5 cm above the hinge
         fk(urdf, profile, **{name: 90.0})
         p = (urdf.get_transform(link, urdf.base_link) @ p_local)[:3]
         dy = p[1] - J0[1, 3]
-        assert sign_y * dy > 0.03, f"+{name} must swing the antenna outward (y sign {sign_y}), got dy={dy:.4f}"
+        assert dy < -0.03, f"+{name}=90 must swing the tip toward -y, got dy={dy:.4f}"
         assert p[2] < J0[2, 3] + 0.03, f"+{name}=90 should bring the tip near horizontal"
+    # symmetric "ears out": left = -right -> both tips move away from the midline
+    fk(urdf, profile, antenna_left=-90.0, antenna_right=90.0)
+    L = urdf.get_transform("antenna_left_link", urdf.base_link)
+    Rr = urdf.get_transform("antenna_right_link", urdf.base_link)
+    assert L[1, 3] > 0 > Rr[1, 3]
 
 
 def test_meshes_exist_and_budget(profile):

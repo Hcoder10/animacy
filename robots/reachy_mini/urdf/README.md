@@ -35,6 +35,10 @@ table is the single animacy↔SDK sign contract.
 The vendor zero configuration (motors at 0) is *not* the user's zero: the SDK
 targets the head 27.4 mm higher. This URDF uses the SDK's definition because
 that is what every recorded move, `goto_target` and animacy table refers to.
+The physical daemon agrees: the URDF it serves (`GET /api/kinematics/urdf`,
+engine `AnalyticalKinematics`) is byte-identical to `../vendor/urdf/robot.urdf`,
+and its `present_head_pose` after `wake_up` is ≈ 0 — an offset from this
+neutral frame, which is what the chain's joint values are.
 The `head` frame sits at the Stewart platform's moving plate — the bottom of
 the shell — which is why the shell and camera appear above it (camera 5 cm up).
 
@@ -56,15 +60,19 @@ the shell — which is why the shell and camera appear above it (camera 5 cm up)
   reachy-duplex measured on hardware (Aug 2026) that a negative SDK pitch looks
   up, and Pollen's library agrees (`downcast1` mean pitch +16.7°, `laughing1`
   −15.5°). animacy's `head_pitch` is +up, so `ROBOT.md` sets `urdf_sign: -1`.
-* Antennas: the vendor model's hinge sign is the **negative of the real robot**
-  — the SDK's own MuJoCo backend writes `ctrl = -target` and reads `-qpos`
-  (`daemon/backend/mujoco/backend.py`). This URDF flips both axes to
-  `0 0 -1` so its values are real-robot radians. The two hinges are mirror
-  images, so on the SDK `right = -left` is a symmetric gesture (`SLEEP =
-  [-3.05, 3.05]`, `INIT = [-0.1745, 0.1745]`, order `[right, left]`). animacy
-  defines + = *outward/down, away from the midline* for both; `ROBOT.md` sets
-  `urdf_sign: -1` on `antenna_right`. 0 = vertical; the library's amazed /
-  surprised ≈ +40…+120°, sad / sleep ≈ +150…+175°.
+* Antennas: the vendor hinge axes are kept **as-is** and the joint values are
+  the daemon's `target_antennas = [left, right]` radians, plain (`urdf_sign`
+  +1 on both). Hardware, 2026-08-26 (`docs/evidence/reachy_sim2real_20260826.md`):
+  element `[0]` moved the robot's LEFT antenna, and the URDF the daemon serves
+  at `/api/kinematics/urdf` is byte-identical to the vendored one. The two
+  hinges are **mirror images**: `+right` swings the right antenna outward
+  (toward −y), `+left` swings the left antenna inward, also toward −y. A
+  symmetric "ears out" is therefore `left = -right`, which is how Pollen's
+  library is authored (`SLEEP = [-3.05, +3.05]`, `INIT = [-0.1745, +0.1745]`,
+  `amazed1` left −19° / right +39…+91°). 0 = vertical. The SDK's MuJoCo backend
+  negates and reorders the antennas for its own sim — that is not applied here.
+  Caveat: the SDK's `hardware_config.yaml` names motor id 17 `right_antenna`
+  before `left_antenna`; this unit's `[0]` is visibly the left one.
 
 ## What is static
 
@@ -85,7 +93,8 @@ pushed through `ROBOT.md` exactly like the retarget pipeline):
 | `01_head_yaw_p40.png` | `head_yaw=+40` | gaze swings to +y = robot's LEFT |
 | `02_head_pitch_p25.png` | `head_pitch=+25` | gaze tips UP |
 | `03_head_roll_p20.png` | `head_roll=+20` | robot's right side (blue antenna) drops |
-| `04_antennas_p90.png` | both antennas +90 | both ears horizontal, outward (blue right → −y, red left → +y) |
+| `04_antennas_p90.png` | both antennas +90 | mirror hinges: both ears horizontal pointing to the robot's RIGHT (blue right outward → −y, red left inward over the head → −y) |
+| `04b_antennas_ears_out.png` | `antenna_left=−90, antenna_right=+90` | symmetric "ears out": both horizontal, away from the midline |
 | `05_body_yaw_p60.png` | `body_yaw=+60` | body turns, head and gaze unchanged, rods detach |
 | `06_head_xyz_p20mm.png` | `head_x/y/z=+20` | head shifts forward / left / up |
 | `clip_amazed1_*.png` | native clip frames | one ear out, head rolled — Pollen's "amazed" |
@@ -94,17 +103,19 @@ Colours in the previews: red = left antenna, blue = right antenna, magenta =
 gaze ray from the camera (dot = SDK head frame origin); world axes x red,
 y green, z blue.
 
-## Not verified on hardware
+## Hardware status (2026-08-26, `docs/evidence/reachy_sim2real_20260826.md`)
 
-* `head_roll`, `head_x/y/z`, `body_yaw` directions follow from the vendor
-  frames and the right-hand rule only.
-* The antenna sign is inferred from the MuJoCo backend's negation and from the
-  physical plausibility of the library's sleep pose (drooped outward, not
-  through the head). Confirm on a unit: `set_target(antennas=[0, 0.8])` must
-  swing the **left** antenna outward.
-* `head_yaw` (+ = left) and the pitch sign are hardware-confirmed by
-  reachy-duplex (Aug 2026); the 0.177 m rest height is the SDK constant, not a
-  measurement.
+* Verified with the owner watching: `+head_yaw` turns to the robot's left,
+  `+head_pitch` (sent as `-pitch`) looks up, `+head_roll` drops the right ear,
+  `+body_yaw` turns the body left, `target_antennas[0]` = the LEFT antenna.
+  The daemon tracked `head_x/y/z` commands but their direction was not
+  eyeballed. The daemon's `present_head_pose` reads ≈ 0 at rest, i.e. it is
+  the offset from the neutral head frame — exactly this URDF's chain values.
+* Not eyeballed: the antennas' out/in geometry. It is inferred from the vendor
+  hinge axes plus the physical plausibility of the library's sleep pose
+  (`[-3.05, +3.05]` must droop both antennas outward, not through the head).
+  Check: `target_antennas = [-1.0, +1.0]` should splay both antennas outward.
+* The 0.177 m rest height is the SDK constant, not a measurement.
 
 ## Regenerate / check
 

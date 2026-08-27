@@ -45,6 +45,7 @@ CHECK_POSES = [
     ("02_head_pitch_p25", {"head_pitch": 25}),
     ("03_head_roll_p20", {"head_roll": 20}),
     ("04_antennas_p90", {"antenna_left": 90, "antenna_right": 90}),
+    ("04b_antennas_ears_out", {"antenna_left": -90, "antenna_right": 90}),
     ("05_body_yaw_p60", {"body_yaw": 60}),
     ("06_head_xyz_p20mm", {"head_x": 20, "head_y": 20, "head_z": 20}),
 ]

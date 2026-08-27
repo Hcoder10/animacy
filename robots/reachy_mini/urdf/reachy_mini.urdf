@@ -525,7 +525,7 @@
     <origin xyz="-0.036757 -0.052193 0.072019" rpy="-1.675703 0.059949 -1.053505"/>
     <parent link="head"/>
     <child link="antenna_right_link"/>
-    <axis xyz="0 0 -1"/>
+    <axis xyz="0 0 1"/>
     <limit effort="10" velocity="8" lower="-3.141593" upper="3.141593"/>
   </joint>
   <link name="antenna_right_link">
@@ -554,7 +554,7 @@
     <origin xyz="-0.036757 0.052192 0.072020" rpy="-1.675706 -0.059939 -2.088087"/>
     <parent link="head"/>
     <child link="antenna_left_link"/>
-    <axis xyz="0 0 -1"/>
+    <axis xyz="0 0 1"/>
     <limit effort="10" velocity="8" lower="-3.141593" upper="3.141593"/>
   </joint>
   <link name="antenna_left_link">
