@@ -118,3 +118,41 @@ retrieval`); the AR model is exported and selectable (`default_arch = ar`).
 The promotion rule stays in the trainer so a future run flips the default only
 on evidence. Sampling-time knobs (repeat penalty, stay bias) move the stillness
 anywhere between 0.03 and 0.3 without moving the margin.
+
+### v2a generation-side options and the intent layer (both hold-outs, shipped sampling T1.0 / top-p 0.9 / repeat penalty 1.0)
+
+`scripts/model_postprocess_eval.py --ckpt checkpoints/v2a --rebuild-index ...`
+(rows in `checkpoints/v2a/REPORT.md`). Retrieval here uses the index rebuilt on
+the 94 training clips (352.9 valid min, 5000 of 82,270 windows). Margin =
+head-beat recall minus the shuffled-audio control; stillness truth is 0.103
+(obama_2015) / 0.097 (kende).
+
+| option | AR margin obama / kende | AR stillness | retrieval margin obama / kende | retrieval stillness | retrieval W1 rel |
+|---|---|---|---|---|---|
+| none (amplitude 1.0) | +0.06 / -0.01 | 0.13 / 0.15 | +0.01 / -0.02 | 0.14 / 0.11 | 0.25 / 1.23 |
+| utterance-final settle 0.5 s + head_pitch floor -3 deg | +0.06 / -0.01 | 0.13 / 0.16 | +0.01 / -0.02 | 0.14 / 0.12 | 0.25 / 1.20 |
+| amplitude 1.2 | +0.06 / -0.02 | 0.09 / 0.10 | -0.02 / 0.00 | 0.10 / 0.08 | 0.38 / 1.61 |
+| settle + floor + amplitude 1.2 | +0.05 / -0.02 | 0.09 / 0.11 | -0.02 / 0.00 | 0.10 / 0.09 | 0.38 / 1.58 |
+| intent layer from the clip's own audio (no text) | +0.07 / 0.00 | 0.15 / 0.23 | -0.02 / -0.01 | **0.23 / 0.34** | 0.24 / 0.79 |
+
+Reading: the settle and the pitch floor cost nothing measurable (they act on
+the last 0.5 s and on a slow baseline) and are shipped on by default; amplitude
+1.2 moves the AR and retrieval stillness onto the ground truth (0.09-0.10) at
+the price of retrieval's velocity histogram, so it stays a knob the retarget
+can request per intent. The intent layer's **audio-only proxy hurts**: both
+held-out speakers rank low in energy variance against the corpus (arousal 0.27
+and 0.09), so the arousal bonus pulls calm windows and retrieval becomes two to
+three times too still with lower beat recall. The proxy is therefore off by
+default; the arousal bonus and the amplitude rule are applied only when a text
+intent is known (talk mode), where the rule maps the five grader lines to
+greeting 0.65 / agreement 0.50 / doubt 0.35 / excitement 0.95 / thinking 0.15
+arousal (amplitude 1.12 / 1.05 / 0.98 / 1.27 / 0.88). Whether that improves
+the blind judge's scores is measured by the grader, not here.
+
+Shipped bundle (`web/models`, float16 weights, float32 compute, verified against
+torch: AR logits diff 3.0e-3 with 100 % identical sampled codes): `a2m_ar.onnx`
+7.67 MB, `vq_decoder.onnx` 1.18 MB, `bigram.bin` 0.52 MB, `retrieval.{bin,json}`
+7.62 MB (all 96 clips, hold-outs **included**, 5000 windows, 40 % per-speaker
+cap not binding), `model.json` (archs `["ar"]`, `default_arch = ar`,
+`default_backend = retrieval`, intent + postprocess blocks). The feed-forward
+`a2m` stays in `checkpoints/` only.

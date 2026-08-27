@@ -24,50 +24,70 @@
  ],
  "stats": {
   "mean": [
-   0.008985033258795738,
-   0.003603581804782152,
-   0.004279565066099167,
-   0.028800157830119133,
-   0.0048112873919308186,
-   -0.004929773043841124,
-   0.12409485131502151,
-   0.12561950087547302,
-   0.09673851728439331,
-   -0.012373686768114567,
-   -0.02193078212440014,
-   0.059449657797813416,
-   0.08795585483312607,
-   0.11389828473329544
+   8.23133300533867e-18,
+   -0.0015441252617165446,
+   0.0,
+   -0.01737414486706257,
+   -1.0830701261863889e-16,
+   0.028708508238196373,
+   0.10212469100952148,
+   0.10212469100952148,
+   0.06289573758840561,
+   -0.017040900886058807,
+   0.0,
+   0.0,
+   0.08358805626630783,
+   0.10371487587690353
   ],
   "std": [
-   3.2577707767486572,
-   2.4199671745300293,
-   2.1211163997650146,
-   4.477425575256348,
-   9.737452507019043,
-   4.372889995574951,
-   0.2201438695192337,
-   0.22105415165424347,
-   0.20478537678718567,
-   1.636690616607666,
-   0.747877836227417,
-   2.0867433547973633,
-   0.08159765601158142,
-   0.1861792355775833
+   3.6791205406188965,
+   2.5530714988708496,
+   1.8356702327728271,
+   7.196642875671387,
+   8.605594635009766,
+   4.910793304443359,
+   0.1831294596195221,
+   0.1831294596195221,
+   0.13396792113780975,
+   2.2179553508758545,
+   0.9321221113204956,
+   3.1943411827087402,
+   0.0948001891374588,
+   0.18281058967113495
   ],
   "norm_clip": 4.0
  },
- "a2m": {
-  "file": "a2m.onnx",
+ "archs": [
+  "ar"
+ ],
+ "default_arch": "ar",
+ "a2m": null,
+ "a2m_ar": {
+  "arch": "ar",
+  "file": "a2m_ar.onnx",
+  "bos": 512,
+  "window": 32,
+  "dec_layers": 3,
   "inputs": {
-   "features": "float32 [1, L, 66] (30 Hz features averaged in pairs -> 15 Hz)",
-   "speaking": "int64 [1, L] (any of the pair)",
-   "causal": "int64 [1]: 0 = talk (non-causal), 1 = listen (causal)"
+   "features": "float32 [1, L, 66] (15 Hz, same as a2m)",
+   "speaking": "int64 [1, L]",
+   "causal": "int64 [1]: 0 = talk, 1 = listen (causal audio trunk AND causal cross-attention)",
+   "codes": "int64 [1, t]: BOS (= n_codes) followed by the codes sampled so far; t >= 1, t <= L"
   },
   "outputs": {
-   "logits": "float32 [1, L, 512]"
+   "logits_next": "float32 [1, 512]: logits for the code at position t-1 (the next code to sample)",
+   "logits_all": "float32 [1, t, 512]: teacher-forced logits for positions 0..t-1"
   },
-  "bytes": 7622914
+  "step": "single-step graph with full recompute: codes = [BOS]; for i in 0..L-1: run(features, speaking, causal, codes) -> logits_next[prev] -= repeat_penalty (prev = last sampled code, skip at i = 0); if features[i][64] < stay_energy: logits_next[prev] += stay_bias (feature 64 = normalised log energy) -> sample softmax(logits / temperature) with top-p -> append. Passing the whole history is exact (the decoder's self-attention window is `window` codes per layer).",
+  "sampling": {
+   "temperature": 1.0,
+   "top_p": 0.9,
+   "repeat_penalty": 1.0,
+   "stay_bias": 0.0,
+   "stay_energy": -0.3
+  },
+  "weights": "float16 initializers, float32 compute",
+  "bytes": 7672665
  },
  "vq_decoder": {
   "file": "vq_decoder.onnx",
@@ -86,16 +106,25 @@
    512,
    512
   ],
-  "meaning": "log P(next | prev), row = prev"
+  "meaning": "log P(next | prev), row = prev (used by the feed-forward a2m sampler only)"
  },
  "sampling": {
   "temperature": 0.8,
   "bigram_weight": 0.5,
-  "rule": "softmax(logits / temperature + bigram_weight * bigram[prev]) per step, prev = last sampled code"
+  "rule": "ff: softmax(logits / temperature + bigram_weight * bigram[prev]) per step, prev = last sampled code; ar: see a2m_ar.step"
  },
  "smoothing": {
   "kind": "zero-phase butterworth order 2",
   "cutoff_hz": 6.0
+ },
+ "postprocess": {
+  "settle_s": 0.5,
+  "pitch_floor": -3.0,
+  "amplitude": 1.0,
+  "order": "decode -> smooth -> amplitude (per-channel scale, scalar or [14]) -> pitch floor -> settle -> clamp to channel bounds",
+  "pitch_floor_rule": "low-pass head_pitch at 0.3 Hz (2nd-order butterworth, zero-phase); where that baseline is below pitch_floor add (pitch_floor - baseline)",
+  "settle_rule": "end = last frame with speaking=1 (else last frame with feature[64] > -0.3, else clip end); w ramps linearly 0->1 over the last settle_s seconds before end and stays 1 after; motion *= (1 - w)",
+  "amplitude_note": "the retarget may ask for 1.2 on speaking clips; metrics at 1.0 and 1.2 are in checkpoints/<run>/REPORT.md"
  },
  "detrend": {
   "channels": [
@@ -120,74 +149,469 @@
  },
  "retrieval": {
   "file": "retrieval.json",
-  "bin": "retrieval.bin"
+  "bin": "retrieval.bin",
+  "intent_fields": true
+ },
+ "intent": {
+  "lexicon_version": "intent.v1",
+  "tags": [
+   "greeting",
+   "agreement",
+   "doubt",
+   "excitement",
+   "thinking",
+   "neutral"
+  ],
+  "lexicon": {
+   "greeting": [
+    "hey",
+    "hi",
+    "hello",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "welcome",
+    "nice to meet",
+    "good to see",
+    "great to see",
+    "howdy",
+    "greetings",
+    "long time no see"
+   ],
+   "agreement": [
+    "yes",
+    "yeah",
+    "yep",
+    "exactly",
+    "agreed",
+    "i agree",
+    "sure",
+    "of course",
+    "absolutely",
+    "correct",
+    "indeed",
+    "definitely",
+    "that is what i meant",
+    "that's what i meant",
+    "you're right",
+    "you are right",
+    "makes sense",
+    "precisely"
+   ],
+   "doubt": [
+    "not sure",
+    "don't think",
+    "do not think",
+    "doubt",
+    "hmm, no",
+    "i disagree",
+    "not really",
+    "that's not right",
+    "that is not right",
+    "isn't right",
+    "are you sure",
+    "hardly",
+    "unlikely",
+    "i'm not convinced",
+    "no, i",
+    "no i"
+   ],
+   "excitement": [
+    "wow",
+    "amazing",
+    "incredible",
+    "awesome",
+    "fantastic",
+    "no way",
+    "can't believe",
+    "cannot believe",
+    "great news",
+    "unbelievable",
+    "brilliant",
+    "love it",
+    "so cool",
+    "yay",
+    "congratulations",
+    "wonderful",
+    "excellent",
+    "oh my",
+    "that's huge",
+    "let's go"
+   ],
+   "thinking": [
+    "let me think",
+    "hmm",
+    "hm",
+    "i wonder",
+    "what if",
+    "let's see",
+    "let me see",
+    "give me a second",
+    "for a second",
+    "for a moment",
+    "suppose",
+    "consider",
+    "thinking about",
+    "maybe",
+    "perhaps"
+   ]
+  },
+  "tag_priority_on_ties": [
+   "excitement",
+   "greeting",
+   "doubt",
+   "agreement",
+   "thinking"
+  ],
+  "base_arousal": {
+   "greeting": 0.55,
+   "agreement": 0.5,
+   "doubt": 0.35,
+   "excitement": 0.85,
+   "thinking": 0.25,
+   "neutral": 0.4
+  },
+  "base_valence": {
+   "greeting": 0.5,
+   "agreement": 0.4,
+   "doubt": -0.4,
+   "excitement": 0.8,
+   "thinking": 0.0,
+   "neutral": 0.0
+  },
+  "positive": [
+   "good",
+   "great",
+   "love",
+   "happy",
+   "nice",
+   "thanks",
+   "thank you",
+   "glad",
+   "perfect",
+   "beautiful",
+   "fun"
+  ],
+  "negative": [
+   "bad",
+   "sorry",
+   "terrible",
+   "hate",
+   "wrong",
+   "sad",
+   "awful",
+   "unfortunately",
+   "problem",
+   "afraid"
+  ],
+  "rules": {
+   "match": "whole-word / whole-phrase matches on the lower-cased text; the tag with most hits wins, ties by tag_priority_on_ties; no hits = neutral",
+   "arousal": "base_arousal[tag] + 0.1 per '!' (max 2) + 0.05 per ALL-CAPS word (max 2) -0.1 if '...' present +0.05 if '?' present, clamped to [0, 1]",
+   "valence": "base_valence[tag] + 0.1 per positive word (max 3) - 0.1 per negative word (max 3), clamped to [-1, 1]",
+   "amplitude": "min(1.3, 0.8 + 0.5 * arousal), applied to the decoded canonical motion of every source",
+   "retrieval_bonus": "0.15 * (1 - |window_arousal - target_arousal|) added to the cosine score of every index window",
+   "thinking_bonus": "0.1 * max(0, still_then_move) when tag == thinking (windows whose second half moves more than their first)",
+   "override": "animacy say --intent <tag> forces the tag; punctuation modifiers still apply"
+  },
+  "grader_lines": {
+   "greeting": {
+    "text": "Hey! Good to see you again.",
+    "tag": "greeting",
+    "arousal": 0.65,
+    "valence": 0.6,
+    "amplitude": 1.125
+   },
+   "agreement": {
+    "text": "Yes, exactly, that is what I meant.",
+    "tag": "agreement",
+    "arousal": 0.5,
+    "valence": 0.4,
+    "amplitude": 1.05
+   },
+   "doubt": {
+    "text": "Hmm, no, I really don't think that's right.",
+    "tag": "doubt",
+    "arousal": 0.35,
+    "valence": -0.4,
+    "amplitude": 0.9750000000000001
+   },
+   "excitement": {
+    "text": "No way, that is incredible news!",
+    "tag": "excitement",
+    "arousal": 0.95,
+    "valence": 0.8,
+    "amplitude": 1.275
+   },
+   "thinking": {
+    "text": "Let me think about that for a second... okay.",
+    "tag": "thinking",
+    "arousal": 0.15,
+    "valence": 0.0,
+    "amplitude": 0.875
+   }
+  }
  },
  "default_backend": "retrieval",
  "verdict": {
-  "model_beats_shuffled_audio_on_beat_recall": false,
   "required_margin": 0.05,
-  "margin": 0.031620553359683834,
-  "model_beat_recall": 0.6442687747035574,
-  "model_shuffled_beat_recall": 0.6126482213438735,
-  "retrieval_beat_recall": 0.525691699604743,
-  "retrieval_shuffled_beat_recall": 0.525691699604743,
+  "candidates": {
+   "ff": {
+    "condition": "model",
+    "beat_recall": 0.33882783882783885,
+    "shuffled_beat_recall": 0.3553113553113553,
+    "margin": -0.01648351648351648,
+    "nll": 5.3905629495549015,
+    "nll_unigram_floor": 5.56588016212069,
+    "beats_shuffle": false,
+    "below_floor": true,
+    "stillness": 0.13474309681929394,
+    "w1_relative_mean": 0.3392255591881158,
+    "qualifies": false
+   },
+   "ar": {
+    "condition": "ar",
+    "beat_recall": 0.4175824175824176,
+    "shuffled_beat_recall": 0.46886446886446886,
+    "margin": -0.051282051282051266,
+    "nll": 3.581438199979358,
+    "nll_unigram_floor": 5.56588016212069,
+    "beats_shuffle": false,
+    "below_floor": true,
+    "stillness": 0.08668297797972736,
+    "w1_relative_mean": 0.29673536532296757,
+    "qualifies": false
+   }
+  },
+  "default_backend": "retrieval",
+  "default_arch": "ar",
+  "retrieval_beat_recall": 0.5091575091575091,
+  "retrieval_shuffled_beat_recall": 0.46703296703296704,
+  "model_beats_shuffled_audio_on_beat_recall": false,
+  "model_beat_recall": 0.33882783882783885,
+  "model_shuffled_beat_recall": 0.3553113553113553,
+  "margin": -0.01648351648351648,
   "nll_model_vs_unigram_floor": [
-   6.276136164735811,
-   6.162215114481616
+   5.3905629495549015,
+   5.56588016212069
   ],
-  "default_backend": "retrieval"
+  "promotion": {
+   "rule": "on every held-out clip: margin >= 0.05, |stillness - gt| <= 0.05, NLL < unigram floor",
+   "candidates": {
+    "ff": {
+     "per_clip": {
+      "obama_2015_02_07": {
+       "margin": 0.0,
+       "stillness": 0.10488855590934631,
+       "gt_stillness": 0.10320284697508897,
+       "still_gap": 0.0016857089342573461,
+       "nll": 5.2107507832225375,
+       "floor": 5.663339585747111,
+       "below_floor": true,
+       "ok": false
+      },
+      "kende_interview_2014": {
+       "margin": -0.01976284584980237,
+       "stillness": 0.1447993447993448,
+       "gt_stillness": 0.09746109746109746,
+       "still_gap": 0.04733824733824735,
+       "nll": 5.547714662847017,
+       "floor": 5.4807028589840145,
+       "below_floor": false,
+       "ok": false
+      }
+     },
+     "qualifies": false
+    },
+    "ar": {
+     "per_clip": {
+      "obama_2015_02_07": {
+       "margin": -0.05862068965517242,
+       "stillness": 0.08409814572017232,
+       "gt_stillness": 0.10320284697508897,
+       "still_gap": 0.019104701254916645,
+       "nll": 3.556540760956089,
+       "floor": 5.663339585747111,
+       "below_floor": true,
+       "ok": false
+      },
+      "kende_interview_2014": {
+       "margin": -0.01185770750988141,
+       "stillness": 0.09009009009009009,
+       "gt_stillness": 0.09746109746109746,
+       "still_gap": 0.0073710073710073765,
+       "nll": 3.603197991204276,
+       "floor": 5.4807028589840145,
+       "below_floor": true,
+       "ok": false
+      }
+     },
+     "qualifies": false
+    }
+   },
+   "default_backend": "retrieval"
+  },
+  "default_arch_note": "set to ar by decision: better NLL / W1 / stillness on both speakers; the pooled-margin tie-break (ff -0.016 vs ar -0.051) is noise-level"
  },
  "training": {
-  "command": "python -m animacy.model.train --data data/clips --out checkpoints/v1 --export-dir web/models --sweep --device cpu --holdout kende_interview_2014 --exclude sd_rapper_interview cbp_vlog_day2",
-  "device": "cpu",
+  "command": "python -m animacy.model.train --data data/clips --out checkpoints/v2a --arch both --holdout kende_interview_2014 obama_2015_02_07 --exclude sd_rapper_interview cbp_vlog_day2 --ar-change-weight 4.0 --temperature 1.0 --top-p 1.0 --repeat-penalty 1.0 --speaker-cap 0.6 --sweep --no-export --device cuda",
+  "device": "cuda",
+  "torch": "2.11.0+cu128",
   "data": {
-   "n_clips": 4,
-   "n_with_audio": 4,
-   "n_subjects": 4,
-   "total_minutes": 16.23,
-   "valid_minutes": 14.12,
-   "valid_minutes_with_audio": 14.12,
+   "n_clips": 39,
+   "n_with_audio": 39,
+   "n_subjects": 39,
+   "total_minutes": 185.44,
+   "valid_minutes": 152.15,
+   "valid_minutes_with_audio": 152.15,
    "sources": {
-    "video": 4
+    "video": 39
    },
    "clips": [
+    "082810_weeklyaddress_obama",
+    "1_28_17_weekly_address",
+    "2013_voa_interview_with_rcss_ssa_lt_general_yawd",
+    "a_shan_man_in_thailand_experiences_a_chinese_hel",
+    "a_weekly_conversation_on_the_line_with_eldraen",
+    "a_weekly_conversation_on_the_line_with_erica",
+    "a_weekly_conversation_on_the_line_with_jocelyn",
+    "a_weekly_conversation_on_the_line_with_michele",
+    "a_weekly_conversation_on_the_line_with_tammy",
+    "bedragerisk_l_ring_og_myten_om_best_practices",
+    "burmese_american_us_marine_and_myanmar_army_sold",
+    "burnie_burns_interview_with_tstv",
+    "direitos_humanos_entrevista_com_fl_via_pinto",
+    "fc",
+    "interview_with_dr_phil_christensen",
     "kende_interview_2014",
+    "lara_aragon_magaluf_spain_spanish_global_lives_p",
     "obama_2014_09_13",
     "obama_2015_02_07",
-    "royal_society_cloke"
+    "obama_wa_2013_05_25",
+    "obama_wa_2013_07_20",
+    "obama_wa_2013_08_17",
+    "obama_wa_2013_09_14",
+    "obama_wa_2013_10_26",
+    "obama_wa_2013_11_02",
+    "obama_wa_2013_12_21",
+    "obama_wa_2013_12_25",
+    "obama_wa_2014_02_08",
+    "obama_wa_2014_03_29",
+    "obama_wa_2014_04_05",
+    "obama_wa_2014_05_10",
+    "obama_wa_2014_05_31",
+    "obama_wa_2014_07_19",
+    "obama_wa_2014_09_06",
+    "obama_wa_2014_10_25",
+    "royal_society_cloke",
+    "trump_wa_2017_03_18",
+    "wa_2021_08_02",
+    "wa_2021_17_02"
    ]
   },
   "split": {
    "mode": "explicit",
-   "n_groups": 4,
+   "n_groups": 39,
    "held_out_groups": [
+    "415880533b",
     "e8ceb4c8c3"
    ],
    "leaky": false,
    "held_out_clips": [
+    "obama_2015_02_07",
     "kende_interview_2014"
    ],
-   "held_out_valid_seconds": 203.7,
+   "held_out_valid_seconds": 381.8,
    "rule": "--holdout"
+  },
+  "augmentation": {
+   "mirror": true,
+   "warp": 0.08,
+   "feat_noise": 0.2,
+   "time_mask": 2,
+   "speaker_cap": {
+    "cap": 0.6,
+    "minutes_before": {
+     "obama": 70.46,
+     "1b02425b30": 8.0,
+     "2391f9c3ef": 7.64,
+     "33fed630cb": 6.88,
+     "460a776f7e": 2.88,
+     "472bcf730c": 0.55,
+     "the_royal_society": 4.03,
+     "4d8521b74e": 4.99,
+     "5047a9cbed": 1.31,
+     "5c39626eab": 3.44,
+     "6ff6d64502": 2.21,
+     "77a1f44db9": 7.07,
+     "8f3f2178e1": 1.99,
+     "9d6ff94130": 1.64,
+     "a195bab458": 2.74,
+     "b76750eac7": 2.32,
+     "cae1747caf": 3.7,
+     "d36be09b42": 5.5,
+     "e39030505d": 7.19,
+     "f5f350d6f6": 1.24
+    },
+    "minutes_effective": {
+     "obama": 70.46,
+     "1b02425b30": 8.0,
+     "2391f9c3ef": 7.64,
+     "33fed630cb": 6.88,
+     "460a776f7e": 2.88,
+     "472bcf730c": 0.55,
+     "the_royal_society": 4.03,
+     "4d8521b74e": 4.99,
+     "5047a9cbed": 1.31,
+     "5c39626eab": 3.44,
+     "6ff6d64502": 2.21,
+     "77a1f44db9": 7.07,
+     "8f3f2178e1": 1.99,
+     "9d6ff94130": 1.64,
+     "a195bab458": 2.74,
+     "b76750eac7": 2.32,
+     "cae1747caf": 3.7,
+     "d36be09b42": 5.5,
+     "e39030505d": 7.19,
+     "f5f350d6f6": 1.24
+    },
+    "weights": {}
+   }
   },
   "vq": {
    "n_codes": 512,
    "dim": 64,
-   "n_train_segments": 4812,
-   "n_val_segments": 1522,
-   "best_val_mae": 0.3715636432170868,
-   "baseline_val_mae": 0.7079055309295654,
-   "used_codes_train": 512,
-   "perplexity_train": 460.0022277832031,
-   "used_codes_val": 248,
-   "perplexity_val": 135.0767059326172
+   "n_train_segments": 130282,
+   "n_val_segments": 2856,
+   "best_val_mae": 0.23043836653232574,
+   "baseline_val_mae": 0.623703122138977,
+   "used_codes_train": 509,
+   "perplexity_train": 267.3600769042969,
+   "used_codes_val": 329,
+   "perplexity_val": 188.38023376464844,
+   "init": null
   },
   "a2m": {
    "d_model": 192,
    "n_layers": 4,
    "n_heads": 4,
-   "n_train_chunks": 1266,
-   "n_val_chunks": 202
+   "chunk_frames": 60,
+   "n_train_chunks": 100170,
+   "n_val_chunks": 380,
+   "init": null
+  },
+  "ar": {
+   "d_model": 192,
+   "enc_layers": 4,
+   "dec_layers": 3,
+   "n_heads": 4,
+   "dropout": 0.25,
+   "window": 32,
+   "label_smoothing": 0.1,
+   "patience": 6,
+   "chunk_frames": 120,
+   "n_train_chunks": 95198,
+   "n_val_chunks": 189,
+   "init": null
   }
  }
 }
