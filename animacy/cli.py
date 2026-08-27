@@ -80,6 +80,12 @@ def _cmd_capture(a) -> int:
     return capture_main(a)
 
 
+def _cmd_say(a) -> int:
+    from .serve import main as say_main
+
+    return say_main(a)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="animacy", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=__version__)
@@ -122,6 +128,19 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--preview", action="store_true", help="show a window while capturing")
     cap.add_argument("--neutral-seconds", type=float, default=1.0, help="seconds of neutral pose at the start used for zeroing")
     cap.set_defaults(fn=_cmd_capture)
+
+    s = sub.add_parser("say", help="robot speaks + moves in sync (text -> TTS -> motion source -> retarget -> robot)")
+    s.add_argument("text")
+    s.add_argument("--robot", required=True)
+    s.add_argument("--source", default="envelope", help="model | retrieval | envelope (labelled heuristic)")
+    s.add_argument("--sink", default=None, help="override runtime.kind: reachy_daemon | autonomous_os_hal | print")
+    s.add_argument("--url", default=None)
+    s.add_argument("--tts", default="auto", help="auto | sapi | espeak | kokoro")
+    s.add_argument("--no-audio", action="store_true")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--checkpoint", default="checkpoints/v1")
+    s.set_defaults(fn=_cmd_say)
     return p
 
 
