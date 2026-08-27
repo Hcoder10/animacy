@@ -1,0 +1,250 @@
+"""The five movements and how every clip for them is built.
+
+Candidate clips come from ``animacy.serve``'s motion sources exactly as the
+talk loop uses them (TTS waveform -> source -> ``retarget_clip`` through the
+robot's ``ROBOT.md``), one per (robot, movement, source, seed). Calibration
+clips are the vendors' own hand-authored clips for the same intents, loaded
+from ``robots/<robot>/clips/native`` and rendered through the same pipeline.
+
+Blindness note: a vendor clip has no speech, so its card says "The robot
+expresses: <intent>" while a candidate's says "The robot says: <sentence>".
+Neither card says how the motion was made.
+"""
+from __future__ import annotations
+
+import hashlib
+import inspect
+import json
+import os
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+
+from ..export import read_autonomous_os_csv
+from ..profile import Profile, find_robot
+from ..retarget import retarget_clip
+from ..serve import SOURCES
+from .render import ROOT
+
+VENDOR = "vendor"
+DEFAULT_CHECKPOINT = os.path.join(ROOT, "checkpoints", "v1")
+VENDOR_MAX_SECONDS = 6.0     # long vendor clips (thinking_deep is 15 s) are trimmed so reels stay short
+
+
+@dataclass(frozen=True)
+class Movement:
+    key: str
+    text: str                      # the utterance a candidate clip is generated from
+    expression: str                # what the silent calibration clip expresses (card text)
+    vendor: Dict[str, str]         # robot -> native clip name
+    intent: Optional[str] = None   # tag handed to a motion source that accepts ``intent`` (defaults to key)
+
+    @property
+    def intent_tag(self) -> str:
+        return self.intent or self.key
+
+
+MOVEMENTS: List[Movement] = [
+    Movement("greeting", "Hey! Good to see you again.", "a greeting",
+             {"lamp": "greeting", "reachy_mini": "welcoming1"}),
+    Movement("agreement", "Yes, exactly, that is what I meant.", "agreement, a nod",
+             {"lamp": "nod", "reachy_mini": "yes1"}),
+    Movement("doubt", "Hmm, no, I really don't think that's right.", "disagreement, a head shake",
+             {"lamp": "headshake", "reachy_mini": "no1"}),
+    Movement("excitement", "No way, that is incredible news!", "excitement",
+             {"lamp": "excited", "reachy_mini": "amazed1"}),
+    # lamp: the vendor's thinking_deep.csv is a constant pose (every joint range 0.0 over 15 s), so the
+    # nearest expressive vendor clip for "thinking it over" is confused (8 s, head tilts and searches).
+    Movement("thinking", "Let me think about that for a second... okay.", "thinking it over",
+             {"lamp": "confused", "reachy_mini": "thoughtful1"}),
+]
+MOVEMENT_KEYS = [m.key for m in MOVEMENTS]
+
+
+def movement(key: str) -> Movement:
+    for m in MOVEMENTS:
+        if m.key == key:
+            return m
+    raise KeyError(key)
+
+
+@dataclass
+class ClipSpec:
+    """One clip to be rendered and judged. ``table`` is in robot units on the robot's grid."""
+
+    id: str
+    robot: str
+    movement: str
+    source: str                          # model | retrieval | envelope | vendor
+    seed: Optional[int]
+    card_line: str
+    table: pd.DataFrame
+    audio: Optional[np.ndarray] = None
+    sr: int = 16000
+    vendor_clip: Optional[str] = None
+    meta: Dict = field(default_factory=dict)
+
+    @property
+    def duration(self) -> float:
+        return float(self.table["t"].iloc[-1]) if len(self.table) else 0.0
+
+    def public(self) -> Dict:
+        """Everything but the table/audio (what the sealed manifest records)."""
+        return {"id": self.id, "robot": self.robot, "movement": self.movement, "source": self.source,
+                "seed": self.seed, "vendor_clip": self.vendor_clip, "card_line": self.card_line,
+                "duration": round(self.duration, 3), "meta": self.meta}
+
+
+# ---------------------------------------------------------------- vendor clips
+def load_vendor_table(profile: Profile, clip_name: str, max_seconds: Optional[float] = VENDOR_MAX_SECONDS) -> pd.DataFrame:
+    if profile.native_clips is None:
+        raise ValueError(f"{profile.name} declares no native_clips in ROBOT.md")
+    d = os.path.join(profile.dir, profile.native_clips.dir)
+    fmt = profile.native_clips.format
+    if fmt == "autonomous_os_csv":
+        table = read_autonomous_os_csv(os.path.join(d, clip_name + ".csv"))
+    elif fmt == "json":
+        obj = json.load(open(os.path.join(d, clip_name + ".json"), encoding="utf-8"))
+        t = np.asarray(obj["t"], dtype=np.float64)
+        table = pd.DataFrame({"t": t - t[0], **{j: np.asarray(v, dtype=np.float64) for j, v in obj["data"].items()}})
+    else:
+        raise ValueError(f"unsupported native clip format {fmt!r}")
+    if max_seconds is not None:
+        table = most_active_window(table, max_seconds)
+    return table
+
+
+def most_active_window(table: pd.DataFrame, seconds: float) -> pd.DataFrame:
+    """The ``seconds``-long window with the most joint motion (sum of |delta| over joints), ``t`` re-zeroed.
+    A clip shorter than ``seconds`` is returned whole. Long vendor clips often start or end with a hold;
+    the first N seconds of ``excited`` is mostly a hold, its middle is the gesture."""
+    t = table["t"].to_numpy(dtype=np.float64)
+    if not len(t) or t[-1] - t[0] <= seconds + 1e-9:
+        return table.reset_index(drop=True)
+    joints = [c for c in table.columns if c != "t"]
+    v = np.abs(np.diff(table[joints].to_numpy(dtype=np.float64), axis=0)).sum(axis=1)   # motion between rows
+    cum = np.concatenate([[0.0], np.cumsum(v)])                                      # cum[i] = motion up to row i
+    best_start, best = 0, -1.0
+    for i in range(len(t)):
+        j = int(np.searchsorted(t, t[i] + seconds, side="right")) - 1
+        if j <= i:
+            continue
+        score = cum[j] - cum[i]
+        if score > best:
+            best, best_start = score, i
+        if t[i] + seconds > t[-1]:
+            break
+    j = int(np.searchsorted(t, t[best_start] + seconds, side="right")) - 1
+    out = table.iloc[best_start:j + 1].reset_index(drop=True).copy()
+    out["t"] = out["t"] - out["t"].iloc[0]
+    return out
+
+
+def vendor_clip(profile: Profile, mv: Movement, max_seconds: Optional[float] = VENDOR_MAX_SECONDS) -> ClipSpec:
+    name = mv.vendor[profile.name]
+    return ClipSpec(id=f"{profile.name}/{mv.key}/{VENDOR}/{name}", robot=profile.name, movement=mv.key, source=VENDOR,
+                    seed=None, card_line=f"The robot expresses: {mv.expression}",
+                    table=load_vendor_table(profile, name, max_seconds), audio=None, vendor_clip=name)
+
+
+# ---------------------------------------------------------------- candidates
+def _wav_cache_path(cache_dir: str, text: str, engine: str) -> str:
+    h = hashlib.sha1(f"{engine}|{text}".encode("utf-8")).hexdigest()[:12]
+    return os.path.join(cache_dir, f"tts_{h}.wav")
+
+
+def synth_cached(text: str, cache_dir: str, engine: str = "auto") -> Tuple[np.ndarray, int]:
+    """``animacy.tts.synth`` with a wav cache (one TTS call per utterance per run)."""
+    import soundfile as sf
+
+    from ..tts import synth
+
+    os.makedirs(cache_dir, exist_ok=True)
+    path = _wav_cache_path(cache_dir, text, engine)
+    if os.path.exists(path):
+        data, sr = sf.read(path, dtype="float32", always_2d=True)
+        return data.mean(axis=1), sr
+    wav, sr = synth(text, engine=engine)
+    sf.write(path, wav, sr)
+    return wav, sr
+
+
+def accepts_intent(fn) -> bool:
+    """Does a motion source take an ``intent`` keyword (the talk loop's intent conditioning)?"""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "intent" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def candidate_table(profile: Profile, source: str, wav: np.ndarray, sr: int, seed: int,
+                    checkpoint: str = DEFAULT_CHECKPOINT, intent: Optional[str] = None,
+                    sources: Optional[Dict] = None) -> Tuple[pd.DataFrame, Dict]:
+    """Exactly ``serve.say``'s dispatch, minus the sink: source -> HumanClip -> retarget_clip.
+    ``intent`` is passed only to sources whose signature accepts it (so a user's talk-mode conditioning is
+    exercised exactly as ``animacy say --intent`` would, and older sources are untouched)."""
+    fn = (sources or SOURCES)[source]
+    kwargs: Dict = {"seed": seed}
+    if source != "envelope":
+        kwargs["checkpoint"] = checkpoint
+    passed_intent = bool(intent) and accepts_intent(fn)
+    if passed_intent:
+        kwargs["intent"] = intent
+    clip = fn(wav, sr, **kwargs)
+    probs = clip.validate()
+    if probs:
+        raise RuntimeError(f"motion source {source!r} produced an invalid clip: {probs}")
+    table = retarget_clip(clip, profile)
+    meta = {k: v for k, v in clip.meta.items() if isinstance(v, (str, int, float, bool))}
+    meta["intent_passed"] = intent if passed_intent else None
+    return table, meta
+
+
+def candidate_clip(profile: Profile, mv: Movement, source: str, seed: int, wav: np.ndarray, sr: int,
+                   checkpoint: str = DEFAULT_CHECKPOINT) -> ClipSpec:
+    table, meta = candidate_table(profile, source, wav, sr, seed, checkpoint, intent=mv.intent_tag)
+    return ClipSpec(id=f"{profile.name}/{mv.key}/{source}/s{seed}", robot=profile.name, movement=mv.key, source=source,
+                    seed=seed, card_line=f'The robot says: "{mv.text}"', table=table, audio=wav, sr=sr, meta=meta)
+
+
+DETERMINISTIC_SOURCES = ("retrieval", "envelope")   # retrieval ignores the seed; envelope's seed only shifts slow drift phases
+
+
+def build_clips(robots: Sequence[str], sources: Sequence[str], seeds: int, run_dir: str,
+                checkpoint: str = DEFAULT_CHECKPOINT, movements: Sequence[Movement] = MOVEMENTS,
+                with_vendor: bool = True, tts_engine: str = "auto", seeds_by_source: Optional[Dict[str, int]] = None,
+                log=print) -> List[ClipSpec]:
+    """Every clip for the run: candidates for each (robot, movement, source, seed) + one vendor clip per
+    (robot, movement). ``seeds_by_source`` overrides the seed count per source (deterministic sources need one).
+    Joint tables and utterance audio are saved under ``<run_dir>/clips`` for the record."""
+    seeds_by_source = dict(seeds_by_source or {})
+    bad = [s for s in sources if s not in SOURCES]
+    if bad:
+        raise ValueError(f"unknown sources {bad}; choose from {list(SOURCES)}")
+    clips: List[ClipSpec] = []
+    tts_dir = os.path.join(run_dir, "tts")
+    clip_dir = os.path.join(run_dir, "clips")
+    os.makedirs(clip_dir, exist_ok=True)
+    wavs = {mv.key: synth_cached(mv.text, tts_dir, tts_engine) for mv in movements}
+    for rname in robots:
+        profile = find_robot(rname)
+        for mv in movements:
+            wav, sr = wavs[mv.key]
+            for source in sources:
+                for seed in range(seeds_by_source.get(source, seeds)):
+                    c = candidate_clip(profile, mv, source, seed, wav, sr, checkpoint)
+                    clips.append(c)
+                    log(f"[clips] {c.id}: {len(c.table)} frames, {c.duration:.2f}s")
+            if with_vendor:
+                c = vendor_clip(profile, mv)
+                clips.append(c)
+                log(f"[clips] {c.id}: {len(c.table)} frames, {c.duration:.2f}s (vendor)")
+    for c in clips:
+        p = os.path.join(clip_dir, c.id.replace("/", "__") + ".json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({**c.public(), "t": c.table["t"].round(4).tolist(),
+                       "data": {k: c.table[k].round(3).tolist() for k in c.table.columns if k != "t"}}, fh)
+    return clips
