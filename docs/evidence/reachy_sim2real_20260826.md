@@ -31,11 +31,13 @@ Measured = the daemon's `present_head_pose` / `present_antenna_joint_positions` 
 - `left brow only` moved the FIRST antenna element → `target_antennas[0]` is what this profile calls `antenna_left`; whether that is physically the robot's left antenna is a visual check (below).
 - Body-yaw coupling from `head_yaw` (0.25) is visible (±8 deg on the big head turns) and reads back.
 
-## Visual confirmation (a person watching the robot)
-- [ ] `look left` turned the head toward the ROBOT'S left
-- [ ] `look up` looked UP (pitch sign -1 correct)
-- [ ] `roll, right ear down` dropped the robot's right ear
-- [ ] `left brow only` raised the robot's LEFT antenna
-- [ ] `turn body left` rotated the body toward the robot's left
+## Visual confirmation (the owner watching the robot, 2026-08-26 ~21:50) - CONFIRMED
+- [x] `look left` turned the head toward the ROBOT'S left
+- [x] `look up` looked UP (pitch sign -1 correct)
+- [x] `roll, right ear down` dropped the robot's right ear
+- [x] `left brow only` raised the robot's LEFT antenna
+- [x] `turn body left` rotated the body toward the robot's left
+
+Owner's report: "it worked. i saw it working on the robot." All five directions as announced.
 
 Raw log: `reachy_sim2real_20260826_214727.json`. Script: `scripts/reachy_sim2real.py`.
