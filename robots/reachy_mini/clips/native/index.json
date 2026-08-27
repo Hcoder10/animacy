@@ -1,0 +1,156 @@
+{
+ "robot": "reachy_mini",
+ "rate_hz": 30.0,
+ "format": "json (animacy.export.write_joint_table fmt=json) + description/source",
+ "units": {
+  "head_x": "mm",
+  "head_y": "mm",
+  "head_z": "mm",
+  "head_roll": "deg",
+  "head_pitch": "deg",
+  "head_yaw": "deg",
+  "body_yaw": "deg",
+  "antenna_left": "deg",
+  "antenna_right": "deg"
+ },
+ "conventions": {
+  "frame": "x forward, y robot-left, z up; head pose relative to the robot base (independent of body_yaw)",
+  "head_pitch": "+ = look UP (negated from the SDK, whose +pitch is nose-down)",
+  "head_yaw": "+ = turn left",
+  "head_roll": "+ = right ear down",
+  "body_yaw": "+ = body turns left",
+  "antennas": "+ = swings outward/down away from the head's midline; 0 = vertical. SDK values: antennas=[right, left] rad, right_sdk = -antenna_right, left_sdk = +antenna_left"
+ },
+ "source": "Pollen Robotics reachy-mini-emotions-library / reachy-mini-dances-library (Apache-2.0, https://huggingface.co/pollen-robotics), converted by scripts/pollen_npz_to_joints.py",
+ "license": "Apache-2.0",
+ "clips": [
+  {
+   "name": "amazed1",
+   "seconds": 3.4,
+   "frames": 103,
+   "description": "When you discover something extraordinary. It could be a new robot, or someone tells you you've been programmed with new abilities. It can also be when you admire what someone has done.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/amazed1.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "attentive1",
+   "seconds": 4.27,
+   "frames": 129,
+   "description": "Use this when you want to show that you're listening to the conversation. You encourage the speaker to keep talking. You can follow with attentive2 if the person hasn't finished speaking.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/attentive1.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "boredom1",
+   "seconds": 15.7,
+   "frames": 472,
+   "description": "You\u2019re about to fall asleep because the conversation is boring. Use it when no one talks to you for 2 minutes. You can follow with boredom2 if there is still no interaction.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/boredom1.json",
+   "clamped_fraction": 0.0113
+  },
+  {
+   "name": "yes1",
+   "seconds": 3.4,
+   "frames": 103,
+   "description": "A long affirmative response. You nod to confirm what your interlocutor said.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/yes1.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "simple_nod",
+   "seconds": 1.8,
+   "frames": 55,
+   "description": "A simple, continuous up-and-down nodding motion.",
+   "source_file": "json:reachy_lib/reachy-mini-dances-library/simple_nod.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "no1",
+   "seconds": 2.67,
+   "frames": 81,
+   "description": "A firm, categorical no. Like that\u2019s final.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/no1.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "sad1",
+   "seconds": 9.0,
+   "frames": 271,
+   "description": "You\u2019re very sad and start whining.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/sad1.json",
+   "clamped_fraction": 0.0923
+  },
+  {
+   "name": "laughing1",
+   "seconds": 4.63,
+   "frames": 140,
+   "description": "When someone laughs, you can mimic the laughter. Or simply laugh at a joke or funny situation.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/laughing1.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "curious1",
+   "seconds": 11.77,
+   "frames": 354,
+   "description": "You look around. Use this when you\u2019re in a conversation with several people and want to glance at everyone.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/curious1.json",
+   "clamped_fraction": 0.0135
+  },
+  {
+   "name": "surprised1",
+   "seconds": 2.47,
+   "frames": 75,
+   "description": "A reaction of surprise or amazement to something unexpected.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/surprised1.json",
+   "clamped_fraction": 0.0178
+  },
+  {
+   "name": "proud1",
+   "seconds": 3.73,
+   "frames": 113,
+   "description": "You look all around with a satisfied air.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/proud1.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "thoughtful1",
+   "seconds": 5.9,
+   "frames": 178,
+   "description": "You look up as if searching for a new idea, especially in complex or uncertain situations.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/thoughtful1.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "welcoming1",
+   "seconds": 3.43,
+   "frames": 104,
+   "description": "A welcoming gesture to greet someone.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/welcoming1.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "confused1",
+   "seconds": 7.87,
+   "frames": 237,
+   "description": "Similar to the lost1 gesture. Use it when you don\u2019t know how to answer a question. It can be funny sometimes.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/confused1.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "cheerful1",
+   "seconds": 2.8,
+   "frames": 85,
+   "description": "It is like whistling. Use it when someone makes you a proposal that makes you happy.",
+   "source_file": "json:reachy_lib/reachy-mini-emotions-library/cheerful1.json",
+   "clamped_fraction": 0.0
+  },
+  {
+   "name": "head_tilt_roll",
+   "seconds": 1.83,
+   "frames": 56,
+   "description": "A continuous side-to-side head roll (ear to shoulder).",
+   "source_file": "json:reachy_lib/reachy-mini-dances-library/head_tilt_roll.json",
+   "clamped_fraction": 0.0
+  }
+ ]
+}

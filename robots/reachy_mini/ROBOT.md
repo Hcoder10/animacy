@@ -25,11 +25,11 @@ joints:
   - { name: head_y,        unit: mm,  min: -25,  max: 25,  rest: 0, max_speed: 150 }
   - { name: head_z,        unit: mm,  min: -15,  max: 25,  rest: 0, max_speed: 150 }
   - { name: head_roll,     unit: deg, min: -30,  max: 30,  rest: 0, max_speed: 200 }
-  - { name: head_pitch,    unit: deg, min: -30,  max: 30,  rest: 0, max_speed: 200 }
+  - { name: head_pitch,    unit: deg, min: -30,  max: 30,  rest: 0, max_speed: 200, urdf_sign: -1 }   # SDK/ROS +pitch = nose DOWN; animacy + = UP
   - { name: head_yaw,      unit: deg, min: -60,  max: 60,  rest: 0, max_speed: 200 }
   - { name: body_yaw,      unit: deg, min: -120, max: 120, rest: 0, max_speed: 150 }
   - { name: antenna_left,  unit: deg, min: -140, max: 140, rest: 0, max_speed: 600 }
-  - { name: antenna_right, unit: deg, min: -140, max: 140, rest: 0, max_speed: 600 }
+  - { name: antenna_right, unit: deg, min: -140, max: 140, rest: 0, max_speed: 600, urdf_sign: -1 }   # mirror axis: SDK right + = inward; animacy + = outward for both
 
 retarget:
   # A human head in conversation is a 6-DoF signal and Reachy's head is a 6-DoF
@@ -95,17 +95,48 @@ from — a clip retargeted here plays on either stack.
 
 ## Sign conventions
 
-- Head rotations are ROS-style in the SDK: **+yaw = left, +pitch = up? NO** —
-  measured on a Wireless unit in reachy-duplex (Aug 2026): with
-  `create_head_pose(..., degrees=True)`, **negative pitch looks UP**, and
-  positive yaw turns toward the robot's left. Canonical `head_pitch` is +up, so
-  the exporter/URDF carries the sign: `urdf_sign` stays +1 here and the Pollen
-  exporter flips pitch when it builds the 4×4 (documented in `animacy/export.py`).
-  If your unit differs, set `gain: -1` on `head_pitch` and say so in an issue.
-- Antennas: SDK order is `[right, left]` in radians; positive raises the antenna
-  forward/up on the vendor's emotion library. `antenna_left`/`antenna_right`
-  are in degrees here, converted by the exporter.
-- `body_yaw` positive = body turns left (same sense as `head_yaw`).
+`urdf/reachy_mini.urdf` uses the SDK's own units and signs (`create_head_pose`:
+metres, radians, `Rz(yaw)·Ry(pitch)·Rx(roll)`; antennas as
+`set_target(antennas=[right, left])` radians), so the `urdf_sign` column in the
+front matter **is the animacy↔SDK sign table**. Everything below is verified in
+simulation (`scripts/reachy_render_clip.py` → `urdf/preview/*.png`,
+`tests/test_reachy_urdf.py`) and cross-checked against Pollen's emotion
+library; hardware evidence is listed where it exists (details and sources in
+`urdf/README.md`).
+
+| joint | animacy `+` means | SDK value | evidence |
+|---|---|---|---|
+| `head_yaw` | turn toward the robot's LEFT (+y) | `+yaw` | hardware (reachy-duplex, Wireless unit, Aug 2026) |
+| `head_pitch` | look **UP** | `-pitch` (`urdf_sign: -1`) — ROS/SDK `+pitch` is nose-down | hardware (Aug 2026: negative SDK pitch looks up); library `downcast1` mean +16.7°, `laughing1` −15.5° |
+| `head_roll` | right ear drops toward the right shoulder | `+roll` | right-hand rule about +x; **unverified on hardware** |
+| `head_x/y/z` | forward / left / up, mm | metres, same base frame | vendor frames (camera at +x, right antenna at −y); **unverified on hardware** |
+| `body_yaw` | body turns left | `+body_yaw` | vendor `yaw_body` axis; **unverified on hardware** |
+| `antenna_left` | swings outward/down, away from the midline; 0 = vertical | `+left` | see below; **unverified on hardware** |
+| `antenna_right` | same, mirror | `-right` (`urdf_sign: -1`) | see below; **unverified on hardware** |
+
+- **Head poses are base-relative, not body-relative.** The SDK solves the head
+  pose in the base frame with `body_yaw` as an independent joint
+  (`ik(create_head_pose(yaw=30°), body_yaw=30°)` returns the neutral Stewart
+  angles), and the URDF hangs the head chain off `base` accordingly. So the
+  `0.25·head_yaw` term in `retarget.default.body_yaw` does not over-rotate the
+  head; it only brings the body along underneath it.
+- **Antennas.** The two hinges are mirror images, so on the SDK a symmetric
+  gesture is `right = -left` (the whole library does this; `SLEEP = [-3.05,
+  3.05]`, `INIT = [-0.1745, 0.1745]`). animacy flips the right one so equal
+  values are symmetric and `+` is "outward/down" on both. The antennas rest
+  vertical, so the expressive range is 0…+180: amazed/surprised ≈ +40…+120°,
+  sad/sleep ≈ +150…+175°; "raise" has nowhere to go, "open" is the gesture.
+  The vendor model's hinge sign is the negative of the real robot's (the SDK's
+  MuJoCo backend writes `ctrl = -target`); the URDF axes are already flipped to
+  real-robot sign. To confirm on a unit: `set_target(antennas=[0, 0.8])` must
+  swing the **left** antenna outward.
+- **Exporting to the SDK** must apply the same table: head =
+  `create_head_pose(head_x/1000, head_y/1000, head_z/1000, head_roll,
+  -head_pitch, head_yaw, degrees=True)`, `antennas = [-radians(antenna_right),
+  radians(antenna_left)]` (order `[right, left]`), `body_yaw` in radians.
+  `scripts/pollen_npz_to_joints.py` is the inverse of exactly this.
+- If your unit differs on any row, fix it with `gain: -1` in the mapping (never
+  in captured data) and say so in an issue.
 
 ## Neutral pose
 

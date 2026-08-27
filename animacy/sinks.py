@@ -46,12 +46,25 @@ class ReachyDaemonSink(Sink):
         self.wake = wake
 
     def _get(self, path, timeout=4.0):
-        return self.s.get(self.base + path, timeout=timeout).json()
+        # The daemon occasionally drops an idle keep-alive socket; one retry on a fresh connection.
+        for attempt in (0, 1):
+            try:
+                return self.s.get(self.base + path, timeout=timeout).json()
+            except Exception:  # noqa: BLE001
+                if attempt:
+                    raise
+                self.s.close()
 
     def _post(self, path, body=None, timeout=6.0):
-        r = self.s.post(self.base + path, json=body, timeout=timeout)
-        r.raise_for_status()
-        return r.json() if r.content else {}
+        for attempt in (0, 1):
+            try:
+                r = self.s.post(self.base + path, json=body, timeout=timeout)
+                r.raise_for_status()
+                return r.json() if r.content else {}
+            except Exception:  # noqa: BLE001
+                if attempt:
+                    raise
+                self.s.close()
 
     def prepare(self) -> None:
         mode = str(self._get("/api/motors/status").get("mode", "")).lower()
