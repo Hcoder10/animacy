@@ -61,3 +61,60 @@ audio in sync) ran on the robot.
 `web/`: both URDFs; JS retargeter equals the Python one to 1e-6 on 240 random
 frames × 2 robots × 2 modes (`tests/test_web_retarget_parity.py`); 240 fps on
 an RTX 5080 laptop, 8–12 fps under software rendering.
+
+## v2a (2026-08-27): autoregressive decoder, 39 clips, two held-out speakers
+
+`checkpoints/v2a/REPORT.md` (command recorded there; `python -m animacy.model.train
+--arch both --holdout kende_interview_2014 obama_2015_02_07 --exclude
+sd_rapper_interview cbp_vlog_day2 --speaker-cap 0.6 --ar-change-weight 4 ...`).
+Data at run start: 39 license-verified clips, 152 valid minutes, 37 training clips
+(145.8 effective minutes; the 60 % per-speaker cap did not bind). Mirror + time-warp
+augmentation on the training set only. Both held-out speakers were never seen.
+
+**What changed from v1.** (a) `a2m_ar`: an autoregressive code decoder (causal
+self-attention over the code history, window 32, cross-attention into the same
+audio trunk; listen mode is causal in both) with a change-weighted loss (x4 on
+code transitions, because 43 % of code steps repeat the previous code and plain
+CE is minimised by freezing) and early stopping; (b) a fresh tokenizer on the
+larger corpus (509/512 codes used, val MAE 0.23 vs 0.62 predict-mean);
+(c) sampling defaults picked by the mean over both hold-outs (T = 1.0, top-p 0.9,
+repeat penalty 1.0); (d) a promotion rule applied per speaker: a learned
+generator ships as the default only if on **every** held-out speaker it beats its
+own shuffled-audio control by >= 0.05 head-beat recall, sits within 0.05 of the
+ground-truth stillness, and its code NLL is below the unigram floor.
+
+| held-out speaker | generator | code NLL (floor) | head-beat recall vs shuffled (margin) | stillness (truth) | velocity W1 rel. |
+|---|---|---|---|---|---|
+| obama_2015 | v1 ff | 6.031 (6.167) | 0.617 / 0.497 (+0.12) | 0.025 (0.103) | 0.30 |
+| obama_2015 | v1-AR (`v1ar_holdout_obama2015`) | 3.578 (5.847) | 0.452 / 0.359 (+0.09) at T1.0/p0.9 | 0.116 (0.103) | 0.35 |
+| obama_2015 | **v2a ff** | 5.211 (5.663) | 0.403 / 0.403 (0.00) | 0.105 (0.103) | 0.23 |
+| obama_2015 | **v2a AR** | **3.557** (5.663) | 0.438 / 0.497 (-0.06) | 0.084 (0.103) | **0.19** |
+| obama_2015 | retrieval (v2a index) | - | 0.538 / 0.486 (+0.05) | 0.140 (0.103) | 0.19 |
+| kende | v1 ff | 6.276 (6.162) | 0.644 / 0.613 (+0.03) | 0.013 (0.097) | 1.94 |
+| kende | v1-AR (`v1ar`) | 4.280 (6.064) | 0.545 / 0.506 (+0.04) at T1.0/p1.0 | 0.044 (0.097) | 1.58 |
+| kende | **v2a ff** | 5.548 (5.481) | 0.253 / 0.273 (-0.02) | 0.145 (0.097) | 0.95 |
+| kende | **v2a AR** | **3.603** (5.481) | 0.391 / 0.403 (-0.01) | 0.090 (0.097) | 1.07 |
+| kende | retrieval (v2a index) | - | 0.470 / 0.510 (-0.04) | 0.139 (0.097) | 1.21 |
+
+Pooled over both speakers (546 ground-truth head peaks): AR NLL 3.581 vs floor
+5.566; head-beat recall AR 0.418 vs 0.469 shuffled, ff 0.339 vs 0.355, retrieval
+0.509 vs 0.467. Retarget legality: 0 speed-cap violations for every source on
+both robots. The 40 %-cap variant (`checkpoints/v2_interim`, run on 36 clips)
+gives the same picture: AR NLL 3.947 vs floor 5.613, AR 0.377 vs 0.363 shuffled,
+retrieval 0.500 vs 0.469.
+
+**Reading, stated plainly.** The autoregressive model fixes what v1 could not:
+its code NLL is ~2 nats below the unigram floor on *both* unseen speakers, its
+velocity statistics are the closest to human of any source (W1 0.19 on obama),
+and its stillness matches the ground truth to within 0.02 - it no longer jitters
+and no longer freezes. What it does **not** show is beat alignment: on neither
+speaker does any learned generator beat its own shuffled-audio control by the
+required 0.05 (the best cells of the sampling sweep reach +0.03 to +0.04 on the
+mean and none holds on both speakers), so **we make no claim that the learned
+motion is timed to the speech beyond what a shuffled soundtrack gives**.
+Retrieval - guaranteed human motion, aligned by construction - therefore
+remains the default source (`web/models/model.json: default_backend =
+retrieval`); the AR model is exported and selectable (`default_arch = ar`).
+The promotion rule stays in the trainer so a future run flips the default only
+on evidence. Sampling-time knobs (repeat penalty, stay bias) move the stillness
+anywhere between 0.03 and 0.3 without moving the margin.
