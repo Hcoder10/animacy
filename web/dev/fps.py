@@ -24,7 +24,7 @@ def main() -> int:
     try:
         wait_port(port)
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False, args=["--use-fake-device-for-media-capture", "--use-fake-ui-for-media-stream"])
+            browser = p.chromium.launch(headless=False, args=["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"])
             page = browser.new_context(viewport={"width": 1440, "height": 900}).new_page()
             page.goto(f"http://127.0.0.1:{port}/web/", wait_until="domcontentloaded")
             page.wait_for_function("window.animacy && window.animacy.ready === true", timeout=120_000)

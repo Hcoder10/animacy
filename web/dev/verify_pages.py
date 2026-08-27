@@ -147,7 +147,7 @@ def main() -> int:
                 for n in ("lamp", "reachy_mini"):
                     v = joints(n)
                     dev[n] = max(abs(v[k] - rest[n][k]) for k in rest[n])
-                print(f"  talk/{backend}: used={info['backend']} frames={info['frames']} motion {info['motionMs']:.0f} ms (wall {wall:.1f} s incl. downloads) "
+                print(f"  talk/{backend}: used={info['backend']}{('/' + info['arch']) if info.get('arch') else ''} frames={info['frames']} motion {info['motionMs']:.0f} ms (wall {wall:.1f} s incl. downloads) "
                       f"clock {ti['time']:.2f}/{ti['duration']:.2f} playing={ti['playing']} lamp |d| {dev['lamp']:.1f} reachy |d| {dev['reachy_mini']:.1f}")
                 if info["backend"] != backend:
                     failures.append(f"talk/{backend} on Pages fell back to {info['backend']}")

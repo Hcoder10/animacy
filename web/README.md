@@ -75,13 +75,18 @@ audio ──AudioBufferSourceNode──► speakers; TalkSource.time = ctx.curre
 the typed text is the intent source — `js/intent.js` mirrors
 `animacy/model/intent.py` with the lexicon from `model.json` (`intent` block):
 tag (greeting / agreement / doubt / excitement / thinking / neutral), arousal,
-valence, amplitude = min(1.3, 0.8 + 0.5·arousal); the "intent:" dropdown forces
-a tag like `--intent`. The amplitude scales every source's motion; retrieval
-adds 0.15·(1 − |window_arousal − target|) and, for thinking, 0.10·still_then_move
-to each window's score (v2 index fields). Then `postprocessMotion` applies the
-`postprocess` block in order: amplitude → pitch floor (0.3 Hz zero-phase
-baseline of head_pitch not below −3°) → utterance-final settle (linear blend to
-neutral over the last 0.5 s of speech) → schema clamp.
+valence and the amplitude **tier** by tag (excitement 1.45, greeting 1.25,
+agreement/doubt 1.15, neutral 1.0, thinking 0.9 — `amplitude_tiers` in the
+block); the "intent:" dropdown forces a tag like `--intent`. Retrieval adds to
+each window's score 0.15·(1 − |window_arousal − target|), for thinking
+0.10·still_then_move, and `proto_weight`·proto[tag][window] — the index's
+gesture-prototype score (nod / head-shake / burst / tilt-and-hold / greet,
+v2 `proto` fields). Then `postprocessMotion` applies the `postprocess` block in
+order: amplitude tier → energy floor (if the utterance's standardised head+brow
+RMS is below `energy_floor`, one scalar in [1, 2] lifts the whole utterance) →
+pitch floor (0.3 Hz zero-phase baseline of head_pitch not below −3°) →
+utterance-final settle (only after speech has ended: linear blend to neutral
+over 0.5 s, then hold) → schema clamp.
 
 `web/models/model.json` (written by `animacy/model/export.py`) is the contract:
 channel order, `stats`, sampling defaults, smoothing cutoff, file names. The
@@ -232,7 +237,7 @@ python web/dev/probe.py "<js expr>" # evaluate anything against the live page
 python -m pytest tests/test_web_retarget_parity.py tests/test_web_features_parity.py tests/test_web_model_parity.py
 ```
 
-Webcam mode is exercised with Chromium's fake camera (`--use-fake-device-for-media-capture`)
+Webcam mode is exercised with Chromium's fake camera (`--use-fake-device-for-media-stream`)
 to prove it initialises without throwing; the face/pose derivation itself is
 only verifiable with a person in front of a real camera (use the calibration
 clips as the reference for which way each channel should move).

@@ -86,7 +86,7 @@ def main() -> int:
             browser = p.chromium.launch(
                 headless=not a.headed,
                 args=[
-                    "--use-fake-device-for-media-capture",
+                    "--use-fake-device-for-media-stream",
                     "--use-fake-ui-for-media-stream",
                     "--ignore-gpu-blocklist",
                     "--use-gl=angle",

@@ -33,7 +33,7 @@ def main() -> int:
     try:
         wait_port(port)
         with sync_playwright() as p:
-            browser = p.chromium.launch(args=["--use-fake-device-for-media-capture", "--use-fake-ui-for-media-stream",
+            browser = p.chromium.launch(args=["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
                                               "--ignore-gpu-blocklist", "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"])
             page = browser.new_context(viewport={"width": 1440, "height": 900}, permissions=["camera", "microphone"]).new_page()
             logs = []

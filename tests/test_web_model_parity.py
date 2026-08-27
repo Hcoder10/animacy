@@ -155,16 +155,18 @@ def js_results():
                         // intent-conditioned query + the shared post-processing, per text line
                         const I = await import('./js/intent.js');
                         res.intent = {};
+                        res.retrieval_has_proto = idx.proto !== null;
+                        const pp = metaAll.postprocess || {};
+                        const pw = pp.proto_weight === undefined ? 0.25 : pp.proto_weight;
                         for (const line of job.intent_lines) {
                             const it = I.analyse(line, { spec: metaAll.intent || null });
-                            const qi = idx.query(rows, spk, { targetArousal: it.arousal, intentTag: it.tag });
-                            const pp = metaAll.postprocess || {};
-                            const post = M.postprocessMotion(qi.motion, rows.length, idx.channels, { speaking: spk, featRows: rows, settleS: pp.settle_s || 0, pitchFloor: pp.pitch_floor === undefined ? null : pp.pitch_floor, amplitude: it.amplitude });
-                            res.intent[line] = { tag: it.tag, arousal: it.arousal, valence: it.valence, amplitude: it.amplitude, hits: it.hits, ids: qi.ids, raw: Array.from(qi.motion), post: Array.from(post) };
+                            const qi = idx.query(rows, spk, { targetArousal: it.arousal, intentTag: it.tag, protoWeight: pw });
+                            const post = M.postprocessMotion(qi.motion, rows.length, idx.channels, { speaking: spk, featRows: rows, settleS: pp.settle_s || 0, pitchFloor: pp.pitch_floor === undefined ? null : pp.pitch_floor, amplitude: it.amplitude, energyFloor: pp.energy_floor || null, energyStd: (metaAll.stats && metaAll.stats.std) || null });
+                            res.intent[line] = { tag: it.tag, arousal: it.arousal, valence: it.valence, amplitude: it.amplitude, hits: it.hits, ids: qi.ids, raw: Array.from(qi.motion), post: Array.from(post), energy_raw: M.motionEnergy(qi.motion, rows.length, idx.channels, (metaAll.stats && metaAll.stats.std) || null) };
                         }
                         for (const tag of ['thinking', 'excitement']) {
                             const it = I.analyse('', { override: tag, spec: metaAll.intent || null });
-                            const qi = idx.query(rows, spk, { targetArousal: it.arousal, intentTag: it.tag });
+                            const qi = idx.query(rows, spk, { targetArousal: it.arousal, intentTag: it.tag, protoWeight: pw });
                             res.intent['override:' + tag] = { tag: it.tag, arousal: it.arousal, valence: it.valence, amplitude: it.amplitude, hits: it.hits, ids: qi.ids };
                         }
                     }
@@ -400,9 +402,11 @@ def test_ar_greedy_generation_matches(js_results):
     m = m[:T]
     # infer.generate applies the bundle's postprocess defaults (settle / pitch floor / amplitude); so does model.js
     pp = meta.get("postprocess", {})
-    if pp.get("settle_s") or pp.get("pitch_floor") is not None or pp.get("amplitude", 1.0) != 1.0:
+    if pp.get("settle_s") or pp.get("pitch_floor") is not None or pp.get("energy_floor") or pp.get("amplitude", 1.0) != 1.0:
+        stats = {"std": np.asarray(meta["stats"]["std"], np.float32)} if meta.get("stats") else None
         m = postprocess_motion(m, js_results["speaking"], js_results["feats"], settle_s=float(pp.get("settle_s", 0.0)),
-                               pitch_floor=pp.get("pitch_floor", None), amplitude=pp.get("amplitude", 1.0))
+                               pitch_floor=pp.get("pitch_floor", None), amplitude=pp.get("amplitude", 1.0),
+                               energy_floor=pp.get("energy_floor", None), energy_stats=stats)
     d = np.abs(np.asarray(js_results["ar_greedy_motion"], np.float32).reshape(m.shape) - m).max()
     assert d < 2e-3, f"AR greedy motion (incl. postprocess) differs by {d:.2e}"
 
@@ -487,34 +491,48 @@ def test_intent_conditioned_retrieval_and_postprocess_match(js_results):
     from animacy.model.intent import analyse
     from animacy.model.retrieval import RetrievalIndex
 
+    from animacy.model.infer import motion_energy
+    from animacy.model.intent import AMPLITUDE_TIERS
+
     idx = RetrievalIndex.load(os.path.join(MODELS, "retrieval.json"))
     meta = json.load(open(os.path.join(MODELS, "model.json"), encoding="utf-8"))
     pp = meta.get("postprocess", {})
+    stats = {"std": np.asarray(meta["stats"]["std"], np.float32)} if meta.get("stats") else None
+    proto_weight = float(pp.get("proto_weight", 0.25))
+    energy_floor = pp.get("energy_floor", None)
     has_fields = idx.arousal is not None
     assert js_results["retrieval_has_intent_fields"] == has_fields
+    assert js_results["retrieval_has_proto"] == (idx.proto is not None)
     feats, spk = js_results["feats"], js_results["speaking"].astype(np.float32)
-    checked = 0
+    checked, floored = 0, 0
     for line in INTENT_LINES:
         it = analyse(line)
-        ref, ids = idx.query(feats, spk, target_arousal=it.arousal, intent_tag=it.tag, return_ids=True)
+        assert abs(it.amplitude - AMPLITUDE_TIERS[it.tag]) < 1e-9 and abs(js_results["intent"][line]["amplitude"] - it.amplitude) < 1e-9
+        ref, ids = idx.query(feats, spk, target_arousal=it.arousal, intent_tag=it.tag, proto_weight=proto_weight, return_ids=True)
         js = js_results["intent"][line]
         same = int((np.asarray(js["ids"]) == ids).sum())
         assert same >= len(ids) - 1, f"{line!r} ({it.tag}, arousal {it.arousal:.2f}): ids differ at {len(ids) - same}/{len(ids)} hops"
         if same == len(ids):
             raw = np.asarray(js["raw"], np.float32).reshape(ref.shape)
             assert np.abs(raw - ref).max() < 1e-3
+            e_py = motion_energy(raw, stats)
+            assert abs(js["energy_raw"] - e_py) < 1e-4, f"{line!r}: motion_energy js={js['energy_raw']} py={e_py}"
             post_ref = postprocess_motion(raw, js_results["speaking"], feats, settle_s=float(pp.get("settle_s", 0.0)),
-                                          pitch_floor=pp.get("pitch_floor", None), amplitude=it.amplitude)
+                                          pitch_floor=pp.get("pitch_floor", None), amplitude=it.amplitude,
+                                          energy_floor=energy_floor, energy_stats=stats)
             post_js = np.asarray(js["post"], np.float32).reshape(post_ref.shape)
             d = np.abs(post_js - post_ref).max()
             assert d < 2e-3, f"{line!r}: post-processed motion differs by {d:.2e}"
             checked += 1
+            if energy_floor and motion_energy(raw * it.amplitude, stats) < energy_floor:
+                floored += 1
     for tag in ("thinking", "excitement"):
         it = analyse("", override=tag)
-        _, ids = idx.query(feats, spk, target_arousal=it.arousal, intent_tag=it.tag, return_ids=True)
+        _, ids = idx.query(feats, spk, target_arousal=it.arousal, intent_tag=it.tag, proto_weight=proto_weight, return_ids=True)
         js_ids = np.asarray(js_results["intent"]["override:" + tag]["ids"])
         assert int((js_ids == ids).sum()) >= len(ids) - 1, f"override {tag}: ids differ"
-    print(f"intent-conditioned retrieval: {checked}/{len(INTENT_LINES)} lines bit-identical ids, post-processing < 2e-3; index intent fields: {has_fields}")
+    print(f"intent-conditioned retrieval: {checked}/{len(INTENT_LINES)} lines bit-identical ids (proto_weight {proto_weight}), "
+          f"post-processing < 2e-3 ({floored} lines hit the energy floor {energy_floor}); index intent fields: {has_fields}, proto: {idx.proto is not None}")
     assert checked >= len(INTENT_LINES) - 2
 
 

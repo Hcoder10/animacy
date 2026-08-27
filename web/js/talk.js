@@ -175,10 +175,15 @@ export class MotionBackends {
       try {
         const index = await this.getIndex();
         if (index) {
-          const q = index.query(featRows, speaking, { targetArousal: intent ? intent.arousal : null, intentTag: intent ? intent.tag : null });
-          // infer.retrieve: the same post-processing as the model (settle / pitch floor / amplitude)
+          // infer.retrieve: intent → arousal / thinking / gesture-prototype bonuses in the query,
+          // then the same post-processing as the model (amplitude tier → energy floor → pitch floor → settle)
+          const q = index.query(featRows, speaking, {
+            targetArousal: intent ? intent.arousal : null, intentTag: intent ? intent.tag : null,
+            protoWeight: pp.proto_weight === undefined ? 0.25 : pp.proto_weight,
+          });
           const motion = postprocessMotion(q.motion, T, index.channels, {
             speaking, featRows, settleS: pp.settle_s || 0, pitchFloor: pp.pitch_floor === undefined ? null : pp.pitch_floor, amplitude,
+            energyFloor: pp.energy_floor || null, energyStd: (meta && meta.stats && meta.stats.std) || null,
           });
           return { frames: motionToFrames(motion, T, index.channels, speaking), backend: 'retrieval', ids: q.ids, rawMotion: q.motion, amplitude, intent };
         }

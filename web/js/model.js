@@ -28,6 +28,29 @@ import { neutralFrame, BOUNDS } from './canonical.js';
 // ---------------------------------------------------------------------------
 export const BASELINE_HZ = 0.3;   // the cutoff the pose channels were detrended with
 export const QUIET_ENERGY = -0.3; // normalised log energy below this = silence (feature 64)
+export const ENERGY_CHANNELS = ['head_yaw', 'head_pitch', 'head_roll', 'head_x', 'head_y', 'head_z', 'brow_l', 'brow_r', 'brow_furrow'];
+export const ENERGY_FLOOR_CAP = 2.0; // the whole-utterance scale never exceeds this (and never goes below 1.0)
+
+/**
+ * Per-utterance energy (infer.motion_energy): RMS of the mean-removed motion over the 6 head
+ * + 3 brow channels, each standardised by the corpus std when `std` is given.
+ * @param {Float32Array} motion flat [T*C]
+ * @param {number[]|null} std   per-channel std in `channels` order (model.json stats.std)
+ */
+export function motionEnergy(motion, T, channels, std = null) {
+  const C = channels.length;
+  const idx = ENERGY_CHANNELS.map((c) => channels.indexOf(c)).filter((i) => i >= 0);
+  if (T === 0 || !idx.length) return 0.0;
+  let acc = 0;
+  for (const c of idx) {
+    const s = std ? std[c] : 1.0;
+    let mean = 0;
+    for (let t = 0; t < T; t++) mean += motion[t * C + c] / s;
+    mean /= T;
+    for (let t = 0; t < T; t++) { const v = motion[t * C + c] / s - mean; acc += v * v; }
+  }
+  return Math.sqrt(acc / (T * idx.length));
+}
 
 /**
  * @param {Float32Array} motion  flat [T*C] canonical units (copied, not modified)
@@ -38,13 +61,23 @@ export const QUIET_ENERGY = -0.3; // normalised log energy below this = silence 
  * @param {Float32Array[]|null} [o.featRows]        [T][66]
  * @param {number} [o.settleS]        seconds of end-of-utterance blend to neutral (0 = off)
  * @param {number|null} [o.pitchFloor] degrees the 0.3 Hz head_pitch baseline may not go below
- * @param {number|number[]} [o.amplitude]  scalar or per-channel scale
+ * @param {number|number[]} [o.amplitude]  scalar or per-channel scale (the intent tier)
+ * @param {number|null} [o.energyFloor]  if the utterance's motionEnergy is below this, scale the
+ *        whole utterance by one scalar in [1, 2] to reach it (0 / null = off)
+ * @param {number[]|null} [o.energyStd]  per-channel std used by motionEnergy (model.json stats.std)
  */
-export function postprocessMotion(motion, T, channels, { speaking = null, featRows = null, settleS = 0, pitchFloor = null, amplitude = 1.0, rateHz = RATE_HZ } = {}) {
+export function postprocessMotion(motion, T, channels, { speaking = null, featRows = null, settleS = 0, pitchFloor = null, amplitude = 1.0, energyFloor = null, energyStd = null, rateHz = RATE_HZ } = {}) {
   const C = channels.length;
   const m = Float32Array.from(motion);
   const amp = Array.isArray(amplitude) ? amplitude : new Array(C).fill(Number(amplitude));
   if (amp.some((a) => a !== 1.0)) for (let t = 0; t < T; t++) for (let c = 0; c < C; c++) m[t * C + c] *= amp[c];
+  if (energyFloor && T > 1) {
+    const e = motionEnergy(m, T, channels, energyStd);
+    if (e > 1e-6 && e < energyFloor) {
+      const g = Math.min(ENERGY_FLOOR_CAP, Math.max(1.0, energyFloor / e));
+      for (let i = 0; i < m.length; i++) m[i] *= g;
+    }
+  }
   const pi = channels.indexOf('head_pitch');
   if (pitchFloor !== null && pitchFloor !== undefined && T > 0 && pi >= 0) {
     const p = new Float64Array(T);
@@ -69,12 +102,13 @@ export function postprocessMotion(motion, T, channels, { speaking = null, featRo
       for (let t = T - 1; t >= 0; t--) if (featRows[t][64] > QUIET_ENERGY) { end = t + 1; break; }
       if (end === 0) end = T;
     }
-    const w = new Float32Array(T);
-    const a0 = Math.max(0, end - n);
-    // np.linspace(0, 1, n+1)[1:] = k/n for k = 1..n; keep the last (end − a0) of them
-    for (let t = a0; t < end; t++) w[t] = (n - (end - t) + 1) / n;
-    for (let t = end; t < T; t++) w[t] = 1.0;
-    for (let t = 0; t < T; t++) { const g = 1.0 - w[t]; for (let c = 0; c < C; c++) m[t * C + c] *= g; }
+    if (end < T) {                                  // only after speech has ended, never mid-utterance
+      const w = new Float32Array(T);
+      const k = Math.min(n, T - end);
+      for (let i = 0; i < k; i++) w[end + i] = (i + 1) / n;   // np.linspace(0, 1, n+1)[1:][:k]
+      for (let t = end + k; t < T; t++) w[t] = 1.0;
+      for (let t = 0; t < T; t++) { const g = 1.0 - w[t]; for (let c = 0; c < C; c++) m[t * C + c] *= g; }
+    }
   }
   return m;
 }
@@ -393,7 +427,7 @@ export class MotionModel {
    * @param {Float32Array[]} featRows
    * @param {Uint8Array|number[]} speaking
    */
-  async generate(featRows, speaking, { causal = false, temperature = null, bigramWeight = null, topP = null, repeatPenalty = null, seed = 0, smoothHz = undefined, onStep = null, amplitude = null, settleS = null, pitchFloor = undefined } = {}) {
+  async generate(featRows, speaking, { causal = false, temperature = null, bigramWeight = null, topP = null, repeatPenalty = null, seed = 0, smoothHz = undefined, onStep = null, amplitude = null, settleS = null, pitchFloor = undefined, energyFloor = undefined } = {}) {
     const T = featRows.length;
     const C = this.channels.length;
     const stats = this.meta.stats || {};
@@ -403,6 +437,8 @@ export class MotionModel {
       settleS: settleS === null ? (pp.settle_s || 0) : settleS,
       pitchFloor: pitchFloor === undefined ? (pp.pitch_floor === undefined ? null : pp.pitch_floor) : pitchFloor,
       amplitude: amplitude === null ? (pp.amplitude === undefined ? 1.0 : pp.amplitude) : amplitude,
+      energyFloor: energyFloor === undefined ? (pp.energy_floor || null) : energyFloor,
+      energyStd: stats.std || null,                 // infer.generate_motion passes energy_stats=model.vq.stats
     };
     if (T < FRAMES_PER_CODE) {
       const m = new Float32Array(T * C);
@@ -436,7 +472,7 @@ export class MotionModel {
     }
     m = m.slice(0, T * C);
     const amp = Array.isArray(ppOpts.amplitude) ? ppOpts.amplitude.some((a) => a !== 1.0) : ppOpts.amplitude !== 1.0;
-    if (ppOpts.settleS || ppOpts.pitchFloor !== null || amp) m = postprocessMotion(m, T, this.channels, ppOpts);
+    if (ppOpts.settleS || ppOpts.pitchFloor !== null || ppOpts.energyFloor || amp) m = postprocessMotion(m, T, this.channels, ppOpts);
     return { motion: m, codes, arch: this.arch, postprocess: ppOpts };
   }
 }
@@ -465,6 +501,16 @@ export class RetrievalIndex {
     this.stillThenMove = Array.isArray(header.still_then_move) && header.still_then_move.length === this.n ? Float32Array.from(header.still_then_move) : null;
     this.arousalBonus = header.arousal_bonus ?? 0.15;
     this.thinkingBonus = header.thinking_bonus ?? 0.10;
+    // gesture-prototype scores per window, {tag: Float32Array [n]} (v2 indexes with proto_fields)
+    this.proto = null;
+    if (header.proto && typeof header.proto === 'object') {
+      this.proto = {};
+      for (const tag of Object.keys(header.proto)) {
+        if (Array.isArray(header.proto[tag]) && header.proto[tag].length === this.n) this.proto[tag] = Float32Array.from(header.proto[tag]);
+      }
+      if (!Object.keys(this.proto).length) this.proto = null;
+    }
+    this.protoWeight = header.proto_weight ?? 0.25;
   }
 
   static async load(baseUrl = 'models/', onProgress = null) {
@@ -510,7 +556,7 @@ export class RetrievalIndex {
    * `intentTag === 'thinking'` adds thinking_bonus·max(0, still_then_move).
    * Both need the v2 index fields and are no-ops without them.
    */
-  query(featRows, speaking, { targetArousal = null, intentTag = null } = {}) {
+  query(featRows, speaking, { targetArousal = null, intentTag = null, protoWeight = null } = {}) {
     const T = featRows.length;
     const C = this.channels.length;
     const win = this.win, hop = this.hop;
@@ -518,6 +564,9 @@ export class RetrievalIndex {
     if (this.n === 0 || T === 0) return { motion: out.slice(0, T * C), ids: [] };
     const useArousal = this.arousal !== null && this.arousalBonus > 0 && targetArousal !== null && targetArousal !== undefined;
     const useThinking = intentTag === 'thinking' && this.stillThenMove !== null && this.thinkingBonus > 0;
+    // gesture prototype: score += proto_weight · proto[intent_tag][window] (0 disables; neutral has no prototype)
+    const pw = protoWeight === null || protoWeight === undefined ? this.protoWeight : protoWeight;
+    const protoVec = this.proto && intentTag && this.proto[intentTag] && pw > 0 ? this.proto[intentTag] : null;
     // edge-pad features and speaking by `win`
     const pad = featRows.slice();
     for (let i = 0; i < win; i++) pad.push(featRows[T - 1]);
@@ -543,6 +592,7 @@ export class RetrievalIndex {
         s += this.speakingBonus * (1.0 - Math.abs(this.speaking[i] - sMean));
         if (useArousal) s += this.arousalBonus * (1.0 - Math.abs(this.arousal[i] - targetArousal));
         if (useThinking) s += this.thinkingBonus * Math.max(0.0, this.stillThenMove[i]);
+        if (protoVec) s += pw * protoVec[i];
         sims[i] = s;
         if (s > best) { best = s; j = i; }
       }
