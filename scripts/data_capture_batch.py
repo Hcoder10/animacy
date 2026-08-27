@@ -70,7 +70,9 @@ def speaker_key(r: Dict) -> str:
         return "clinton"
     art = (r.get("artist") or "").strip()
     if art and art.lower() not in ("unknown authorunknown author", "unknown author"):
-        return re.sub(r"[^a-z0-9]+", "_", art.lower()).strip("_")[:40]
+        slug = re.sub(r"[^a-z0-9]+", "_", art.lower()).strip("_")[:40]
+        if slug:  # non-Latin artist strings slug to nothing; fall through to the clip name
+            return slug
     return r.get("name") or "?"
 
 

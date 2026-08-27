@@ -1,5 +1,5 @@
 {
- "generated": "2026-08-27T00:12:10",
+ "generated": "2026-08-27T02:30:20",
  "robots": {
   "lamp": {
    "urdf": "urdf/lamp.urdf",
@@ -279,6 +279,14 @@
  },
  "clips": [
   {
+   "file": "anarkali_honaryar_ghani_has_pledged_to_ensure_wo.json",
+   "name": "anarkali_honaryar_ghani_has_pledged_to_ensure_wo"
+  },
+  {
+   "file": "direitos_humanos_entrevista_com_fl_via_pinto.json",
+   "name": "direitos_humanos_entrevista_com_fl_via_pinto"
+  },
+  {
    "file": "kende_interview_2014.json",
    "name": "kende_interview_2014"
   },
@@ -289,18 +297,22 @@
   {
    "file": "royal_society_cloke.json",
    "name": "royal_society_cloke"
+  },
+  {
+   "file": "zachary_levi_about_working_on_broadway_at_nerdhq.json",
+   "name": "zachary_levi_about_working_on_broadway_at_nerdhq"
   }
  ],
  "models": [
   {
    "file": "a2m.onnx",
    "name": "a2m",
-   "bytes": 7622914
+   "bytes": 3841920
   },
   {
    "file": "a2m_ar.onnx",
    "name": "a2m_ar",
-   "bytes": 15204737
+   "bytes": 7672665
   },
   {
    "file": "vq_decoder.onnx",
@@ -320,7 +332,7 @@
    "ff",
    "ar"
   ],
-  "default_arch": "ar",
+  "default_arch": "ff",
   "verdict": ""
  }
 }

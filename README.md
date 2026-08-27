@@ -85,7 +85,7 @@ Their endpoint is a dry-run recorder today (`{"policy","task"}` → `state: "dry
 
 Every number is copied from `docs/RESULTS.md`, which in turn cites a `checkpoints/<run>/REPORT.md` with the exact training command. Held-out = a speaker the model never saw.
 
-- **Data:** 6 license-verified clips, 20.5 min, 14.95 min face-valid with audio. Small; a 10× fetch is in progress.
+- **Data:** v1 trained on 6 clips (20.5 min); the corpus is now 68 license-verified clips, 310 valid minutes, 36 speakers, ~12 languages ([HF dataset](https://huggingface.co/datasets/squaredcuber/animacy-human-motion)).
 - **Tokenizer** (VQ-VAE, 512 × 64, one code per 2 frames): 512/512 codes used, val MAE 0.35 vs 0.71 for predict-the-mean; round-trip r = 0.8–0.9 on head/torso/brows on the held-out speaker. Dead-code revival was required — the stock EMA quantiser collapsed to one code at this data size.
 - **Audio → motion, held out:** on one held-out speaker (obama_2015) the model beats the unigram floor (code NLL 6.031 vs 6.167) and its shuffled-audio control on head-beat recall (0.617 vs 0.497) and precision (0.52 vs 0.40); on the other (kende) it does not (NLL 6.276 vs 6.162 floor; beat-recall margin 0.03, inside noise). Generated motion is too restless on both (stillness 0.013–0.025 vs 0.10 in the truth) because codes are sampled independently per step. On the obama hold-out the model's expected motion correlates with the unseen speaker's truth at r = 0.48 on `head_pitch` (−0.02 with shuffled audio), 0.40 on `head_z`, 0.40 on `mouth_open`.
 - **Therefore retrieval ships as the default motion source**; the learned model is selectable; v2 is an autoregressive decoder on the larger dataset, and its numbers will be appended whatever they are.
@@ -127,7 +127,7 @@ Not done, or not verified — read before quoting anything above:
 - **The learned model does not yet beat its floors on every held-out speaker**; retrieval is the default. The blind-grader gate has not been run.
 - **Listen mode** (microphone → causal model) is experimental. Reachy antenna out/in geometry has not been eyeballed on hardware (the mapping is documented either way). SO-101 is sim only.
 - A robot-authored move cannot be moved to another body (no inverse retarget).
-- The dataset is small (20.5 min); the v2 model waits on the larger fetch.
+- The learned model does not beat shuffled audio on beat timing even at 150 min (docs/RESULTS.md, v2a); retrieval over the 310-minute corpus is the shipped default.
 
 ## License and attributions
 
