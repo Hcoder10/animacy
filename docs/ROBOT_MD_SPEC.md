@@ -25,9 +25,11 @@ description:
   urdf: urdf/lamp.urdf           # relative to this file
   mesh_scale: 1.0
   up_axis: z
-  viewer:                        # hints for the web viewer only
+  viewer:                        # hints for the web viewer and `animacy preview`
     camera_distance: 0.9
     ground: true
+    tip_link: head               # link whose position/orientation the sign probe reports (auto-picked if absent)
+    gaze: [0.70, 0, -0.71]       # "forward" axis of that link (x|y|z|-x|... or a vector), for the pointing ray
 
 joints:                          # the robot's controllable joints, in servo order
   - name: base_yaw               # name used in every animacy file for this robot

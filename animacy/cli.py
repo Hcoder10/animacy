@@ -80,6 +80,12 @@ def _cmd_capture(a) -> int:
     return capture_main(a)
 
 
+def _cmd_preview(a) -> int:
+    from .preview import main as preview_main
+
+    return preview_main(a)
+
+
 def _cmd_lerobot(a) -> int:
     from .lerobot_export import export, push_to_hub, validate_with_lerobot
 
@@ -207,6 +213,12 @@ def build_parser() -> argparse.ArgumentParser:
     lr.add_argument("--validate", action="store_true")
     lr.add_argument("--push", default=None)
     lr.set_defaults(fn=_cmd_lerobot)
+
+    pv = sub.add_parser("preview", help="render calibration poses through ROBOT.md to PNG + print the sign probe")
+    from .preview import add_arguments as _preview_args
+
+    _preview_args(pv)
+    pv.set_defaults(fn=_cmd_preview)
     return p
 
 
