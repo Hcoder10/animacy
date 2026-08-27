@@ -279,27 +279,43 @@ def _intent_block() -> Dict:
 
 
 def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: str, metrics: Optional[Dict] = None,
-                  tol: float = 1e-4, fp16: bool = False, archs: Optional[List[str]] = None) -> Dict:
+                  tol: float = 1e-4, fp16: bool = False, archs: Optional[List[str]] = None, json_only: bool = False) -> Dict:
     """Write ``a2m.onnx``, ``a2m_ar.onnx``, ``vq_decoder.onnx``, ``bigram.bin``, ``model.json`` (+ retrieval
     index). ``fp16`` stores the predictors' weights as float16 (compute stays float32). ``archs``
-    restricts which predictors ship (e.g. ``["ar"]`` drops ``a2m.onnx``; a stale file is removed)."""
+    restricts which predictors ship (e.g. ``["ar"]`` drops ``a2m.onnx``; a stale file is removed).
+    ``json_only`` rewrites ``model.json`` and leaves every other file in ``out_dir`` untouched."""
     os.makedirs(out_dir, exist_ok=True)
     archs = [a for a in (archs or model.archs) if a in model.archs]
     report: Dict = {"archs": archs}
     a2m_path = os.path.join(out_dir, "a2m.onnx")
-    if model.a2m is not None and "ff" in archs:
-        report["a2m"] = export_a2m(model, a2m_path, tol=tol, fp16=fp16)
-    elif os.path.exists(a2m_path):
-        os.remove(a2m_path)
-    if model.ar is not None and "ar" in archs:
-        report["a2m_ar"] = export_ar(model, os.path.join(out_dir, "a2m_ar.onnx"), tol=tol, fp16=fp16)
-    report["vq_decoder"] = export_vq_decoder(model, os.path.join(out_dir, "vq_decoder.onnx"), tol=tol)
+    ar_path = os.path.join(out_dir, "a2m_ar.onnx")
+    vq_path = os.path.join(out_dir, "vq_decoder.onnx")
+    if json_only:
+        # rewrite model.json only; every binary in out_dir stays byte-identical
+        def _existing(path):
+            return {"path": path, "bytes": os.path.getsize(path), "fp16": fp16, "exporter": "unchanged", "max_abs_diff": None, "ok": True}
+
+        if "ff" in archs and os.path.exists(a2m_path):
+            report["a2m"] = _existing(a2m_path)
+        if "ar" in archs and os.path.exists(ar_path):
+            report["a2m_ar"] = _existing(ar_path)
+        report["vq_decoder"] = _existing(vq_path)
+    else:
+        if model.a2m is not None and "ff" in archs:
+            report["a2m"] = export_a2m(model, a2m_path, tol=tol, fp16=fp16)
+        elif os.path.exists(a2m_path):
+            os.remove(a2m_path)
+        if model.ar is not None and "ar" in archs:
+            report["a2m_ar"] = export_ar(model, ar_path, tol=tol, fp16=fp16)
+        report["vq_decoder"] = export_vq_decoder(model, vq_path, tol=tol)
 
     bigram_path = os.path.join(out_dir, "bigram.bin")
-    if model.bigram_logp is not None:
+    if model.bigram_logp is not None and not json_only:
         bigram16 = np.asarray(model.bigram_logp, np.float32).astype(np.float16)
         with open(bigram_path, "wb") as fh:
             fh.write(bigram16.tobytes())
+        report["bigram"] = {"path": bigram_path, "bytes": os.path.getsize(bigram_path)}
+    elif os.path.exists(bigram_path):
         report["bigram"] = {"path": bigram_path, "bytes": os.path.getsize(bigram_path)}
     else:
         report["bigram"] = {"path": None, "bytes": 0}
@@ -386,9 +402,12 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
         "verdict": verdict,
         "training": model.info.get("training", {}),
     }
-    if index is not None:
+    if index is not None and not json_only:
         b, j = index.save(out_dir, "retrieval")
         report["retrieval"] = {"bin": b, "json": j, "bytes": os.path.getsize(b) + os.path.getsize(j), "n_windows": len(index)}
+    elif json_only and os.path.exists(os.path.join(out_dir, "retrieval.json")):
+        b, j = os.path.join(out_dir, "retrieval.bin"), os.path.join(out_dir, "retrieval.json")
+        report["retrieval"] = {"bin": b, "json": j, "bytes": os.path.getsize(b) + os.path.getsize(j), "n_windows": len(index) if index is not None else None}
     with open(os.path.join(out_dir, "model.json"), "w", encoding="utf-8") as fh:
         json.dump(model_json, fh, indent=1)
     report["model_json"] = os.path.join(out_dir, "model.json")
@@ -407,19 +426,23 @@ def main(argv=None) -> int:
     p.add_argument("--tol", type=float, default=1e-4)
     p.add_argument("--fp16", action="store_true", help="float16 weights for a2m.onnx and a2m_ar.onnx")
     p.add_argument("--archs", nargs="*", default=None, help="which predictors to ship (default: all in the checkpoint), e.g. --archs ar")
+    p.add_argument("--json-only", action="store_true", help="rewrite model.json only; ONNX / bigram / retrieval files stay untouched")
     a = p.parse_args(argv)
     model = MotionModel.load(a.ckpt, "cpu")
     idx_path = os.path.join(a.ckpt, "retrieval.json")
     index = RetrievalIndex.load(idx_path) if os.path.exists(idx_path) else None
     m_path = os.path.join(a.ckpt, "metrics.json")
     metrics = json.load(open(m_path, encoding="utf-8")) if os.path.exists(m_path) else None
-    rep = export_bundle(model, index, a.out, (metrics or {}).get("eval"), tol=a.tol, fp16=a.fp16, archs=a.archs)
+    rep = export_bundle(model, index, a.out, (metrics or {}).get("eval"), tol=a.tol, fp16=a.fp16, archs=a.archs, json_only=a.json_only)
     ok = True
     for k in ("a2m", "a2m_ar", "vq_decoder"):
         if k not in rep:
             continue
         r = rep[k]
         ok &= bool(r["ok"])
+        if a.json_only:
+            print(f"{os.path.basename(r['path'])}: {r['bytes'] / 1e6:.2f} MB (unchanged)")
+            continue
         extra = ""
         if r.get("fp16"):
             extra = f" [fp16 weights: {r['bytes_fp32'] / 1e6:.2f} -> {r['bytes'] / 1e6:.2f} MB, fp32-graph diff {r['max_abs_diff_fp32_graph']:.2e}" \
@@ -430,7 +453,7 @@ def main(argv=None) -> int:
         print(f"retrieval: {rep['retrieval']['n_windows']} windows, {rep['retrieval']['bytes'] / 1e6:.2f} MB")
     print(f"bundle {rep['total_bytes'] / 1e6:.2f} MB -> {a.out}; default backend = "
           f"{json.load(open(rep['model_json'], encoding='utf-8'))['default_backend']}")
-    if metrics is not None:
+    if metrics is not None and not a.json_only:      # a json-only rewrite measured nothing new
         metrics["export"] = rep
         with open(m_path, "w", encoding="utf-8") as fh:
             json.dump(metrics, fh, indent=1, default=float)

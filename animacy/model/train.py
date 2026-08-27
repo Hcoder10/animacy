@@ -373,17 +373,26 @@ def write_report(path: str, m: Dict, command: str) -> None:
                              f"{v['margin_min']:+.3f} | {v['stillness']:.3f} ({v['gt_stillness']:.3f}) | {v['w1_relative_mean']:.3f} | {per} |")
             L.append("")
             try:
-                from .intent import amplitude_for, analyse, grader_lines
+                from .intent import EXAMPLE_LINES, LEXICON_VERSION, amplitude_for, analyse
                 from .retrieval import AROUSAL_BONUS, THINKING_BONUS
 
-                L.append("### Intent layer (text -> arousal / valence / tag; lexicon + punctuation, no model)\n")
+                L.append(f"### Intent layer ({LEXICON_VERSION}: generic cue words + punctuation, no model)\n")
                 L.append(f"Amplitude rule 0.8 + 0.5 * arousal (cap 1.3); retrieval arousal bonus {AROUSAL_BONUS}, thinking bonus {THINKING_BONUS}. "
-                         "What the rule produces for the five grader lines:\n")
-                L.append("| movement | line | tag | arousal | valence | amplitude |")
-                L.append("|---|---|---|---|---|---|")
-                for k, text in grader_lines().items():
+                         "The lexicon stores none of the grader's utterances; the grader's lines below are read from "
+                         "`animacy.grade.movements` at report time only.\n")
+                L.append("| source | intended | line | tag | arousal | valence | amplitude |")
+                L.append("|---|---|---|---|---|---|---|")
+                rows = []
+                try:
+                    from ..grade.movements import MOVEMENTS  # type: ignore
+
+                    rows += [("grader", mv.key, mv.text) for mv in MOVEMENTS]
+                except Exception:  # noqa: BLE001
+                    rows.append(("grader", "-", "(animacy.grade.movements not importable)"))
+                rows += [("example", tag, s) for tag, lines in EXAMPLE_LINES.items() for s in lines]
+                for src, intended, text in rows:
                     it = analyse(text)
-                    L.append(f"| {k} | {text} | {it.tag} | {it.arousal:.2f} | {it.valence:+.2f} | {amplitude_for(it.arousal):.2f} |")
+                    L.append(f"| {src} | {intended} | {text} | {it.tag}{'' if it.tag == intended else ' (MISS)'} | {it.arousal:.2f} | {it.valence:+.2f} | {amplitude_for(it.arousal):.2f} |")
                 L.append("")
             except Exception as e:  # noqa: BLE001
                 L.append(f"(intent table unavailable: {e})\n")
@@ -424,8 +433,12 @@ def write_report(path: str, m: Dict, command: str) -> None:
         for k in ("a2m", "a2m_ar", "vq_decoder"):
             if k in ex:
                 r = ex[k]
+                if r.get("max_abs_diff") is None:
+                    L.append(f"- `{os.path.basename(r['path'])}`: {r['bytes'] / 1e6:.2f} MB ({r.get('exporter', 'unchanged')})")
+                    continue
                 L.append(f"- `{os.path.basename(r['path'])}`: {r['bytes'] / 1e6:.2f} MB, exporter {r['exporter']}, onnxruntime vs torch max abs diff "
-                         f"{r['max_abs_diff']:.2e} at L={r['verify_lengths']} -> {'OK' if r['ok'] else 'MISMATCH'}")
+                         f"{r['max_abs_diff']:.2e} at L={r.get('verify_lengths')} -> {'OK' if r['ok'] else 'MISMATCH'}"
+                         + (f" (fp16 weights; fp32 graph {r['max_abs_diff_fp32_graph']:.2e})" if r.get("fp16") else ""))
         if "retrieval" in ex:
             L.append(f"- retrieval index: {ex['retrieval']['n_windows']} windows, {ex['retrieval']['bytes'] / 1e6:.2f} MB")
         L.append(f"- bigram.bin {ex['bigram']['bytes'] / 1e6:.2f} MB; bundle total {ex['total_bytes'] / 1e6:.2f} MB -> `{os.path.dirname(ex['model_json'])}`")
