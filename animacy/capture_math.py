@@ -152,6 +152,57 @@ def relative_head(r_body: np.ndarray, t_body_mm: np.ndarray, neutral: Dict) -> T
     return yaw, pitch, roll, float(d[0]), float(d[1]), float(d[2])
 
 
+# --------------------------------------------------------------------- small-face crop path
+# MediaPipe's face-geometry pipeline models the image as a pinhole camera with this
+# vertical FOV (face_geometry "perspective camera" default). The crop path treats a
+# square crop as the whole image, so its metric outputs are in the crop's virtual
+# camera; these helpers map them back to the full frame's virtual camera.
+FACE_GEOMETRY_VFOV_DEG = 63.0
+
+
+def crop_box_for_face(cx: float, cy: float, size: float, width: int, height: int,
+                      margin: float = 2.5, min_side: int = 192) -> Tuple[int, int, int]:
+    """Square crop (x0, y0, side) around a face centre/size in pixels, clamped to the image."""
+    side = int(round(max(size * margin, min_side)))
+    side = min(side, width, height)
+    x0 = int(round(cx - side / 2))
+    y0 = int(round(cy - side / 2))
+    x0 = min(max(x0, 0), width - side)
+    y0 = min(max(y0, 0), height - side)
+    return x0, y0, side
+
+
+def crop_landmarks_to_full(lm_xy: np.ndarray, crop_box: Tuple[int, int, int], full_wh: Tuple[int, int]) -> np.ndarray:
+    """Normalized landmarks of the crop -> normalized landmarks of the full frame."""
+    x0, y0, side = crop_box
+    w, h = full_wh
+    out = np.array(lm_xy, dtype=float, copy=True)
+    out[:, 0] = (x0 + out[:, 0] * side) / w
+    out[:, 1] = (y0 + out[:, 1] * side) / h
+    return out
+
+
+def crop_to_full_translation(t_cam_cm: np.ndarray, crop_box: Tuple[int, int, int], full_wh: Tuple[int, int],
+                             vfov_deg: float = FACE_GEOMETRY_VFOV_DEG) -> np.ndarray:
+    """Translation from the crop's virtual camera -> the full frame's virtual camera (cm).
+
+    Pinhole with focal length f = (H/2)/tan(vfov/2) in pixels: the crop's camera has
+    f_crop = f * side/H, so ``z_full = z_crop * H/side``; the lateral position gains the
+    crop centre's offset from the image centre, ``x_full = x_crop + du * |z_crop| / f_crop``
+    (image-right = +x, image-down = -y). Rotation is unchanged: the crop path reports the
+    head's orientation relative to the camera->face ray instead of the optical axis, a
+    constant for a seated subject that the neutral zeroing removes.
+    """
+    x0, y0, side = crop_box
+    w, h = full_wh
+    t = np.asarray(t_cam_cm, dtype=float)
+    f_crop = (side / 2.0) / np.tan(np.radians(vfov_deg) / 2.0)
+    du = (x0 + side / 2.0) - w / 2.0
+    dv = (y0 + side / 2.0) - h / 2.0
+    dist = abs(float(t[2]))
+    return np.array([t[0] + du * dist / f_crop, t[1] - dv * dist / f_crop, t[2] * h / side])
+
+
 # --------------------------------------------------------------------- blendshapes
 RAW_FACE_KEYS = ["gaze_yaw", "gaze_pitch", "brow_l_signed", "brow_r_signed",
                  "eye_open_l", "eye_open_r", "mouth_open", "smile"]

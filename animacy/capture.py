@@ -88,6 +88,24 @@ frames, hands clasped in the lap read shoulder_pitch ~10-13, elbow_flex
 ~40, hand_open 0.1-0.3, which is plausible but not measured against ground
 truth).
 
+Small faces (wide shots)
+------------------------
+FaceLandmarker's built-in detector sees a ~128 px downscale of the whole
+frame, so a face narrower than ~10% of the frame width is never found (six
+fetched interviews had 0% detections with a clearly frontal face 60 px wide
+in 854 px; rotation metadata was NOT the cause — OpenCV honours it via
+``CAP_PROP_ORIENTATION_AUTO``). ``Trackers`` therefore falls back to YuNet
+(OpenCV, full resolution, ``face_detection_yunet_2023mar.onnx``) -> a square
+crop of 2.5x the face -> a second FaceLandmarker on the crop -> geometry
+mapped back to the full frame (``capture_math.crop_to_full_translation``:
+depth x H/side, lateral position + the crop's offset; landmarks by affine).
+In crop mode the rotation is relative to the camera->face ray instead of the
+optical axis — a constant for a seated subject, removed by neutral zeroing;
+``meta.stats.face_crop_frac`` says how much of a clip used it. Verified on
+real frames shrunk to a third (``tests/test_capture_crop.py``): relative
+rotation within 4 deg of the full-frame path, lateral mm unchanged, depth
+scaled by the shrink factor.
+
 Known limitations
 -----------------
 * ``speaking`` is "any voice on the track": an off-camera interviewer counts.
@@ -127,7 +145,13 @@ MODEL_URLS = {
         "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
     "pose_landmarker_full.task":
         "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+    # OpenCV YuNet: finds SMALL faces at full resolution (the small-face fallback below).
+    "face_detection_yunet_2023mar.onnx":
+        "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
 }
+YUNET_SCORE = 0.6
+CROP_MARGIN = 2.5   # crop side = this x the detected face size
+CROP_MIN_SIDE = 192
 VIDEO_EXT = (".mp4", ".mkv", ".webm", ".mov", ".avi", ".ogv", ".mpg", ".mpeg", ".m4v")
 SMOOTH_CUTOFF_HZ = 8.0
 FACE_VALUE_KEYS = ["gaze_yaw", "gaze_pitch", "brow_l", "brow_r", "brow_furrow",
@@ -159,26 +183,129 @@ def ensure_model(name: str) -> str:
 
 # ------------------------------------------------------------------ trackers
 class Trackers:
-    """Face + pose landmarkers in VIDEO mode (synchronous, timestamped)."""
+    """Face + pose landmarkers in VIDEO mode (synchronous, timestamped).
 
-    def __init__(self, want_pose: bool = True) -> None:
+    Small-face fallback: FaceLandmarker's built-in detector works on a ~128 px
+    downscale of the whole frame, so a face narrower than ~10% of the frame
+    (a wide interview shot) is never found. When the full-frame pass fails,
+    YuNet (OpenCV, full resolution) locates the face, a square crop of
+    ``CROP_MARGIN`` x the face size is run through a second FaceLandmarker,
+    and the geometry is mapped back to the full frame
+    (``capture_math.crop_to_full_translation`` / ``crop_landmarks_to_full``).
+    Once a clip enters crop mode it stays there (one consistent convention per
+    clip); ``sample['face_crop']`` records the crop box used.
+    """
+
+    def __init__(self, want_pose: bool = True, allow_crop: bool = True) -> None:
         import mediapipe as mp
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision as mp_vision
 
         self._mp = mp
+        self._mp_python, self._mp_vision = mp_python, mp_vision
         self.face_model = "face_landmarker.task"
         self.pose_model = f"pose_landmarker_{os.environ.get('ANIMACY_POSE_MODEL', 'lite')}.task"
-        self.face = mp_vision.FaceLandmarker.create_from_options(mp_vision.FaceLandmarkerOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=ensure_model(self.face_model)),
-            output_face_blendshapes=True, output_facial_transformation_matrixes=True, num_faces=1,
-            running_mode=mp_vision.RunningMode.VIDEO))
+        self.face = self._make_face_landmarker()
         self.pose = None
         if want_pose:
             self.pose = mp_vision.PoseLandmarker.create_from_options(mp_vision.PoseLandmarkerOptions(
                 base_options=mp_python.BaseOptions(model_asset_path=ensure_model(self.pose_model)),
                 num_poses=1, running_mode=mp_vision.RunningMode.VIDEO))
         self._last_ts = -1
+        self.allow_crop = allow_crop
+        self.crop_mode = False
+        self._face_crop_lm = None     # second landmarker, created on first use
+        self._yunet = None
+        self._yunet_size = None
+        self._crop_box: Optional[Tuple[int, int, int]] = None
+        self.crop_frames = 0
+
+    def _make_face_landmarker(self):
+        v, p = self._mp_vision, self._mp_python
+        return v.FaceLandmarker.create_from_options(v.FaceLandmarkerOptions(
+            base_options=p.BaseOptions(model_asset_path=ensure_model(self.face_model)),
+            output_face_blendshapes=True, output_facial_transformation_matrixes=True, num_faces=1,
+            running_mode=v.RunningMode.VIDEO))
+
+    def _yunet_face(self, frame_bgr: np.ndarray) -> Optional[Tuple[float, float, float]]:
+        """Largest YuNet face in the full-resolution frame -> (cx, cy, size px) or None."""
+        import cv2
+
+        h, w = frame_bgr.shape[:2]
+        if self._yunet is None:
+            self._yunet = cv2.FaceDetectorYN.create(ensure_model("face_detection_yunet_2023mar.onnx"), "", (w, h),
+                                                    score_threshold=YUNET_SCORE)
+        if self._yunet_size != (w, h):
+            self._yunet.setInputSize((w, h))
+            self._yunet_size = (w, h)
+        try:
+            _, faces = self._yunet.detect(frame_bgr)
+        except Exception:
+            faces = None
+        if faces is None or len(faces) == 0:
+            return None
+        best = max(faces, key=lambda f: float(f[2]) * float(f[3]))
+        x, y, bw, bh = (float(best[0]), float(best[1]), float(best[2]), float(best[3]))
+        return x + bw / 2, y + bh / 2, max(bw, bh)
+
+    def _face_from_result(self, fr, ts_shape: Tuple[int, int], crop_box: Optional[Tuple[int, int, int]]) -> Optional[Dict]:
+        if fr is None or not fr.face_landmarks or not fr.facial_transformation_matrixes:
+            return None
+        m = np.array(fr.facial_transformation_matrixes[0], dtype=float).reshape(4, 4)
+        lm = np.array([[p.x, p.y] for p in fr.face_landmarks[0]], dtype=float)
+        if crop_box is not None:
+            m = m.copy()
+            m[:3, 3] = cm.crop_to_full_translation(m[:3, 3], crop_box, ts_shape)
+            lm = cm.crop_landmarks_to_full(lm, crop_box, ts_shape)
+        r_body, t_mm = cm.head_pose_from_matrix(m)
+        blend = {c.category_name: float(c.score) for c in fr.face_blendshapes[0]} if fr.face_blendshapes else {}
+        return {"face_ok": True, "matrix": m, "head_angles": cm.head_angles_deg(r_body), "head_trans": t_mm,
+                "blend": blend, "face_raw": cm.face_raw_from_blendshapes(blend), "lm_xy": lm,
+                "iris_gaze_u": cm.iris_gaze_yaw_unit(lm) if len(lm) >= 478 else float("nan"), "face_crop": crop_box}
+
+    def _face_cropped(self, frame_bgr: np.ndarray, rgb: np.ndarray, ts: int) -> Optional[Dict]:
+        """Small-face path: YuNet (or the previous crop) -> square crop -> second landmarker."""
+        h, w = frame_bgr.shape[:2]
+        box = self._crop_box
+        if box is None:
+            found = self._yunet_face(frame_bgr)
+            if found is None:
+                return None
+            box = cm.crop_box_for_face(found[0], found[1], found[2], w, h, CROP_MARGIN, CROP_MIN_SIDE)
+        if self._face_crop_lm is None:
+            self._face_crop_lm = self._make_face_landmarker()
+        x0, y0, side = box
+        crop = np.ascontiguousarray(rgb[y0:y0 + side, x0:x0 + side])
+        img = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=crop)
+        try:
+            fr = self._face_crop_lm.detect_for_video(img, ts)
+        except Exception:
+            fr = None
+        out = self._face_from_result(fr, (w, h), box)
+        if out is None:
+            if self._crop_box is not None:      # the tracked crop lost the face: re-detect once with YuNet
+                self._crop_box = None
+                found = self._yunet_face(frame_bgr)
+                if found is None:
+                    return None
+                box = cm.crop_box_for_face(found[0], found[1], found[2], w, h, CROP_MARGIN, CROP_MIN_SIDE)
+                x0, y0, side = box
+                crop = np.ascontiguousarray(rgb[y0:y0 + side, x0:x0 + side])
+                try:
+                    fr = self._face_crop_lm.detect_for_video(self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=crop), ts + 1)
+                except Exception:
+                    fr = None
+                out = self._face_from_result(fr, (w, h), box)
+            if out is None:
+                return None
+        # re-centre the next crop on this frame's landmarks (pixel bbox of the face mesh)
+        lm_px = out["lm_xy"] * np.array([w, h])
+        cx, cy = lm_px.mean(axis=0)
+        size = float(max(np.ptp(lm_px[:, 0]), np.ptp(lm_px[:, 1])))
+        self._crop_box = cm.crop_box_for_face(cx, cy, size, w, h, CROP_MARGIN, CROP_MIN_SIDE)
+        self.crop_mode = True
+        self.crop_frames += 1
+        return out
 
     def detect(self, frame_bgr: np.ndarray, t_s: float, arm: str = "right") -> Dict:
         """One frame -> raw sample dict (absolute, un-zeroed values)."""
@@ -186,26 +313,21 @@ class Trackers:
 
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         img = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
-        ts = max(int(round(t_s * 1000)), self._last_ts + 1)  # VIDEO mode needs strictly increasing ms
+        ts = max(int(round(t_s * 1000)), self._last_ts + 2)  # VIDEO mode needs strictly increasing ms (+2: the crop path may use ts+1)
         self._last_ts = ts
-        s: Dict = {"t": t_s, "face_ok": False, "pose_ok": False, "arm_ok": False}
-        try:
-            fr = self.face.detect_for_video(img, ts)
-        except Exception:
-            fr = None
-        if fr is not None and fr.face_landmarks and fr.facial_transformation_matrixes:
-            m = np.array(fr.facial_transformation_matrixes[0], dtype=float).reshape(4, 4)
-            r_body, t_mm = cm.head_pose_from_matrix(m)
-            s["face_ok"] = True
-            s["matrix"] = m
-            s["head_angles"] = cm.head_angles_deg(r_body)
-            s["head_trans"] = t_mm
-            blend = {c.category_name: float(c.score) for c in fr.face_blendshapes[0]} if fr.face_blendshapes else {}
-            s["blend"] = blend
-            s["face_raw"] = cm.face_raw_from_blendshapes(blend)
-            lm = np.array([[p.x, p.y] for p in fr.face_landmarks[0]], dtype=float)
-            s["lm_xy"] = lm
-            s["iris_gaze_u"] = cm.iris_gaze_yaw_unit(lm) if len(lm) >= 478 else float("nan")
+        s: Dict = {"t": t_s, "face_ok": False, "pose_ok": False, "arm_ok": False, "face_crop": None}
+        h, w = frame_bgr.shape[:2]
+        face = None
+        if not self.crop_mode:
+            try:
+                fr = self.face.detect_for_video(img, ts)
+            except Exception:
+                fr = None
+            face = self._face_from_result(fr, (w, h), None)
+        if face is None and self.allow_crop:
+            face = self._face_cropped(frame_bgr, rgb, ts)
+        if face is not None:
+            s.update(face)
         if self.pose is not None:
             try:
                 pr = self.pose.detect_for_video(img, ts)
@@ -490,6 +612,7 @@ def build_frames(samples: List[Dict], neutral_seconds: float, rate_hz: float = R
         "torso_valid_frac": float(torso_v.mean()) if len(torso_v) else 0.0,
         "arm_valid_frac": float(arm_v.mean()) if len(arm_v) else 0.0,
         "hips_visible_frac": float(np.mean([bool(s.get("hips_visible", False)) for s in samples if s.get("pose_ok")])) if pose_ok.any() else 0.0,
+        "face_crop_frac": float(np.mean([s.get("face_crop") is not None for s in samples if s["face_ok"]])) if face_ok.any() else 0.0,
     }
     for c in ("head_yaw", "head_pitch", "head_roll", "head_x", "head_y", "head_z", "gaze_yaw", "mouth_open"):
         v = df[c].to_numpy(dtype=float)

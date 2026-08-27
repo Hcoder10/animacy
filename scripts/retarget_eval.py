@@ -123,12 +123,14 @@ def evaluate(prof: Profile, mode: str, humans, native, js_text: str):
         except ImportError:
             res["gaze"] = None
     # (e) readiness
-    used = {"spring": False, "idle": False, "soft_limit": False}
+    used = {"spring": False, "idle": False, "soft_limit": False, "settle": False}
     for m in prof.mapping(mode).values():
         used["spring"] |= m.spring is not None
         used["idle"] |= m.idle is not None
         used["soft_limit"] |= m.soft_limit is not None
-    impl = {"spring": "springStep" in js_text, "idle": "idleValue" in js_text, "soft_limit": "softClip" in js_text}
+        used["settle"] |= getattr(m, "settle", None) is not None
+    impl = {"spring": "springStep" in js_text, "idle": "idleValue" in js_text, "soft_limit": "softClip" in js_text,
+            "settle": "settle" in js_text}
     res["features"] = {k: {"used": used[k], "js": impl[k]} for k in used}
     web_json = os.path.join(ROOT, "web", "robots", f"{prof.name}.json")
     fresh = json.loads(json.dumps(find_robot(prof.name).to_web_json()))

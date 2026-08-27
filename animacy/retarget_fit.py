@@ -167,23 +167,21 @@ def clean_clip(clip: HumanClip) -> HumanClip:
 
 # ---------------------------------------------------------------- retarget stats
 def unclamped_targets(clip: HumanClip, profile: Profile, mode: str = "default",
-                      exclude: Optional[Dict[str, Sequence[str]]] = None) -> pd.DataFrame:
+                      expressive_only: bool = True) -> pd.DataFrame:
     """Rest-relative mapped values with deadband but WITHOUT soft limit / clamp:
-    linear in the gains, which is what a gain fit needs. ``exclude[joint]``
-    lists channels to leave out of that joint's mix (e.g. the gaze joint's
-    compensation terms, which are derived, not fitted)."""
+    linear in the gains, which is what a gain fit needs. With
+    ``expressive_only`` the ``tag: gaze_comp`` terms (derived, not fitted) are
+    left out."""
     mp = profile.mapping(mode)
-    exclude = exclude or {}
     out = {"t": clip.frames["t"].to_numpy(dtype=np.float64)}
     for j in profile.joints:
         m = mp.get(j.name)
         if m is None:
             out[j.name] = np.zeros(len(clip.frames))
             continue
-        skip = set(exclude.get(j.name, ()))
         x = np.zeros(len(clip.frames), dtype=np.float64)
         for term in m.terms():
-            if term.from_ in skip:
+            if expressive_only and term_key(term)[1]:
                 continue
             x += term.gain * np.nan_to_num(clip.frames[term.from_].to_numpy(dtype=np.float64), nan=0.0)
         out[j.name] = _deadband(x, m.deadband) + m.offset
@@ -329,12 +327,17 @@ _STAMP_RE = re.compile(r"\s*#\s*fitted by scripts/retarget_fit\.py[^\n]*$")
 
 
 def _fmt(g: float) -> str:
-    s = f"{g:.4g}"
+    s = f"{g:.5g}"
     if "e" in s or "E" in s:
-        s = f"{g:.6f}".rstrip("0").rstrip(".")
+        s = f"{g:.7f}".rstrip("0").rstrip(".")
     if "." not in s:
         s += ".0"
     return s
+
+
+def as_written(g: float) -> float:
+    """The value a gain will have after :func:`rewrite_gains` rounds it."""
+    return float(_fmt(g))
 
 
 def _gain_text(existing: Optional[str], g: float) -> str:
@@ -352,15 +355,30 @@ def _stamp(line: str, stamp: str) -> str:
     return line
 
 
-def rewrite_gains(text: str, mode: str, gains: Dict[str, Dict[str, float]], stamp: str) -> str:
-    """Set ``gains[joint][channel]`` in the ``retarget.<mode>`` block of a
-    ROBOT.md text; every other byte is preserved. Terms that do not exist are
-    an error (the fitter never invents structure — add the term by hand first)."""
+GAZE_COMP = "gaze_comp"
+
+
+def term_key(term) -> Tuple[str, bool]:
+    """(channel, is_gaze_comp): a joint may carry an expressive term and a
+    derived compensation term for the same channel (``tag: gaze_comp``)."""
+    return term.from_, getattr(term, "tag", None) == GAZE_COMP
+
+
+def _line_key(line: str, ch: str) -> Tuple[str, bool]:
+    return ch, bool(re.search(r"tag:\s*" + GAZE_COMP, line))
+
+
+def rewrite_gains(text: str, mode: str, gains: Dict[str, Dict], stamp: str) -> str:
+    """Set ``gains[joint][key]`` in the ``retarget.<mode>`` block of a ROBOT.md
+    text, where ``key`` is a channel name or a ``(channel, is_gaze_comp)`` pair
+    (see :func:`term_key`); every other byte is preserved. Terms that do not
+    exist are an error (the fitter never invents structure — add the term by
+    hand first)."""
     lines = text.split("\n")
     out = []
     in_front, in_retarget, cur_mode, cur_joint = True, False, None, None
     retarget_indent = mode_indent = joint_indent = None
-    pending = {j: dict(ch) for j, ch in gains.items()}
+    pending = {j: {(k if isinstance(k, tuple) else (k, False)): g for k, g in ch.items()} for j, ch in gains.items()}
     dashes = 0
     for line in lines:
         if line.strip() == "---":
@@ -383,13 +401,13 @@ def rewrite_gains(text: str, mode: str, gains: Dict[str, Dict[str, float]], stam
                     joint_indent = indent
                     cur_joint = key
                     ms = _SINGLE_RE.match(line)
-                    if ms and cur_joint in pending and ms.group("ch") in pending[cur_joint]:
-                        g = pending[cur_joint].pop(ms.group("ch"))
+                    if ms and cur_joint in pending and _line_key(line, ms.group("ch")) in pending[cur_joint]:
+                        g = pending[cur_joint].pop(_line_key(line, ms.group("ch")))
                         line = _stamp(f"{ms.group('pre')}{_gain_text(ms.group('gain'), g)}{ms.group('post')}", stamp)
                 elif cur_mode == mode and cur_joint in pending and stripped.startswith("-"):
                     mt = _TERM_RE.match(line)
-                    if mt and mt.group("ch") in pending[cur_joint]:
-                        g = pending[cur_joint].pop(mt.group("ch"))
+                    if mt and _line_key(line, mt.group("ch")) in pending[cur_joint]:
+                        g = pending[cur_joint].pop(_line_key(line, mt.group("ch")))
                         line = _stamp(f"{mt.group('pre')}{_gain_text(mt.group('gain'), g)}{mt.group('post')}", stamp)
         out.append(line)
     left = {j: ch for j, ch in pending.items() if ch}
@@ -398,23 +416,50 @@ def rewrite_gains(text: str, mode: str, gains: Dict[str, Dict[str, float]], stam
     return "\n".join(out)
 
 
-def current_gains(profile: Profile, mode: str) -> Dict[str, Dict[str, float]]:
-    return {jn: {t.from_: t.gain for t in m.terms()} for jn, m in profile.mapping(mode).items()}
+def current_gains(profile: Profile, mode: str) -> Dict[str, Dict[Tuple[str, bool], float]]:
+    """``{joint: {(channel, is_gaze_comp): gain}}``."""
+    return {jn: {term_key(t): t.gain for t in m.terms()} for jn, m in profile.mapping(mode).items()}
 
 
-def scaled_gains(profile: Profile, mode: str, mults: Dict[str, float], fixed: Optional[Dict[str, Dict[str, float]]] = None) -> Dict[str, Dict[str, float]]:
-    """Every term gain × its joint's multiplier, except ``fixed[joint][channel]`` which are set verbatim."""
+def scaled_gains(profile: Profile, mode: str, mults: Dict[str, float],
+                 fixed: Optional[Dict[str, Dict[Tuple[str, bool], float]]] = None) -> Dict[str, Dict[Tuple[str, bool], float]]:
+    """Every expressive term gain × its joint's multiplier; ``fixed[joint][key]``
+    (the derived compensation terms) are set verbatim and never scaled."""
     fixed = fixed or {}
-    out: Dict[str, Dict[str, float]] = {}
+    out: Dict[str, Dict[Tuple[str, bool], float]] = {}
     for jn, m in profile.mapping(mode).items():
         k = mults.get(jn, 1.0)
         out[jn] = {}
         for t in m.terms():
-            if jn in fixed and t.from_ in fixed[jn]:
-                out[jn][t.from_] = fixed[jn][t.from_]
+            key = term_key(t)
+            if jn in fixed and key in fixed[jn]:
+                out[jn][key] = fixed[jn][key]
+            elif key[1]:
+                out[jn][key] = t.gain          # a comp term with no new value: keep
             else:
-                out[jn][t.from_] = t.gain * k
+                out[jn][key] = t.gain * k
     return out
+
+
+def set_gains(profile: Profile, mode: str, gains: Dict[str, Dict[Tuple[str, bool], float]]) -> Profile:
+    """A deep copy of ``profile`` with the given term gains installed."""
+    import copy
+
+    p2 = copy.deepcopy(profile)
+    for jn, ch in gains.items():
+        m = p2.mapping(mode)[jn]
+        if m.mix is not None:
+            for t in m.mix:
+                if term_key(t) in ch:
+                    t.gain = ch[term_key(t)]
+        elif (m.from_, False) in ch:
+            m.gain = ch[(m.from_, False)]
+    return p2
+
+
+def gaze_comp_terms(profile: Profile, mode: str, gaze_joint: str) -> Dict[str, float]:
+    """The ``tag: gaze_comp`` terms currently on the gaze joint, by channel."""
+    return {t.from_: t.gain for t in profile.mapping(mode)[gaze_joint].terms() if term_key(t)[1]}
 
 
 # ---------------------------------------------------------------- tables
