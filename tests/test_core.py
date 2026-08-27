@@ -70,7 +70,7 @@ def test_retarget_offline_is_speed_legal_and_in_bounds(name):
         v = t[j.name].to_numpy()
         assert v.min() >= j.min - 1e-6 and v.max() <= j.max + 1e-6, j.name
         speed = np.abs(np.diff(v)) / dt
-        assert speed.max() <= j.max_speed * 1.05, (j.name, speed.max())
+        assert speed.max() <= j.max_speed * (1 + 1e-6), (j.name, speed.max())
 
 
 def test_stretch_only_widens_impossible_segments():
@@ -80,7 +80,7 @@ def test_stretch_only_widens_impossible_segments():
     p = Profile(**spec)
     import pandas as pd
     tbl = pd.DataFrame({"t": [0, 0.1, 0.2, 0.3], "a": [0, 5, 50, 55]})
-    out = stretch_timeline(tbl["t"].to_numpy(dtype=float), tbl, p)
+    out = stretch_timeline(tbl["t"].to_numpy(dtype=float), tbl, p, margin=1.0)
     assert np.isclose(out[1] - out[0], 0.1)          # 50 deg/s: untouched
     assert np.isclose(out[2] - out[1], 0.45)         # 450 deg/s → stretched to 45/100
     assert np.isclose(out[3] - out[2], 0.1)

@@ -23,7 +23,6 @@ import torch
 import torch.nn.functional as F
 
 from ..profile import load_profile, robots_root
-from ..schema import RATE_HZ
 from .a2m import AudioToMotion, BigramPrior
 from .data import (CHUNK_FRAMES, MODEL_CHANNELS, SEGMENT, a2m_chunks, compute_stats, load_clips,
                    make_synthetic_clips, run_code_sequences, split_clips, summarise, vq_segments)
@@ -76,7 +75,7 @@ def train_vq(segs_tr: np.ndarray, segs_va: np.ndarray, stats, args, device: str,
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            tot += float(loss) * len(xb)
+            tot += loss.item() * len(xb)
             nb += 1
         model.eval()
         rec: Dict = {"epoch": epoch, "train_loss": tot / max(len(xt), 1)}
@@ -123,7 +122,7 @@ def _eval_a2m(model: AudioToMotion, ch: Dict[str, torch.Tensor], causal: bool) -
 def train_a2m(chunks_tr: Dict[str, np.ndarray], chunks_va: Dict[str, np.ndarray], args, device: str, log) -> tuple:
     model = AudioToMotion(n_codes=args.n_codes, d_model=args.d_model, n_layers=args.n_layers, n_heads=args.n_heads,
                           dropout=args.dropout).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.02)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.a2m_lr, weight_decay=args.weight_decay)
     tr = {k: torch.from_numpy(v) for k, v in chunks_tr.items()}
     va = {k: torch.from_numpy(v).to(device) for k, v in chunks_va.items()}
     n_tr, n_va = len(tr["codes"]), len(va["codes"])
@@ -143,6 +142,15 @@ def train_a2m(chunks_tr: Dict[str, np.ndarray], chunks_va: Dict[str, np.ndarray]
             f = tr["features"][idx].to(device)
             if args.feat_noise > 0:
                 f = f + args.feat_noise * torch.randn_like(f)
+            if args.time_mask > 0:
+                # SpecAugment-style: blank up to `time_mask` spans of 1-4 steps per chunk
+                B, L = f.shape[:2]
+                pos = torch.arange(L, device=device)[None, None, :]
+                starts = torch.randint(0, L, (B, args.time_mask, 1), device=device)
+                widths = torch.randint(1, 5, (B, args.time_mask, 1), device=device)
+                on = torch.rand(B, args.time_mask, 1, device=device) < 0.5
+                blank = (((pos >= starts) & (pos < starts + widths)) & on).any(dim=1)
+                f = f.masked_fill(blank[:, :, None], 0.0)
             s, c, m = tr["speaking"][idx].to(device), tr["codes"][idx].to(device), tr["mask"][idx].to(device)
             causal = bool(rng.random() < 0.5)          # one set of weights serves talk and listen
             n_causal += int(causal)
@@ -152,7 +160,7 @@ def train_a2m(chunks_tr: Dict[str, np.ndarray], chunks_va: Dict[str, np.ndarray]
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            tot += float(loss)
+            tot += loss.item()
             nb += 1
         rec: Dict = {"epoch": epoch, "train_loss": tot / max(nb, 1), "causal_batches": n_causal, "batches": nb}
         if n_va:
@@ -185,6 +193,11 @@ def _fmt(x, nd=3):
     return str(x)
 
 
+def _thin(history: List[Dict], every: int = 5, keep=None) -> List[Dict]:
+    n = len(history)
+    return [r for i, r in enumerate(history) if i == 0 or (i + 1) % every == 0 or i == n - 1 or r.get("epoch") == keep]
+
+
 def write_report(path: str, m: Dict, command: str) -> None:
     d, sp, vq, a2m = m["data"], m["split"], m["vq"], m["a2m"]
     L = []
@@ -200,8 +213,11 @@ def write_report(path: str, m: Dict, command: str) -> None:
     L.append("## Data\n")
     L.append(f"- clips: {d['n_clips']} ({d['n_with_audio']} with audio), subjects: {d['n_subjects']}, sources: {d['sources']}")
     L.append(f"- minutes: total {d['total_minutes']}, valid (face_valid runs >= 1 s) {d['valid_minutes']}, valid with audio {d['valid_minutes_with_audio']}")
-    L.append(f"- split: by {sp['mode']}; held out {sp['held_out_groups']} -> train {m['n_train_clips']} / val {m['n_val_clips']} clips"
+    L.append(f"- split: by {sp['mode']}; held out {sp.get('held_out_clips', sp['held_out_groups'])} "
+             f"({sp.get('held_out_valid_seconds', '?')} s valid) -> train {m['n_train_clips']} / val {m['n_val_clips']} clips"
              + ("  **(LEAKY: time split inside a single group)**" if sp.get("leaky") else ""))
+    if m.get("excluded"):
+        L.append(f"- excluded clips: {m['excluded']}")
     L.append("")
     L.append("## Stage 1: VQ tokenizer\n")
     L.append(f"- {vq['n_codes']} codes x {vq['dim']}d, one code per 2 frames, {vq['n_train_segments']} train / {vq['n_val_segments']} val segments of 8 frames")
@@ -211,15 +227,17 @@ def write_report(path: str, m: Dict, command: str) -> None:
     L.append("")
     L.append("| epoch | train loss | val MAE | used (train) | perplexity |")
     L.append("|---|---|---|---|---|")
-    for r in vq["history"]:
+    for r in _thin(vq["history"]):
         L.append(f"| {r['epoch']} | {r['train_loss']:.5f} | {_fmt(r.get('val_mae'), 4)} | {r['train_used_codes']} | {r['train_perplexity']:.1f} |")
     L.append("")
     L.append("## Stage 2: audio -> codes\n")
     L.append(f"- Transformer d {a2m['d_model']}, {a2m['n_layers']} layers, {a2m['n_heads']} heads; {a2m['n_train_chunks']} train / {a2m['n_val_chunks']} val chunks (2 s); causal/non-causal 50/50")
     L.append("")
+    best_ep = min(a2m["history"], key=lambda r: r.get("val_noncausal", {}).get("nll", float("inf")))["epoch"] if a2m["history"] else None
+    L.append(f"(best held-out epoch {best_ep} is the saved checkpoint; every 5th epoch shown)\n")
     L.append("| epoch | train CE | val NLL (talk) | top1 | val NLL (listen) | top1 |")
     L.append("|---|---|---|---|---|---|")
-    for r in a2m["history"]:
+    for r in _thin(a2m["history"], keep=best_ep):
         vn, vc = r.get("val_noncausal", {}), r.get("val_causal", {})
         L.append(f"| {r['epoch']} | {r['train_loss']:.4f} | {_fmt(vn.get('nll'))} | {_fmt(vn.get('acc'))} | {_fmt(vc.get('nll'))} | {_fmt(vc.get('acc'))} |")
     L.append("")
@@ -240,13 +258,24 @@ def write_report(path: str, m: Dict, command: str) -> None:
         L.append(f"Beat = head |angular velocity| peaks (prominence {ev['beat']['prominence_deg_per_s']:.1f} deg/s) within +-150 ms. "
                  f"Stillness = fraction of frames with head speed < {ev['stillness']['threshold_deg_per_s']} deg/s (ground truth {ev['stillness']['gt']:.3f}). "
                  "W1 = mean over channels of Wasserstein-1 between |velocity| histograms, relative to the ground-truth mean speed.\n")
-        L.append("| condition | beat recall | beat precision | gt/gen peaks | stillness | W1 rel |")
-        L.append("|---|---|---|---|---|---|")
+        L.append("| condition | head-beat recall | head-beat precision | gt/gen peaks | all-channel beat recall | all-ch precision | stillness | W1 rel |")
+        L.append("|---|---|---|---|---|---|---|---|")
         for cond in ("model", "model_shuffled", "model_causal", "retrieval", "retrieval_shuffled"):
             if cond in ev["beat"]:
-                b, v = ev["beat"][cond], ev["velocity"][cond]
-                L.append(f"| {cond} | {b['recall']:.3f} | {b['precision']:.3f} | {b['n_gt_peaks']}/{b['n_gen_peaks']} | {ev['stillness'][cond]:.3f} | {v['w1_relative_mean']:.3f} |")
+                b, v, bA = ev["beat"][cond], ev["velocity"][cond], ev["beat_all_channels"][cond]
+                L.append(f"| {cond} | {b['recall']:.3f} | {b['precision']:.3f} | {b['n_gt_peaks']}/{b['n_gen_peaks']} | "
+                         f"{bA['recall']:.3f} | {bA['precision']:.3f} | {ev['stillness'][cond]:.3f} | {v['w1_relative_mean']:.3f} |")
         L.append("")
+        L.append("The verdict uses the head-beat recall (docs/MODEL.md). The all-channel column counts brows and mouth too, "
+                 "which is where an audio model learns first (mouth/brow onsets) and which the antennas / lamp head-tip render.\n")
+        if m.get("sampling_sweep"):
+            L.append("### Sampling sweep (held-out, model only; defaults above are the reported numbers)\n")
+            L.append("| temperature | bigram weight | head-beat recall | vs shuffled | precision | all-ch recall | vs shuffled | stillness | W1 rel |")
+            L.append("|---|---|---|---|---|---|---|---|---|")
+            for r in m["sampling_sweep"]:
+                L.append(f"| {r['temperature']} | {r['bigram_weight']} | {r['head_beat_recall']:.3f} | {r['head_beat_recall_shuffled']:.3f} | "
+                         f"{r['head_beat_precision']:.3f} | {r['all_beat_recall']:.3f} | {r['all_beat_recall_shuffled']:.3f} | {r['stillness']:.3f} | {r['w1_relative_mean']:.3f} |")
+            L.append("")
         L.append("Per-channel W1 (deg/s or mm/s or unit/s):\n")
         L.append("| channel | gt mean speed | " + " | ".join(k for k in ("model", "model_shuffled", "retrieval") if k in ev["velocity"]) + " |")
         L.append("|---|---|" + "---|" * len([k for k in ("model", "model_shuffled", "retrieval") if k in ev["velocity"]]))
@@ -265,8 +294,12 @@ def write_report(path: str, m: Dict, command: str) -> None:
         L.append("")
         vd = ev["verdict"]
         L.append("### Verdict\n")
-        L.append(f"- model beat recall {_fmt(vd['model_beat_recall'])} vs shuffled-audio {_fmt(vd['model_shuffled_beat_recall'])} -> "
-                 + ("**model beats its shuffle**" if vd["model_beats_shuffled_audio_on_beat_recall"] else "**MODEL DOES NOT BEAT SHUFFLED AUDIO**"))
+        L.append(f"- model head-beat recall {_fmt(vd['model_beat_recall'])} vs shuffled-audio {_fmt(vd['model_shuffled_beat_recall'])} "
+                 f"(margin {_fmt(vd.get('margin'))}, required >= {vd.get('required_margin', 0)}) -> "
+                 + ("**model beats its shuffle**" if vd["model_beats_shuffled_audio_on_beat_recall"] else "**MODEL DOES NOT BEAT SHUFFLED AUDIO by the required margin**"))
+        nl = vd.get("nll_model_vs_unigram_floor") or [None, None]
+        L.append(f"- held-out code NLL {_fmt(nl[0])} vs unigram floor {_fmt(nl[1])} -> "
+                 + ("model below the floor (learned something)" if nl[0] is not None and nl[1] is not None and nl[0] < nl[1] else "model NOT below the unigram floor"))
         L.append(f"- retrieval beat recall {_fmt(vd['retrieval_beat_recall'])} vs shuffled {_fmt(vd['retrieval_shuffled_beat_recall'])}")
         L.append(f"- default backend for the demo: **{vd['default_backend']}**")
         L.append("")
@@ -307,16 +340,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--d-model", type=int, default=192)
     p.add_argument("--n-layers", type=int, default=4)
     p.add_argument("--n-heads", type=int, default=4)
-    p.add_argument("--dropout", type=float, default=0.1)
-    p.add_argument("--feat-noise", type=float, default=0.1)
+    p.add_argument("--dropout", type=float, default=0.2)
+    p.add_argument("--feat-noise", type=float, default=0.2)
+    p.add_argument("--time-mask", type=int, default=2, help="max blanked spans per chunk (0 = off)")
+    p.add_argument("--weight-decay", type=float, default=0.05)
+    p.add_argument("--chunk-stride", type=int, default=15, help="frames between 2 s training chunks")
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--a2m-batch-size", type=int, default=32)
-    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--lr", type=float, default=3e-4, help="VQ learning rate")
+    p.add_argument("--a2m-lr", type=float, default=2e-4)
     p.add_argument("--val-frac", type=float, default=0.2)
+    p.add_argument("--holdout", nargs="*", default=[], help="clip or subject names to hold out (overrides --val-frac)")
+    p.add_argument("--exclude", nargs="*", default=[], help="clip names to drop entirely")
     p.add_argument("--max-retrieval", type=int, default=3000)
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--bigram-weight", type=float, default=0.5)
     p.add_argument("--max-eval-runs", type=int, default=0, help="0 = all held-out runs")
+    p.add_argument("--sweep", action="store_true", help="also evaluate a temperature x bigram-weight grid on the held-out split")
     p.add_argument("--export-dir", default="web/models")
     p.add_argument("--no-export", action="store_true")
     p.add_argument("--robots", nargs="*", default=["lamp", "reachy_mini"])
@@ -349,6 +389,10 @@ def main(argv=None) -> int:
         clip_dir = args.data
     log(f"-- loading clips from {clip_dir}")
     clips = load_clips(clip_dir)
+    if args.exclude:
+        dropped = [c.name for c in clips if c.name in set(args.exclude)]
+        clips = [c for c in clips if c.name not in set(args.exclude)]
+        log(f"   excluded {dropped} (--exclude)")
     if not clips:
         log("no usable clips (need motion.parquet + audio.wav with face_valid runs >= 1 s). Try --synthetic.")
         return 2
@@ -358,7 +402,7 @@ def main(argv=None) -> int:
         f"sources {summary['sources']}")
     if summary["valid_minutes_with_audio"] < 3.0 and is_real:
         flags.append(f"TINY_DATA: only {summary['valid_minutes_with_audio']} valid minutes with audio; numbers below are not representative")
-    train_clips, val_clips, split_info = split_clips(clips, args.val_frac, args.seed)
+    train_clips, val_clips, split_info = split_clips(clips, args.val_frac, args.seed, holdout=args.holdout or None)
     if split_info.get("leaky"):
         flags.append("LEAKY_SPLIT: a single subject/clip was split in time; held-out numbers overstate generalisation")
     if not val_clips:
@@ -390,7 +434,8 @@ def main(argv=None) -> int:
     # --- stage 2
     t2 = time.time()
     log("-- stage 2: audio -> codes")
-    ch_tr, ch_va = a2m_chunks(train_clips, stats, vq.encode), a2m_chunks(val_clips, stats, vq.encode)
+    ch_tr = a2m_chunks(train_clips, stats, vq.encode, stride=args.chunk_stride)
+    ch_va = a2m_chunks(val_clips, stats, vq.encode, stride=CHUNK_FRAMES // 2)
     if len(ch_tr["codes"]) == 0:
         log("no audio-aligned chunks to train on (do the clips have audio.wav?)")
         return 2
@@ -432,18 +477,36 @@ def main(argv=None) -> int:
                   bigram_weight=args.bigram_weight, max_runs=args.max_eval_runs or None)
     if "verdict" in ev and not ev["verdict"]["model_beats_shuffled_audio_on_beat_recall"]:
         flags.append("MODEL_DOES_NOT_BEAT_SHUFFLED_AUDIO: retrieval ships as the default backend")
+    sweep = []
+    if args.sweep:
+        log("-- sampling sweep on the held-out split (model only; the defaults above stay the reported numbers)")
+        for T in (0.5, 0.8, 1.0):
+            for w in (0.0, 0.5, 1.0):
+                e2 = evaluate(model, None, val_clips, [], seed=args.seed, temperature=T, bigram_weight=w,
+                              max_runs=args.max_eval_runs or None, verbose=False)
+                b, bA = e2["beat"], e2["beat_all_channels"]
+                row = {"temperature": T, "bigram_weight": w,
+                       "head_beat_recall": b["model"]["recall"], "head_beat_recall_shuffled": b["model_shuffled"]["recall"],
+                       "head_beat_precision": b["model"]["precision"],
+                       "all_beat_recall": bA["model"]["recall"], "all_beat_recall_shuffled": bA["model_shuffled"]["recall"],
+                       "stillness": e2["stillness"]["model"], "w1_relative_mean": e2["velocity"]["model"]["w1_relative_mean"]}
+                sweep.append(row)
+                log(f"   T={T} w={w}: head-beat recall {row['head_beat_recall']:.3f} vs shuffled {row['head_beat_recall_shuffled']:.3f} "
+                    f"(prec {row['head_beat_precision']:.3f}); all-ch {row['all_beat_recall']:.3f} vs {row['all_beat_recall_shuffled']:.3f}; "
+                    f"still {row['stillness']:.3f}; W1 rel {row['w1_relative_mean']:.3f}")
     timing["metrics"] = time.time() - t4
 
     metrics = {"command": command, "device": device, "flags": flags, "data": summary, "split": split_info,
+               "excluded": list(args.exclude),
                "n_train_clips": len(train_clips), "n_val_clips": len(val_clips), "vq": vq_info, "a2m": a2m_info,
-               "eval": ev, "timing_s": timing}
+               "eval": ev, "sampling_sweep": sweep, "timing_s": timing}
 
     # --- export
     if not args.no_export:
         t5 = time.time()
         log(f"-- export -> {args.export_dir}")
         model.info = info
-        rep = export_bundle(model, index, args.export_dir, metrics)
+        rep = export_bundle(model, index, args.export_dir, ev)
         for k in ("a2m", "vq_decoder"):
             r = rep[k]
             log(f"   {os.path.basename(r['path'])}: {r['bytes'] / 1e6:.2f} MB ({r['exporter']}), max abs diff vs torch {r['max_abs_diff']:.2e} -> {'OK' if r['ok'] else 'MISMATCH'}")

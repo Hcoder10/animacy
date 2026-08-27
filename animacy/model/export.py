@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 
 from ..features import N_FEATS
-from .data import FEATURE_CONTRACT, FRAMES_PER_CODE, MODEL_CHANNELS, NORM_CLIP
+from .data import DETREND_HZ, FEATURE_CONTRACT, FRAMES_PER_CODE, MODEL_CHANNELS, NORM_CLIP, POSE_CHANNELS
 from .infer import DEFAULT_SMOOTH_HZ, MotionModel
 from .retrieval import RetrievalIndex
 
@@ -112,7 +112,8 @@ def export_vq_decoder(model: MotionModel, path: str, verify_lengths=(15, 61), to
     codes = torch.randint(0, vq.n_codes, (1, 15), dtype=torch.int64)
     exporter = _export(wrapper, (codes,), path, ["codes"], ["motion"], {"codes": {1: "L"}, "motion": {1: "T"}})
     sess = _ort_session(path)
-    worst = 0.0
+    worst_raw, worst_std = 0.0, 0.0
+    std = vq.stats["std"][None, None, :]
     rng = np.random.default_rng(0)
     for L in verify_lengths:
         c = rng.integers(0, vq.n_codes, size=(1, L)).astype(np.int64)
@@ -121,10 +122,16 @@ def export_vq_decoder(model: MotionModel, path: str, verify_lengths=(15, 61), to
         got = sess.run(None, {"codes": c})[0]
         assert got.shape == (1, FRAMES_PER_CODE * L, len(MODEL_CHANNELS)), got.shape
         # the graph must also agree with the python decode path (denormalised)
-        py = vq.denormalise(vq.decode(c[0]))
-        worst = max(worst, float(np.abs(got - ref).max()), float(np.abs(got[0] - py).max()))
-    ok = worst < tol
-    return {"path": path, "bytes": os.path.getsize(path), "exporter": exporter, "max_abs_diff": worst, "ok": ok,
+        py = vq.denormalise(vq.decode(c[0]))[None]
+        for other in (ref, py):
+            d = np.abs(got - other)
+            worst_raw = max(worst_raw, float(d.max()))
+            worst_std = max(worst_std, float((d / std).max()))
+    # outputs are in canonical units (mm, deg): the tolerance applies in standardised units,
+    # the raw-unit difference (float32 accumulation order) is reported alongside
+    ok = worst_std < tol
+    return {"path": path, "bytes": os.path.getsize(path), "exporter": exporter, "max_abs_diff": worst_std,
+            "max_abs_diff_units": "standardised (per-channel sd)", "max_abs_diff_raw_units": worst_raw, "ok": ok,
             "verify_lengths": list(verify_lengths), "tol": tol}
 
 
@@ -174,6 +181,8 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
         "sampling": {"temperature": 0.8, "bigram_weight": 0.5,
                      "rule": "softmax(logits / temperature + bigram_weight * bigram[prev]) per step, prev = last sampled code"},
         "smoothing": {"kind": "zero-phase butterworth order 2", "cutoff_hz": DEFAULT_SMOOTH_HZ},
+        "detrend": {"channels": list(POSE_CHANNELS), "cutoff_hz": DETREND_HZ,
+                    "meaning": "pose channels are the residual above cutoff_hz: output motion is centred on neutral; add the gaze overlay for where to look"},
         "neutral": {"eye_open_l": 0.6, "eye_open_r": 0.6, "gaze_yaw": 0.0, "gaze_pitch": 0.0},
         "retrieval": {"file": "retrieval.json", "bin": "retrieval.bin"} if index is not None else None,
         "default_backend": verdict.get("default_backend", "retrieval"),
@@ -188,3 +197,40 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
     report["model_json"] = os.path.join(out_dir, "model.json")
     report["total_bytes"] = sum(v.get("bytes", 0) for v in report.values() if isinstance(v, dict))
     return report
+
+
+def main(argv=None) -> int:
+    """``python -m animacy.model.export --ckpt checkpoints/v1 --out web/models``: re-export a
+    trained checkpoint (its metrics.json, if present, supplies the verdict / default backend)."""
+    import argparse
+
+    p = argparse.ArgumentParser(description=main.__doc__)
+    p.add_argument("--ckpt", default="checkpoints/v1")
+    p.add_argument("--out", default="web/models")
+    p.add_argument("--tol", type=float, default=1e-4)
+    a = p.parse_args(argv)
+    model = MotionModel.load(a.ckpt, "cpu")
+    idx_path = os.path.join(a.ckpt, "retrieval.json")
+    index = RetrievalIndex.load(idx_path) if os.path.exists(idx_path) else None
+    m_path = os.path.join(a.ckpt, "metrics.json")
+    metrics = json.load(open(m_path, encoding="utf-8")) if os.path.exists(m_path) else None
+    rep = export_bundle(model, index, a.out, (metrics or {}).get("eval"), tol=a.tol)
+    ok = True
+    for k in ("a2m", "vq_decoder"):
+        r = rep[k]
+        ok &= bool(r["ok"])
+        print(f"{os.path.basename(r['path'])}: {r['bytes'] / 1e6:.2f} MB ({r['exporter']}), max abs diff vs torch "
+              f"{r['max_abs_diff']:.2e} -> {'OK' if r['ok'] else 'MISMATCH'}")
+    if "retrieval" in rep:
+        print(f"retrieval: {rep['retrieval']['n_windows']} windows, {rep['retrieval']['bytes'] / 1e6:.2f} MB")
+    print(f"bundle {rep['total_bytes'] / 1e6:.2f} MB -> {a.out}; default backend = "
+          f"{json.load(open(rep['model_json'], encoding='utf-8'))['default_backend']}")
+    if metrics is not None:
+        metrics["export"] = rep
+        with open(m_path, "w", encoding="utf-8") as fh:
+            json.dump(metrics, fh, indent=1, default=float)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

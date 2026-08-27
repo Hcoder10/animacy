@@ -32,14 +32,61 @@ FRAMES_PER_CODE = 2          # 30 Hz frames -> 15 Hz codes
 SEGMENT = 8                  # frames per VQ training window
 SEGMENT_STRIDE = 4
 CHUNK_FRAMES = 60            # 2 s a2m training chunks
-CHUNK_STRIDE = 30
+CHUNK_STRIDE = 15            # 0.5 s hop: overlapping chunks, the cheapest augmentation there is
 CHUNK_STEPS = CHUNK_FRAMES // FRAMES_PER_CODE
 MIN_RUN = 30                 # 1 s of continuous face tracking
 NORM_CLIP = 4.0              # standardised motion is clipped to +-4 sd (decoder range)
 FEATURE_CONTRACT = "animacy.features.v1"
+# Pose channels are modelled as the residual above DETREND_HZ: where a person *holds*
+# their head is not something speech predicts, the nods / tilts / glances on top of it
+# are. The robot therefore stays centred and the gaze overlay owns the baseline.
+DETREND_HZ = 0.3
+POSE_CHANNELS = ["head_yaw", "head_pitch", "head_roll", "head_x", "head_y", "head_z",
+                 "torso_lean_fwd", "torso_lean_side", "torso_yaw"]
+# Training motion is low-passed at SMOOTH_HZ inside each run: landmark jitter is not motion,
+# and a 512 codebook will happily spend its entries on it (real-data perplexity 455 before this).
+SMOOTH_HZ = 8.0
 
 _FACE_IDX = [i for i, c in enumerate(MODEL_CHANNELS) if c in FACE_CHANNELS]
-_HEAD_ANGLE_IDX = [MODEL_CHANNELS.index(c) for c in ("head_yaw", "head_pitch", "head_roll")]
+_POSE_IDX = [MODEL_CHANNELS.index(c) for c in POSE_CHANNELS]
+
+
+def detrend_runs(motion: np.ndarray, runs: Sequence[Tuple[int, int]], cutoff_hz: float = DETREND_HZ,
+                 rate_hz: float = RATE_HZ) -> np.ndarray:
+    """Subtract a zero-phase low-pass (``cutoff_hz``) of the pose channels inside each run."""
+    from scipy.signal import butter, filtfilt
+
+    out = np.array(motion, dtype=np.float32, copy=True)
+    if not cutoff_hz:
+        return out
+    b, a = butter(2, cutoff_hz / (0.5 * rate_hz))
+    for s, e in runs:
+        seg = out[s:e, _POSE_IDX].astype(np.float64)
+        if len(seg) < 12:
+            base = seg.mean(axis=0, keepdims=True)
+        else:
+            base = filtfilt(b, a, seg, axis=0, padlen=min(9, len(seg) - 1))
+        out[s:e, _POSE_IDX] = (seg - base).astype(np.float32)
+    return out
+
+
+def smooth_runs(motion: np.ndarray, runs: Sequence[Tuple[int, int]], cutoff_hz: float = SMOOTH_HZ,
+                rate_hz: float = RATE_HZ) -> np.ndarray:
+    """Zero-phase low-pass of every channel inside each run; bounded channels stay in bounds."""
+    from scipy.signal import butter, filtfilt
+
+    out = np.array(motion, dtype=np.float32, copy=True)
+    if not cutoff_hz:
+        return out
+    b, a = butter(2, min(cutoff_hz / (0.5 * rate_hz), 0.99))
+    lo = np.array([BOUNDS[c][0] for c in MODEL_CHANNELS], np.float32)
+    hi = np.array([BOUNDS[c][1] for c in MODEL_CHANNELS], np.float32)
+    for s, e in runs:
+        if e - s < 12:
+            continue
+        seg = filtfilt(b, a, out[s:e].astype(np.float64), axis=0, padlen=min(9, e - s - 1))
+        out[s:e] = np.clip(seg, lo, hi).astype(np.float32)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +156,7 @@ def clip_to_data(clip: HumanClip, name: str) -> Optional[ClipData]:
     motion = np.nan_to_num(motion, nan=0.0, posinf=0.0, neginf=0.0)   # torso NaN -> neutral
     speaking = (np.nan_to_num(f["speaking"].to_numpy(dtype=np.float32)) > 0).astype(np.int64)
     runs = contiguous_runs(valid, MIN_RUN)
+    motion = smooth_runs(detrend_runs(motion, runs), runs)
     has_audio = clip.audio is not None and len(clip.audio) > 0
     if has_audio:
         features = audio_features(_to_16k(clip.audio, clip.sr), FEAT_SR, n_ticks=n)
@@ -175,23 +223,50 @@ def summarise(clips: Sequence[ClipData]) -> Dict:
 # ---------------------------------------------------------------------------
 # split
 # ---------------------------------------------------------------------------
-def split_clips(clips: Sequence[ClipData], val_frac: float = 0.2, seed: int = 0):
-    """Hold out whole groups (subject if known, else clip). With a single group
-    the only option is a time split inside each run: leaky, and flagged."""
+def split_clips(clips: Sequence[ClipData], val_frac: float = 0.2, seed: int = 0,
+                holdout: Optional[Sequence[str]] = None):
+    """Hold out whole groups (subject if known, else clip). ``holdout`` names clips
+    or subjects to hold out explicitly; otherwise, deterministically the group
+    whose valid duration is nearest ``val_frac`` of the corpus (a random pick on
+    six speakers once held out a 24 s outlier), adding groups only while the
+    hold-out is under half the target. With a single group the only option is a
+    time split inside each run: leaky, and flagged."""
     groups: Dict[str, List[ClipData]] = {}
     for c in clips:
         groups.setdefault(c.group, []).append(c)
     keys = sorted(groups)
+    if holdout:
+        wanted = set(holdout)
+        val_keys = sorted({c.group for c in clips if c.name in wanted or c.subject in wanted or c.group in wanted})
+        missing = sorted(w for w in wanted if not any(w in (c.name, c.subject, c.group) for c in clips))
+        if missing:
+            raise ValueError(f"--holdout names not found among clips/subjects: {missing}")
+        if not val_keys or len(val_keys) >= len(keys):
+            raise ValueError("holdout must leave at least one group for training")
+        train = [c for k in keys if k not in val_keys for c in groups[k]]
+        val = [c for k in keys if k in val_keys for c in groups[k]]
+        info = {"mode": "explicit", "n_groups": len(keys), "held_out_groups": val_keys, "leaky": False,
+                "held_out_clips": [c.name for c in val],
+                "held_out_valid_seconds": round(sum(c.n_valid for c in val) / RATE_HZ, 1), "rule": "--holdout"}
+        return train, val, info
     if len(keys) >= 2:
-        rng = np.random.default_rng(seed)
-        order = list(keys)
-        rng.shuffle(order)
-        n_val = min(max(1, int(round(len(order) * val_frac))), len(order) - 1)
-        val_keys = set(order[:n_val])
+        sizes = {k: sum(c.n_valid for c in groups[k]) for k in keys}
+        target = val_frac * sum(sizes.values())
+        val_keys = []
+        while True:
+            rest = [k for k in keys if k not in val_keys]
+            deficit = target - sum(sizes[k] for k in val_keys)
+            rest.sort(key=lambda k: (abs(sizes[k] - deficit), k))
+            val_keys.append(rest[0])
+            if sum(sizes[k] for k in val_keys) >= 0.5 * target or len(val_keys) >= len(keys) - 1:
+                break
         train = [c for k in keys if k not in val_keys for c in groups[k]]
         val = [c for k in keys if k in val_keys for c in groups[k]]
         mode = "subject" if any(c.subject for c in clips) else "clip"
-        info = {"mode": mode, "n_groups": len(keys), "held_out_groups": sorted(val_keys), "leaky": False}
+        info = {"mode": mode, "n_groups": len(keys), "held_out_groups": sorted(val_keys), "leaky": False,
+                "held_out_clips": [c.name for c in val],
+                "held_out_valid_seconds": round(sum(sizes[k] for k in val_keys) / RATE_HZ, 1),
+                "rule": f"group(s) nearest {val_frac:.0%} of valid frames"}
         return train, val, info
     train, val = [], []
     for c in clips:

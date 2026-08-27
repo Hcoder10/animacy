@@ -57,15 +57,18 @@ def raw_joint_targets(frames: pd.DataFrame, profile: Profile, mode: str = "defau
     return pd.DataFrame(out)
 
 
-def stretch_timeline(t: np.ndarray, joints: pd.DataFrame, profile: Profile) -> np.ndarray:
+def stretch_timeline(t: np.ndarray, joints: pd.DataFrame, profile: Profile, margin: float = 0.92) -> np.ndarray:
     """Widen every frame gap that would exceed a joint's ``max_speed``.
 
     Same rule as Autonomous OS ``recording_timing.stretch_timeline``: only the
     impossible segments grow, everything else keeps its authored timing.
+    ``margin`` leaves headroom for the zero-phase smoothing that follows
+    (measured overshoot 1-6% without it); :func:`rate_limit` then guarantees
+    legality exactly.
     """
     out = np.empty_like(t)
     out[0] = t[0]
-    cols = [(j.name, j.max_speed) for j in profile.joints if j.name in joints.columns]
+    cols = [(j.name, j.max_speed * margin) for j in profile.joints if j.name in joints.columns]
     vals = {n: joints[n].to_numpy() for n, _ in cols}
     for i in range(1, len(t)):
         authored = max(t[i] - t[i - 1], 1e-3)
@@ -73,6 +76,19 @@ def stretch_timeline(t: np.ndarray, joints: pd.DataFrame, profile: Profile) -> n
         for n, vmax in cols:
             needed = max(needed, abs(vals[n][i] - vals[n][i - 1]) / vmax)
         out[i] = out[i - 1] + max(authored, needed)
+    return out
+
+
+def rate_limit(x: np.ndarray, max_speed: float, rate_hz: float) -> np.ndarray:
+    """Causal per-frame velocity clamp: the exact guarantee, applied last."""
+    step = max_speed / rate_hz
+    out = x.copy()
+    for i in range(1, len(out)):
+        d = out[i] - out[i - 1]
+        if d > step:
+            out[i] = out[i - 1] + step
+        elif d < -step:
+            out[i] = out[i - 1] - step
     return out
 
 
@@ -113,7 +129,9 @@ def retarget_clip(clip: HumanClip, profile: Profile, mode: str = "default",
     for j in profile.joints:
         m = mp.get(j.name)
         cutoff = default_smooth_hz if (m is None or m.smooth_hz is None) else m.smooth_hz
-        on_grid[j.name] = np.clip(smooth_offline(on_grid[j.name].to_numpy(), profile.rate_hz, cutoff), j.min, j.max)
+        v = smooth_offline(on_grid[j.name].to_numpy(), profile.rate_hz, cutoff)
+        v = rate_limit(v, j.max_speed, profile.rate_hz)
+        on_grid[j.name] = np.clip(v, j.min, j.max)
     return on_grid
 
 

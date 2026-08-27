@@ -60,13 +60,33 @@ class Quantizer(nn.Module):
         self.n_codes, self.dim, self.decay = n_codes, dim, decay
         self.revive_after = revive_after
         self.register_buffer("codebook", torch.randn(n_codes, dim) * 0.5)
-        self.register_buffer("cluster_size", torch.zeros(n_codes))
+        # cluster_size starts at 1, not 0: with 0 the first EMA step divides every code that
+        # batch 1 did not hit by the 1e-5 clamp and throws it to a huge norm, unreachable until
+        # revival. That is the "1 code used" collapse seen with the reachy-duplex init on small data.
+        self.register_buffer("cluster_size", torch.ones(n_codes))
         self.register_buffer("ema_embed", self.codebook.clone())
         self.register_buffer("idle", torch.zeros(n_codes))
+        self.register_buffer("initialised", torch.zeros(1))
+
+    @torch.no_grad()
+    def _data_init(self, flat: torch.Tensor) -> None:
+        """Seed the codebook from encoder outputs (with replacement + a little noise
+        when the batch is smaller than the codebook)."""
+        n = flat.shape[0]
+        pick = torch.randperm(n, device=flat.device)[: self.n_codes] if n >= self.n_codes \
+            else torch.randint(0, n, (self.n_codes,), device=flat.device)
+        seed = flat[pick] + 0.01 * flat.std() * torch.randn(self.n_codes, self.dim, device=flat.device)
+        self.codebook.copy_(seed)
+        self.ema_embed.copy_(seed)
+        self.cluster_size.fill_(1.0)
+        self.idle.zero_()
+        self.initialised.fill_(1.0)
 
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         b, d, length = z.shape
         flat = z.permute(0, 2, 1).reshape(-1, d)                        # [B*L, dim]
+        if self.training and float(self.initialised) == 0.0:
+            self._data_init(flat.detach())
         dist = flat.pow(2).sum(1, keepdim=True) - 2 * flat @ self.codebook.t() + self.codebook.pow(2).sum(1)
         idx = dist.argmin(1)
         quant = self.codebook[idx].view(b, length, d).permute(0, 2, 1)

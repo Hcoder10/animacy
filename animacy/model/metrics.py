@@ -21,23 +21,34 @@ from ..profile import Profile
 from ..retarget import retarget_clip
 from ..schema import RATE_HZ
 from .data import FRAMES_PER_CODE, MODEL_CHANNELS, ClipData, normalise, pool_flag, pool_pairs
-from .infer import MotionModel, generate_motion, motion_to_clip
+from .infer import MotionModel, generate_motion, motion_to_clip, smooth_motion
 from .retrieval import RetrievalIndex
 
 HEAD_IDX = [MODEL_CHANNELS.index(c) for c in ("head_yaw", "head_pitch", "head_roll")]
 STILL_DEG_PER_S = 5.0
 BEAT_TOL_S = 0.15
+BEAT_MIN_DISTANCE = 6       # frames (200 ms) between counted peaks
+BEAT_MIN_PROMINENCE = 10.0  # deg/s
 SHUFFLE_BLOCK = 60          # 2 s blocks
+METRIC_SMOOTH_HZ = 6.0      # every condition, ground truth included, is filtered the same way
+                            # before velocities are taken: tracking jitter is not motion
 
 
 def head_speed(motion: np.ndarray, rate_hz: float = RATE_HZ) -> np.ndarray:
-    """|angular velocity| of the head (deg/s), one value per frame transition."""
-    m = np.asarray(motion, np.float64)[:, HEAD_IDX]
+    """|angular velocity| of the (smoothed) head (deg/s), one value per frame transition."""
+    m = smooth_motion(np.asarray(motion, np.float64), rate_hz, METRIC_SMOOTH_HZ)[:, HEAD_IDX]
+    return np.linalg.norm(np.diff(m, axis=0), axis=1) * rate_hz
+
+
+def all_channel_speed(motion: np.ndarray, std: np.ndarray, rate_hz: float = RATE_HZ) -> np.ndarray:
+    """Speed over all 14 channels in standardised units (sd/s): brows and mouth count too."""
+    m = smooth_motion(np.asarray(motion, np.float64), rate_hz, METRIC_SMOOTH_HZ) / np.asarray(std, np.float64)
     return np.linalg.norm(np.diff(m, axis=0), axis=1) * rate_hz
 
 
 def channel_speeds(motion: np.ndarray, rate_hz: float = RATE_HZ) -> np.ndarray:
-    return np.abs(np.diff(np.asarray(motion, np.float64), axis=0)) * rate_hz
+    m = smooth_motion(np.asarray(motion, np.float64), rate_hz, METRIC_SMOOTH_HZ)
+    return np.abs(np.diff(m, axis=0)) * rate_hz
 
 
 def block_shuffle(x: np.ndarray, block: int, rng: np.random.Generator) -> np.ndarray:
@@ -58,7 +69,7 @@ def block_shuffle(x: np.ndarray, block: int, rng: np.random.Generator) -> np.nda
     return out[:n]
 
 
-def peaks(speed: np.ndarray, prominence: float, distance: int = 4) -> np.ndarray:
+def peaks(speed: np.ndarray, prominence: float, distance: int = BEAT_MIN_DISTANCE) -> np.ndarray:
     from scipy.signal import find_peaks
 
     if len(speed) < 3:
@@ -99,6 +110,30 @@ def speed_violations(joints, profile: Profile) -> Dict[str, float]:
         worst = max(worst, float(ratio.max()) if len(ratio) else 0.0)
         n_viol += int((ratio > 1.0 + 1e-3).sum())
     return {"violations": n_viol, "worst_speed_ratio": worst, "duration_s": float(t[-1] - t[0]) if len(t) else 0.0}
+
+
+BEAT_MARGIN = 0.05          # recall points the model must beat its own shuffle by; the shuffle
+                            # itself moves by ~+-0.04 across sampling settings on 3 min of held-out data
+
+
+def compute_verdict(out: Dict) -> Dict:
+    """The learned model ships as the default only if it beats its shuffled-audio
+    control on head-beat recall by at least ``BEAT_MARGIN``; otherwise retrieval does."""
+    b = out["beat"]
+    rm, rs = b.get("model", {}).get("recall"), b.get("model_shuffled", {}).get("recall")
+    margin = (rm - rs) if (rm is not None and rs is not None) else None
+    beats = margin is not None and margin >= BEAT_MARGIN
+    return {
+        "model_beats_shuffled_audio_on_beat_recall": bool(beats),
+        "required_margin": BEAT_MARGIN,
+        "margin": margin,
+        "model_beat_recall": rm,
+        "model_shuffled_beat_recall": rs,
+        "retrieval_beat_recall": b.get("retrieval", {}).get("recall"),
+        "retrieval_shuffled_beat_recall": b.get("retrieval_shuffled", {}).get("recall"),
+        "nll_model_vs_unigram_floor": [out["codes"].get("nll_model"), out["codes"].get("nll_unigram_floor")],
+        "default_backend": "model" if beats else "retrieval",
+    }
 
 
 def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Sequence[ClipData],
@@ -181,8 +216,13 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
     # --- motion statistics
     gt_all = np.concatenate(gts)
     gt_speed_all = np.concatenate([head_speed(g) for g in gts])
-    prominence = max(3.0, 0.5 * float(gt_speed_all.std()))
-    out["beat"] = {"prominence_deg_per_s": prominence, "tolerance_s": BEAT_TOL_S}
+    prominence = max(BEAT_MIN_PROMINENCE, 1.0 * float(gt_speed_all.std()))
+    out["beat"] = {"prominence_deg_per_s": prominence, "tolerance_s": BEAT_TOL_S, "min_distance_frames": BEAT_MIN_DISTANCE,
+                   "smooth_hz": METRIC_SMOOTH_HZ}
+    gt_aspeed_all = np.concatenate([all_channel_speed(g, stats["std"]) for g in gts])
+    prominence_all = 1.0 * float(gt_aspeed_all.std())
+    out["beat_all_channels"] = {"prominence_sd_per_s": prominence_all, "tolerance_s": BEAT_TOL_S,
+                                "note": "secondary: peaks of standardised speed over all 14 channels (brows, mouth included)"}
     out["velocity"] = {"channels": list(MODEL_CHANNELS), "gt_mean_speed": channel_speeds(gt_all).mean(axis=0).round(4).tolist()}
     out["stillness"] = {"threshold_deg_per_s": STILL_DEG_PER_S, "gt": float((gt_speed_all < STILL_DEG_PER_S).mean())}
     for cond in conds:
@@ -205,6 +245,14 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
         prec = sum(x["precision"] * x["n_gen_peaks"] for x in ba) / max(n_gen, 1)
         out["beat"][cond] = {"n_gt_peaks": n_gt, "n_gen_peaks": n_gen, "recall": rec, "precision": prec,
                              "f1": 2 * rec * prec / max(rec + prec, 1e-9)}
+        ba = [beat_alignment(all_channel_speed(gt, stats["std"]), all_channel_speed(g, stats["std"]), prominence_all)
+              for gt, g in zip(gts, gen[cond])]
+        n_gt = sum(x["n_gt_peaks"] for x in ba)
+        n_gen = sum(x["n_gen_peaks"] for x in ba)
+        rec = sum(x["recall"] * x["n_gt_peaks"] for x in ba) / max(n_gt, 1)
+        prec = sum(x["precision"] * x["n_gen_peaks"] for x in ba) / max(n_gen, 1)
+        out["beat_all_channels"][cond] = {"n_gt_peaks": n_gt, "n_gen_peaks": n_gen, "recall": rec, "precision": prec,
+                                          "f1": 2 * rec * prec / max(rec + prec, 1e-9)}
 
     # --- retarget legality on every generated clip
     out["legality"] = {}
@@ -223,17 +271,8 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
             out["legality"][f"{prof.name}/{cond}"] = {"violations": viol, "worst_speed_ratio": round(worst, 4),
                                                        "mean_time_stretch": round(float(np.mean(stretch)), 4)}
 
-    # --- verdict: the learned model must beat its own shuffle on beat recall
-    b = out["beat"]
-    beats_shuffle = b.get("model", {}).get("recall", 0.0) > b.get("model_shuffled", {}).get("recall", 0.0)
-    out["verdict"] = {
-        "model_beats_shuffled_audio_on_beat_recall": bool(beats_shuffle),
-        "model_beat_recall": b.get("model", {}).get("recall"),
-        "model_shuffled_beat_recall": b.get("model_shuffled", {}).get("recall"),
-        "retrieval_beat_recall": b.get("retrieval", {}).get("recall"),
-        "retrieval_shuffled_beat_recall": b.get("retrieval_shuffled", {}).get("recall"),
-        "default_backend": "model" if beats_shuffle else "retrieval",
-    }
+    out["verdict"] = compute_verdict(out)
+    beats_shuffle = out["verdict"]["model_beats_shuffled_audio_on_beat_recall"]
     if verbose:
         c = out["codes"]
         print(f"  codes: NLL model {c['nll_model']:.3f} / causal {c['nll_model_causal']:.3f} / unigram floor "
@@ -241,9 +280,9 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
               f"top1 model {c['top1_model']:.3f} / majority {c['top1_majority_floor']} / retrieval {c['top1_retrieval']}")
         for cond in conds:
             if cond in out["beat"]:
-                bb, st, vv = out["beat"][cond], out["stillness"][cond], out["velocity"][cond]
-                print(f"  {cond:18s} beat recall {bb['recall']:.3f} prec {bb['precision']:.3f} (gt {bb['n_gt_peaks']} / gen {bb['n_gen_peaks']} peaks) "
-                      f"still {st:.3f} (gt {out['stillness']['gt']:.3f})  W1 rel {vv['w1_relative_mean']:.3f}")
+                bb, st, vv, bA = out["beat"][cond], out["stillness"][cond], out["velocity"][cond], out["beat_all_channels"][cond]
+                print(f"  {cond:18s} head-beat recall {bb['recall']:.3f} prec {bb['precision']:.3f} (gt {bb['n_gt_peaks']} / gen {bb['n_gen_peaks']}) "
+                      f"all-ch recall {bA['recall']:.3f} prec {bA['precision']:.3f}  still {st:.3f} (gt {out['stillness']['gt']:.3f})  W1 rel {vv['w1_relative_mean']:.3f}")
         for k, v in out["legality"].items():
             print(f"  legality {k}: {v['violations']} violations, worst ratio {v['worst_speed_ratio']}, stretch x{v['mean_time_stretch']}")
         print(f"  verdict: {'model beats shuffled audio' if beats_shuffle else 'MODEL DOES NOT BEAT SHUFFLED AUDIO'} -> default backend = {out['verdict']['default_backend']}")

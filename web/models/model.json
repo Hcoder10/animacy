@@ -24,36 +24,36 @@
  ],
  "stats": {
   "mean": [
-   -0.00704940315335989,
-   -0.0025914479047060013,
-   0.0045927101746201515,
-   0.026179447770118713,
-   0.026385419070720673,
-   -0.01831415668129921,
-   0.10903685539960861,
-   0.11288243532180786,
-   0.09573592245578766,
-   0.006440326105803251,
-   -0.014492037706077099,
-   0.06236051768064499,
-   0.0633639246225357,
-   0.08541703224182129
+   0.008985033258795738,
+   0.003603581804782152,
+   0.004279565066099167,
+   0.028800157830119133,
+   0.0048112873919308186,
+   -0.004929773043841124,
+   0.12409485131502151,
+   0.12561950087547302,
+   0.09673851728439331,
+   -0.012373686768114567,
+   -0.02193078212440014,
+   0.059449657797813416,
+   0.08795585483312607,
+   0.11389828473329544
   ],
   "std": [
-   3.2722299098968506,
-   2.445866107940674,
-   2.2555410861968994,
-   4.1784892082214355,
-   9.272778511047363,
-   4.216657638549805,
-   0.19211503863334656,
-   0.1932782232761383,
-   0.19774486124515533,
-   2.624695301055908,
-   1.2607975006103516,
-   2.784111261367798,
-   0.07970055192708969,
-   0.17664575576782227
+   3.2577707767486572,
+   2.4199671745300293,
+   2.1211163997650146,
+   4.477425575256348,
+   9.737452507019043,
+   4.372889995574951,
+   0.2201438695192337,
+   0.22105415165424347,
+   0.20478537678718567,
+   1.636690616607666,
+   0.747877836227417,
+   2.0867433547973633,
+   0.08159765601158142,
+   0.1861792355775833
   ],
   "norm_clip": 4.0
  },
@@ -123,57 +123,71 @@
   "bin": "retrieval.bin"
  },
  "default_backend": "retrieval",
- "verdict": {},
+ "verdict": {
+  "model_beats_shuffled_audio_on_beat_recall": false,
+  "required_margin": 0.05,
+  "margin": 0.031620553359683834,
+  "model_beat_recall": 0.6442687747035574,
+  "model_shuffled_beat_recall": 0.6126482213438735,
+  "retrieval_beat_recall": 0.525691699604743,
+  "retrieval_shuffled_beat_recall": 0.525691699604743,
+  "nll_model_vs_unigram_floor": [
+   6.276136164735811,
+   6.162215114481616
+  ],
+  "default_backend": "retrieval"
+ },
  "training": {
-  "command": "python -m animacy.model.train --data data/clips --out checkpoints/v1 --export-dir web/models --sweep --device cpu",
+  "command": "python -m animacy.model.train --data data/clips --out checkpoints/v1 --export-dir web/models --sweep --device cpu --holdout kende_interview_2014 --exclude sd_rapper_interview cbp_vlog_day2",
   "device": "cpu",
   "data": {
-   "n_clips": 6,
-   "n_with_audio": 6,
-   "n_subjects": 6,
-   "total_minutes": 20.48,
-   "valid_minutes": 14.95,
-   "valid_minutes_with_audio": 14.95,
+   "n_clips": 4,
+   "n_with_audio": 4,
+   "n_subjects": 4,
+   "total_minutes": 16.23,
+   "valid_minutes": 14.12,
+   "valid_minutes_with_audio": 14.12,
    "sources": {
-    "video": 6
+    "video": 4
    },
    "clips": [
-    "cbp_vlog_day2",
     "kende_interview_2014",
     "obama_2014_09_13",
     "obama_2015_02_07",
-    "royal_society_cloke",
-    "sd_rapper_interview"
+    "royal_society_cloke"
    ]
   },
   "split": {
-   "mode": "subject",
-   "n_groups": 6,
+   "mode": "explicit",
+   "n_groups": 4,
    "held_out_groups": [
-    "415880533b"
+    "e8ceb4c8c3"
    ],
    "leaky": false,
-   "held_out_valid_seconds": 178.0,
-   "rule": "group(s) nearest 20% of valid frames"
+   "held_out_clips": [
+    "kende_interview_2014"
+   ],
+   "held_out_valid_seconds": 203.7,
+   "rule": "--holdout"
   },
   "vq": {
    "n_codes": 512,
    "dim": 64,
-   "n_train_segments": 5364,
-   "n_val_segments": 1334,
-   "best_val_mae": 0.3274061679840088,
-   "baseline_val_mae": 0.6424769759178162,
-   "used_codes_train": 511,
-   "perplexity_train": 445.3191223144531,
-   "used_codes_val": 347,
-   "perplexity_val": 225.17013549804688
+   "n_train_segments": 4812,
+   "n_val_segments": 1522,
+   "best_val_mae": 0.3715636432170868,
+   "baseline_val_mae": 0.7079055309295654,
+   "used_codes_train": 512,
+   "perplexity_train": 460.0022277832031,
+   "used_codes_val": 248,
+   "perplexity_val": 135.0767059326172
   },
   "a2m": {
    "d_model": 192,
    "n_layers": 4,
    "n_heads": 4,
-   "n_train_chunks": 1393,
-   "n_val_chunks": 178
+   "n_train_chunks": 1266,
+   "n_val_chunks": 202
   }
  }
 }
