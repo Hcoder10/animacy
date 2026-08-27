@@ -315,3 +315,34 @@ def test_build_frames_synthetic_passes_validate(tmp_path):
     assert extra["stats"]["face_valid_frac"] == pytest.approx(fv.mean())
     clip.save(str(tmp_path / "syn"))
     assert HumanClip.load(str(tmp_path / "syn")).validate() == []
+
+
+# ---------------------------------------------------------------- small-face crop geometry
+def test_crop_box_is_square_clamped_and_min_sized():
+    assert cm.crop_box_for_face(400, 240, 60, 854, 480, margin=2.5, min_side=192) == (304, 144, 192)  # 60*2.5=150 < 192
+    x0, y0, side = cm.crop_box_for_face(20, 10, 100, 854, 480, margin=2.5, min_side=192)
+    assert (x0, y0, side) == (0, 0, 250)  # clamped into the image
+    x0, y0, side = cm.crop_box_for_face(850, 470, 300, 854, 480)
+    assert side == 480 and x0 + side <= 854 and y0 + side <= 480
+
+
+def test_crop_landmarks_to_full():
+    lm = np.array([[0.0, 0.0], [1.0, 1.0], [0.5, 0.25]])
+    out = cm.crop_landmarks_to_full(lm, (100, 50, 200), (800, 400))
+    assert np.allclose(out, [[100 / 800, 50 / 400], [300 / 800, 250 / 400], [200 / 800, 100 / 400]])
+
+
+def test_crop_to_full_translation_identity_and_scaling():
+    # a crop that IS the full (square) frame changes nothing
+    t = np.array([3.0, -2.0, -40.0])
+    assert np.allclose(cm.crop_to_full_translation(t, (0, 0, 480), (480, 480)), t)
+    # a centred crop of a third of the height: depth triples, lateral position unchanged
+    out = cm.crop_to_full_translation(t, (267, 160, 160), (854, 480))  # centre (347, 240) vs image centre (427, 240)
+    assert out[2] == pytest.approx(-120.0)
+    # crop centre 80 px left of the image centre -> x shifts left by 80 * |z| / f_crop
+    f_crop = 80 / np.tan(np.radians(31.5))
+    assert out[0] == pytest.approx(3.0 - 80 * 40.0 / f_crop)
+    assert out[1] == pytest.approx(-2.0)
+    # crop centre below the image centre -> y (up) decreases
+    out = cm.crop_to_full_translation(t, (347, 200, 160), (854, 480))  # centre (427, 280): 40 px below
+    assert out[1] == pytest.approx(-2.0 - 40 * 40.0 / f_crop) and out[0] == pytest.approx(3.0)

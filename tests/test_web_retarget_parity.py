@@ -147,6 +147,9 @@ def test_js_matches_python_v11_features(kind: str):
     if kind == "still-then-move":
         b_vals = [p["b"] for p in py[30:90]]
         assert max(b_vals) - min(b_vals) > 0.5, "idle sway did not engage on joint b while still"
+        # settle on joint e: quiet for 0.4 s then a 0.6 s blend to rest → at rest (0) well before frame 90 of the hold
+        assert abs(py[89]["e"]) < 1e-3, f"settle did not bring joint e to rest during the hold (frame 90: {py[89]['e']})"
+        assert abs(py[20]["e"]) > 1.0, "joint e should still be tracking the held target before the settle engages"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

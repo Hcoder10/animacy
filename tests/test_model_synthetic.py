@@ -107,6 +107,49 @@ def test_stay_bias_makes_quiet_stretches_stiller(trained):
     assert (b[1:] == b[:-1]).mean() >= (a[1:] == a[:-1]).mean()
 
 
+def test_intent_rule_and_retrieval_bonus(trained):
+    from animacy.features import audio_features
+    from animacy.model.data import make_synthetic_clip
+    from animacy.model.infer import MotionModel, generate, retrieve
+    from animacy.model.intent import EXAMPLE_LINES, LEXICON, analyse
+    from animacy.model.retrieval import RetrievalIndex
+
+    n_total = sum(len(v) for v in EXAMPLE_LINES.values())
+    n_ok = sum(analyse(s).tag == tag for tag, lines in EXAMPLE_LINES.items() for s in lines)
+    assert n_total >= 30 and n_ok >= 27, f"{n_ok}/{n_total} example lines tagged as intended: " + str(
+        [(s, analyse(s).tag) for tag, lines in EXAMPLE_LINES.items() for s in lines if analyse(s).tag != tag])
+    try:
+        from animacy.grade.movements import MOVEMENTS
+    except Exception:  # noqa: BLE001
+        MOVEMENTS = []
+    for mv in MOVEMENTS:                                   # the grader's lines, never stored here
+        assert analyse(mv.text).tag == mv.key, (mv.key, mv.text, analyse(mv.text).hits)
+    ex, th = analyse(EXAMPLE_LINES["excitement"][0]), analyse(EXAMPLE_LINES["thinking"][0])
+    assert ex.arousal > th.arousal and ex.amplitude > 1.0 > th.amplitude
+    assert analyse("Yes.", override="excitement").tag == "excitement"
+    # no multi-word lexicon phrase may be a verbatim 4+ word span of a grader line
+    for mv in MOVEMENTS:
+        low = mv.text.lower()
+        for phrases in LEXICON.values():
+            for p in phrases:
+                assert not (len(p.split()) >= 4 and p in low), (p, mv.text)
+    idx = RetrievalIndex.load(os.path.join(trained["out"], "retrieval.json"))
+    assert idx.arousal is not None and len(idx.arousal) == len(idx) and 0 <= idx.arousal.min() <= idx.arousal.max() <= 1
+    model = MotionModel.load(trained["out"], "cpu")
+    frames, wav = make_synthetic_clip(seed=77, seconds=4.0, subject="synthX")
+    T = len(frames)
+    feats = audio_features(wav, 16000, n_ticks=T)
+    speaking = frames["speaking"].to_numpy()
+    calm = retrieve(idx, feats, speaking, model, intent="thinking")
+    loud = retrieve(idx, feats, speaking, model, intent="excitement")
+    assert calm.validate() == [] and loud.validate() == []
+    assert calm.meta["intent"]["tag"] == "thinking" and loud.meta["amplitude"] > calm.meta["amplitude"]
+    clip = generate(model, feats, speaking, seed=1, intent="No way, that is incredible news!")
+    assert clip.validate() == [] and clip.meta["intent"]["tag"] == "excitement" and clip.meta["amplitude"] > 1.0
+    # the audio-only proxy runs end to end too
+    assert idx.query(feats, speaking, use_audio_arousal=True).shape == (T, 14)
+
+
 def test_ar_onnx_step_matches_python_generation(trained):
     """The browser loop (ONNX single-step, full recompute) reproduces AudioToMotionAR.generate
     exactly when fed the same samples, in talk and listen mode."""

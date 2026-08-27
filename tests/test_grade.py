@@ -3,19 +3,21 @@ seeded reel order, JSON robustness, response validation, and the pass rule on fi
 from __future__ import annotations
 
 import json
+import os
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from animacy.grade import kimi, rubric
-from animacy.grade.movements import MOVEMENT_KEYS, MOVEMENTS, VENDOR, ClipSpec, accepts_intent, candidate_table
+from animacy.grade.movements import (HELDOUT_PATH, HELDOUT_SET, MOVEMENT_KEYS, MOVEMENTS, TUNING_SET, VENDOR, ClipSpec,
+                                     accepts_intent, candidate_table, load_heldout_movements, shared_phrases)
 from animacy.grade.probe import PROBE_PROMPT
 from animacy.grade.reel import (chunk_reels, number_and_shuffle, plan_reels, sealed_manifest, slow_audio, slow_table,
                                 speech_envelope)
 from animacy.grade.render import resample_table, urdf_frames
 from animacy.grade.run import CALIBRATION_MIN, GATE_THRESHOLD, calibration, check_workspace, consistency, gate, \
-    judge_workspace_root, prepare_workspace, resolve_gate_source, summarise, unseal
+    contamination_gap, intent_resolution, judge_workspace_root, prepare_workspace, redact_lines, resolve_gate_source, summarise, unseal
 from animacy.profile import find_robot
 
 REQUIRED_FORBIDDEN = {"animacy", "model", "retrieval", "generated", "vendor"}
@@ -352,8 +354,98 @@ def test_intent_is_passed_only_to_sources_that_accept_it():
 
     assert accepts_intent(new_style) and not accepts_intent(old_style)
     wav = np.zeros(16000, np.float32)
-    _, meta_old = candidate_table(prof, "model", wav, 16000, 1, "x", intent="greeting", sources={"model": old_style})
-    _, meta_new = candidate_table(prof, "model", wav, 16000, 1, "x", intent="greeting", sources={"model": new_style})
+    text = "No way, that is incredible news!"
+    _, meta_old = candidate_table(prof, "model", wav, 16000, 1, "x", intent="excitement", text=text, sources={"model": old_style})
+    _, meta_new = candidate_table(prof, "model", wav, 16000, 1, "x", intent="excitement", text=text, sources={"model": new_style})
     assert calls["old"] == {"seed": 1} and meta_old["intent_passed"] is None
-    assert calls["new"] == {"seed": 1, "intent": "greeting"} and meta_new["intent_passed"] == "greeting"
+    assert calls["new"]["seed"] == 1 and meta_new["intent_passed"] == "excitement"
+    # the same object `animacy say --intent excitement` would hand the source: tag forced, punctuation counted
+    from animacy.model.intent import analyse
+
+    got, ref = calls["new"]["intent"], analyse(text, override="excitement")
+    assert got.tag == "excitement" and got.overridden and abs(got.arousal - ref.arousal) < 1e-9
     assert all(mv.intent_tag for mv in MOVEMENTS)
+    # the envelope heuristic never receives an intent even if a fake accepted one
+    candidate_table(prof, "envelope", wav, 16000, 0, "x", intent="greeting", text="hi", sources={"envelope": lambda wav, sr, seed=0, intent=None: (calls.__setitem__("env", intent), _clip())[1]})
+    assert calls["env"] is None
+
+
+# ---------------------------------------------------------------- held-out lines (sealed)
+def test_heldout_loader_builds_one_sealed_movement_per_intent(tmp_path):
+    f = tmp_path / "h.json"
+    f.write_text(json.dumps({"lines": {mv.key: f"sealed line number {i} for testing" for i, mv in enumerate(MOVEMENTS)}}),
+                 encoding="utf-8")
+    hs = load_heldout_movements(str(f))
+    assert [h.key for h in hs] == MOVEMENT_KEYS
+    assert all(h.line_set == HELDOUT_SET and h.label == f"{h.key}@heldout" and h.vendor == m.vendor for h, m in zip(hs, MOVEMENTS))
+    assert load_heldout_movements(str(tmp_path / "missing.json")) == []
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"lines": {mv.key: mv.text for mv in MOVEMENTS}}), encoding="utf-8")   # reuses tuning lines
+    with pytest.raises(ValueError):
+        load_heldout_movements(str(bad))
+
+
+def test_sealed_heldout_file_shares_no_phrase_with_tuning_lines():
+    if not os.path.isfile(HELDOUT_PATH):
+        pytest.skip("no sealed held-out file on this machine")
+    hs = load_heldout_movements(HELDOUT_PATH)          # raises on any shared 3-gram, without printing the lines
+    assert len(hs) == len(MOVEMENTS)
+    for h in hs:
+        for m in MOVEMENTS:
+            assert not shared_phrases(h.text, m.text), f"held-out {h.key} shares a phrase with tuning {m.key}"
+        assert h.text != m.text
+
+
+def test_shared_phrases_is_a_3gram_check():
+    assert shared_phrases("Hey! Good to see you again.", "so good to see you") == ["good to see", "to see you"]
+    assert shared_phrases("Hey! Good to see you again.", "hey, see you soon") == []
+
+
+def test_redaction_removes_sealed_lines_and_their_phrases():
+    lines = ["Well, look who is back! It is lovely to have you here."]
+    txt = "During 'look who is back' the head lifts; then on 'lovely to have you here' it settles; a nod follows."
+    out = redact_lines(txt, lines)
+    assert "look who is back" not in out and "lovely to have you" not in out
+    assert "the head lifts" in out and "a nod follows" in out and "[...]" in out
+    assert redact_lines("The whole line: well, look who is back! it is lovely to have you here.", lines).count("[...]") >= 1
+    assert redact_lines("nothing sealed here", lines) == "nothing sealed here"
+    assert redact_lines("", lines) == "" and redact_lines("x", []) == "x"
+
+
+def _records_sets(robot, tuning, heldout, source="model"):
+    recs = []
+    for mv, seeds in zip(MOVEMENT_KEYS, tuning):
+        for k, v in enumerate(seeds):
+            recs.append({"robot": robot, "movement": mv, "source": source, "seed": k, "overall": v, "scores": {"overall": v},
+                         "line_set": TUNING_SET})
+    for mv, seeds in zip(MOVEMENT_KEYS, heldout):
+        for k, v in enumerate(seeds):
+            recs.append({"robot": robot, "movement": mv, "source": source, "seed": k, "overall": v, "scores": {"overall": v},
+                         "line_set": HELDOUT_SET, "card_line": 'The robot says: "sealed words"'})
+    for mv in MOVEMENT_KEYS:
+        recs.append({"robot": robot, "movement": mv, "source": VENDOR, "seed": None, "overall": 7, "scores": {"overall": 7}})
+    return recs
+
+
+def test_gate_on_heldout_lines_ignores_tuning_scores_and_reports_the_gap():
+    recs = _records_sets("lamp", tuning=[(9, 9)] * 5, heldout=[(6, 6)] * 5)
+    assert gate(recs, "lamp", source="model", line_set=HELDOUT_SET)["pass"] is False
+    assert gate(recs, "lamp", source="model", line_set=TUNING_SET)["pass"] is True
+    s = summarise(recs, ["lamp"], ["model"], gate_source="model", gate_lines=HELDOUT_SET)
+    assert s["gate_lines"] == HELDOUT_SET and s["robots"]["lamp"]["gate"]["pass"] is False
+    assert s["robots"]["lamp"]["gate_by_set"][TUNING_SET]["pass"] is True
+    assert abs(s["robots"]["lamp"]["contamination_gap"] - 3.0) < 1e-9
+    assert set(s["robots"]["lamp"]["tables"]) == {TUNING_SET, HELDOUT_SET}
+    assert s["robots"]["lamp"]["tables"][HELDOUT_SET]["greeting"][VENDOR]["mean"] == 7   # vendor shared by both sets
+    assert contamination_gap(s["robots"]["lamp"]["tables"], "model") == 3.0
+    # records without a line_set (run 1) are tuning lines
+    old = [{k: v for k, v in r.items() if k != "line_set"} for r in recs if r.get("line_set") != HELDOUT_SET]
+    assert summarise(old, ["lamp"], ["model"], gate_source="model", gate_lines=TUNING_SET)["line_sets"] == [TUNING_SET]
+    with pytest.raises(ValueError):
+        summarise(old, ["lamp"], ["model"], gate_source="model", gate_lines=HELDOUT_SET)
+
+
+def test_intent_resolution_counts_without_storing_text():
+    ir = intent_resolution(MOVEMENTS, [])
+    assert ir["available"] and ir["tuning"]["n"] == len(MOVEMENTS) and "heldout" not in ir
+    assert all(m.text not in json.dumps(ir) for m in MOVEMENTS)

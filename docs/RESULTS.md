@@ -1,9 +1,22 @@
-# Results (updated 2026-08-27, model v1)
+# Results (updated 2026-08-27: model v1, then v2a; shipped = retrieval default + v2a AR selectable)
 
 Every number below comes from `checkpoints/<run>/REPORT.md`, written by
 `python -m animacy.model.train` with the exact command recorded in the report.
 Nothing here is claimed without that file. Held-out means a **speaker the
 model never saw**, evaluated on all of that speaker's valid frames.
+
+**Current state in one paragraph.** Two learned generators were trained and
+measured on two held-out speakers (v1, feed-forward, 14 min; v2a, autoregressive,
+152 min at run start). The v2a autoregressive model predicts the motion codes of
+unseen speakers ~2 nats better than the unigram floor, matches human stillness
+and velocity statistics, and is exported to the browser as the selectable
+"model" source - but on neither speaker does any learned generator beat its own
+shuffled-audio control by the margin we require (0.05 head-beat recall), so we
+do not claim speech-timed motion, and **retrieval (real human windows matched
+to the speech, aligned by construction) ships as the default source.** The
+sections below are in chronological order; the v2a section holds the current
+numbers, the shipped bundle, the generation-side options (utterance-final
+settle, head_pitch floor, amplitude) and the intent layer.
 
 ## Data
 
@@ -157,12 +170,18 @@ cap not binding), `model.json` (archs `["ar"]`, `default_arch = ar`,
 `default_backend = retrieval`, intent + postprocess blocks). The feed-forward
 `a2m` stays in `checkpoints/` only.
 
-Intent lexicon integrity (`intent.v2`): `animacy/model/intent.py` holds only
-generic cue words per tag (hi/hey/hello/welcome; yes/exactly/right/agree/of
+Intent lexicon integrity (`intent.v3`): `animacy/model/intent.py` holds only
+generic cue families per tag (hi/hey/hello/welcome; yes/exactly/right/agree/of
 course; no/not sure/don't think/really?/hmm; wow/no way/incredible/amazing/!!;
 let me think/wait/consider/hmm...) plus punctuation modifiers and a negation
 rule for agreement cues. None of the blind grader's utterances is stored in the
 module or in `web/models/model.json`; the grader's five lines are read from
 `animacy.grade.movements` only when a REPORT is generated, and the rule tags
-all five correctly alongside ten fresh lines written for the module (two per
-intent; table in `checkpoints/v2a/REPORT.md`).
+all five correctly alongside thirty fresh lines written for the module (six
+per intent, 30/30; table in `checkpoints/v2a/REPORT.md`). v3 replaced the
+two cues that were three-word runs of known lines ("good to see", "let me
+think") with broader families, and added three tie-break cues: two or more
+exclamation marks count as excitement, a question with a negation counts as
+doubt, a written pause counts as thinking; a bare "hmm" leans doubt unless
+the line is deliberating. A blind grader's earlier sealed set scored 3/5 under
+v2; v3 has not been scored on sealed lines yet.
