@@ -80,6 +80,12 @@ def _cmd_capture(a) -> int:
     return capture_main(a)
 
 
+def _cmd_mirror(a) -> int:
+    from .mirror import run_from_args
+
+    return run_from_args(a)
+
+
 def _cmd_say(a) -> int:
     from .serve import main as say_main
 
@@ -141,6 +147,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--checkpoint", default="checkpoints/v1")
     s.set_defaults(fn=_cmd_say)
+
+    mi = sub.add_parser("mirror", help="live: video/webcam -> trackers -> retarget -> robot (needs mediapipe)")
+    mi.add_argument("--source", default="0")
+    mi.add_argument("--robot", required=True)
+    mi.add_argument("--mode", default="default")
+    mi.add_argument("--sink", default=None)
+    mi.add_argument("--url", default=None)
+    mi.add_argument("--speed", type=float, default=1.0)
+    mi.add_argument("--duration", type=float, default=0.0)
+    mi.add_argument("--start", type=float, default=0.0)
+    mi.add_argument("--preview", action="store_true")
+    mi.add_argument("--arm", default="right", choices=["right", "left", "none"])
+    mi.add_argument("--neutral-seconds", type=float, default=1.0)
+    mi.add_argument("--pose-every", type=int, default=1)
+    mi.add_argument("--hold", type=float, default=0.5)
+    mi.add_argument("--readback-every", type=float, default=5.0)
+    mi.add_argument("--log", default=None)
+    mi.set_defaults(fn=_cmd_mirror)
     return p
 
 
