@@ -29,7 +29,8 @@ def trained(tmp_path_factory):
     out = str(tmp_path_factory.mktemp("ckpt"))
     export_dir = os.path.join(out, "web_models")
     argv = ["--synthetic", "--synthetic-clips", "6", "--synthetic-seconds", "12", "--out", out,
-            "--epochs-vq", "8", "--epochs-a2m", "6", "--export-dir", export_dir, "--device", "cpu", "--seed", "0"]
+            "--epochs-vq", "8", "--epochs-a2m", "6", "--epochs-ar", "6", "--arch", "both", "--no-fp16",
+            "--export-dir", export_dir, "--device", "cpu", "--seed", "0", "--cache-dir", ""]
     t0 = time.time()
     rc = train.main(argv)
     assert rc == 0
@@ -38,18 +39,20 @@ def trained(tmp_path_factory):
 
 def test_train_writes_checkpoints_and_metrics(trained):
     out = trained["out"]
-    for f in ("vq.pt", "a2m.pt", "model_info.json", "metrics.json", "REPORT.md", "retrieval.json", "retrieval.bin"):
+    for f in ("vq.pt", "a2m.pt", "a2m_ar.pt", "model_info.json", "metrics.json", "REPORT.md", "retrieval.json", "retrieval.bin"):
         assert os.path.exists(os.path.join(out, f)), f
     m = json.load(open(os.path.join(out, "metrics.json"), encoding="utf-8"))
     assert m["data"]["n_clips"] == 6
     assert m["split"]["mode"] == "subject" and not m["split"]["leaky"]
     assert m["vq"]["used_codes_train"] > 8, "codebook collapsed"
+    assert m["ar"]["n_train_chunks"] > 0 and m["a2m"]["n_train_chunks"] > 0
     ev = m["eval"]
-    assert "codes" in ev and ev["codes"]["nll_model"] > 0
-    for cond in ("model", "model_shuffled", "model_causal", "retrieval", "retrieval_shuffled"):
+    assert "codes" in ev and ev["codes"]["nll_model"] > 0 and ev["codes"]["nll_ar"] > 0
+    for cond in ("model", "model_shuffled", "model_causal", "ar", "ar_shuffled", "ar_causal", "retrieval", "retrieval_shuffled"):
         assert cond in ev["beat"] and cond in ev["stillness"] and cond in ev["velocity"], cond
         assert cond in ev["beat_all_channels"], cond
-    assert ev["verdict"]["default_backend"] in ("model", "retrieval")
+    assert set(ev["verdict"]["candidates"]) == {"ff", "ar"}
+    assert ev["verdict"]["default_backend"] in ("ar", "model", "retrieval")
     for k, v in ev["legality"].items():
         assert v["violations"] == 0, (k, v)
     assert trained["seconds"] < 180, f"synthetic pipeline took {trained['seconds']:.0f}s"
@@ -58,19 +61,84 @@ def test_train_writes_checkpoints_and_metrics(trained):
 def test_export_matches_torch(trained):
     m = json.load(open(os.path.join(trained["out"], "metrics.json"), encoding="utf-8"))
     ex = m["export"]
-    for k in ("a2m", "vq_decoder"):
+    for k in ("a2m", "a2m_ar", "vq_decoder"):
         assert ex[k]["ok"], ex[k]
         assert ex[k]["max_abs_diff"] < 1e-4
         assert os.path.exists(ex[k]["path"])
-    for f in ("a2m.onnx", "vq_decoder.onnx", "model.json", "bigram.bin", "retrieval.json", "retrieval.bin"):
+    for f in ("a2m.onnx", "a2m_ar.onnx", "vq_decoder.onnx", "model.json", "bigram.bin", "retrieval.json", "retrieval.bin"):
         assert os.path.exists(os.path.join(trained["export_dir"], f)), f
     from animacy.model.data import MODEL_CHANNELS
 
     mj = json.load(open(os.path.join(trained["export_dir"], "model.json"), encoding="utf-8"))
     assert mj["channels"] == MODEL_CHANNELS
     assert len(mj["stats"]["mean"]) == 14 and mj["n_codes"] == 512
+    assert mj["a2m_ar"]["arch"] == "ar" and mj["a2m_ar"]["bos"] == 512 and mj["default_arch"] in ("ff", "ar")
     assert os.path.getsize(os.path.join(trained["export_dir"], "bigram.bin")) == 512 * 512 * 2
     assert ex["a2m"]["bytes"] + ex["vq_decoder"]["bytes"] < 10 * 1024 * 1024
+
+
+def test_fp16_export_keeps_the_argmax(trained, tmp_path):
+    """float16 weights halve the file; the fp32-graph export stays exact and the most likely
+    code is unchanged at nearly every position (the diff itself is reported, not asserted tight)."""
+    from animacy.model.export import export_a2m, export_ar
+    from animacy.model.infer import MotionModel
+
+    model = MotionModel.load(trained["out"], "cpu")
+    r_ar = export_ar(model, str(tmp_path / "a2m_ar.onnx"), fp16=True)
+    r_ff = export_a2m(model, str(tmp_path / "a2m.onnx"), fp16=True)
+    for r in (r_ar, r_ff):
+        assert r["fp16"] and r["max_abs_diff_fp32_graph"] < 1e-4
+        assert r["bytes"] < 0.6 * r["bytes_fp32"], (r["bytes"], r["bytes_fp32"])
+        assert r["argmax_agreement"] >= 0.95, r
+        assert r["max_abs_diff"] < 0.1, r["max_abs_diff"]
+
+
+def test_stay_bias_makes_quiet_stretches_stiller(trained):
+    from animacy.model.infer import MotionModel
+
+    model = MotionModel.load(trained["out"], "cpu")
+    rng = np.random.default_rng(3)
+    L = 60
+    f = rng.normal(size=(L, 66)).astype(np.float32)
+    f[:, 64] = -1.0                                 # everything "quiet"
+    s = np.zeros(L, np.int64)
+    a = model.ar.generate(f, s, temperature=1.0, top_p=1.0, seed=1, stay_bias=0.0)
+    b = model.ar.generate(f, s, temperature=1.0, top_p=1.0, seed=1, stay_bias=6.0)
+    assert (b[1:] == b[:-1]).mean() >= (a[1:] == a[:-1]).mean()
+
+
+def test_ar_onnx_step_matches_python_generation(trained):
+    """The browser loop (ONNX single-step, full recompute) reproduces AudioToMotionAR.generate
+    exactly when fed the same samples, in talk and listen mode."""
+    import onnxruntime as ort
+
+    from animacy.model.infer import MotionModel
+
+    model = MotionModel.load(trained["out"], "cpu")
+    ar = model.ar
+    sess = ort.InferenceSession(os.path.join(trained["export_dir"], "a2m_ar.onnx"), providers=["CPUExecutionProvider"])
+    rng = np.random.default_rng(5)
+    L = 45
+    f = rng.normal(size=(L, 66)).astype(np.float32)
+    s = rng.integers(0, 2, size=L).astype(np.int64)
+    for causal in (False, True):
+        codes_py = ar.generate(f, s, causal=causal, temperature=0.8, top_p=0.9, seed=11)
+        # replay: with the same rng stream the ONNX logits must lead to the same choices
+        rng2 = np.random.default_rng(11)
+        hist = [ar.bos]
+        for t in range(L):
+            nxt, _ = sess.run(None, {"features": f[None], "speaking": s[None], "causal": np.array([int(causal)], np.int64),
+                                     "codes": np.asarray(hist, np.int64)[None]})
+            c = ar.sample(nxt[0], 0.8, 0.9, rng2)
+            hist.append(c)
+        assert np.array_equal(np.asarray(hist[1:]), codes_py), "ONNX step loop diverged from the Python generator"
+    # listen mode is causal in the audio: changing future audio must not change earlier logits
+    f2 = f.copy()
+    f2[30:] += 5.0
+    hist = np.concatenate([[ar.bos], codes_py[:19]]).astype(np.int64)[None]
+    a = sess.run(None, {"features": f[None], "speaking": s[None], "causal": np.array([1], np.int64), "codes": hist})[1]
+    b = sess.run(None, {"features": f2[None], "speaking": s[None], "causal": np.array([1], np.int64), "codes": hist})[1]
+    assert np.abs(a - b).max() < 1e-4
 
 
 def test_onnx_dynamic_length_and_decoder_roundtrip(trained):
@@ -128,6 +196,10 @@ def test_generate_returns_valid_clip(trained):
     assert np.array_equal(clip.frames["head_pitch"].to_numpy(), again.frames["head_pitch"].to_numpy())
     other = generate(model, feats, speaking, causal=True, seed=4)
     assert other.validate() == []
+    ar_clip = generate(model, feats, speaking, causal=False, seed=4, arch="ar")
+    assert ar_clip.validate() == [] and len(ar_clip) == T and ar_clip.meta["arch"] == "ar"
+    ar_again = generate(model, feats, speaking, causal=False, seed=4, arch="ar")
+    assert np.array_equal(ar_clip.frames["head_pitch"].to_numpy(), ar_again.frames["head_pitch"].to_numpy())
     # retrieval baseline on the same input
     idx = RetrievalIndex.load(os.path.join(trained["out"], "retrieval.json"))
     m = idx.query(feats, speaking)

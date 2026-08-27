@@ -6,6 +6,11 @@ Mini** as animated URDFs side by side, driven by (1) the vendors' own clips,
 `ROBOT.md`, (3) live webcam puppeteering (MediaPipe in the browser), and (4) a
 pluggable motion-model slot.
 
+**Talk mode** (the headline demo): type a line → Kokoro-82M TTS runs *in the
+browser* → the waveform's audio features → the motion model (or retrieval /
+envelope) → canonical frames → both robots, while the voice plays. Motion is
+sampled off `AudioContext.currentTime`, so sync is structural.
+
 ## Run it
 
 ```
@@ -25,6 +30,8 @@ jsDelivr / Google storage:
 | `urdf-loader` (gkjohnson) | 0.13.1 (`src/URDFLoader.js`) | URDF → three.js scene graph, `joint.setJointValue` |
 | `@mediapipe/tasks-vision` | 0.10.21 (`vision_bundle.mjs` + `wasm/`) | `FaceLandmarker`, `PoseLandmarker`, `DrawingUtils` |
 | MediaPipe models | `face_landmarker/float16/1`, `pose_landmarker_lite/float16/1` (storage.googleapis.com) | loaded lazily when Webcam live starts |
+| `onnxruntime-web` | 1.20.1 (`dist/ort.min.mjs`, wasm EP single-threaded, `dist/` for the .wasm) | `web/models/a2m.onnx` + `vq_decoder.onnx` (Talk / Listen) |
+| `kokoro-js` | 1.2.1 (`dist/kokoro.web.js`, self-contained: bundles transformers.js + its own ORT) | Kokoro-82M-v1.0-ONNX, `q8`, WebGPU → wasm fallback; ~90 MB from huggingface.co, cached by the browser |
 
 Webcam live needs a secure context (`localhost` or https) for `getUserMedia`.
 
@@ -42,8 +49,39 @@ motion source (js/motion_source.js)          frame            per robot
   ClipSource     canonical clip JSON ───────► {channels:{…}} ─┬──► LiveRetargeter(lamp)  ──► toUrdfValues ──► lamp
   SyntheticSource calibration clips (JS) ───►                 └──► LiveRetargeter(reachy) ──► toUrdfValues ──► reachy
   WebcamSource   MediaPipe → js/canonical.js ► {channels:{…}} (same path, dt from video timestamps)
-  ModelSource    ONNX (stub, contract in the file)
+  TalkSource     text → kokoro-js → js/features.js → js/model.js ► {channels:{…}} clocked to WebAudio
+  ListenSource   mic → energy VAD → js/model.js (causal, speaking=0)  ► {channels:{…}} (experimental)
 ```
+
+### Talk mode internals (`js/talk.js`, `js/model.js`, `js/features.js`, `js/dsp.js`)
+
+```
+text ──kokoro-js──► Float32 @ 24 kHz ──OfflineAudioContext──► 16 kHz
+     ──features.js audioFeatures──► [T, 66]   (T = ceil(seconds·30))
+     speaking[t] = feats[t, 64] > −0.3        (serve._speaking_from_audio)
+     ──backend──►  model:     poolPairs → a2m.onnx logits [L,512] → sampleCodes (T=0.8,
+                             bigram prior w=0.5, sfc32 seed) → vq_decoder.onnx [2L,14]
+                             → zero-phase Butterworth 6 Hz (dsp.filtfilt == scipy) → hold odd tail
+                   retrieval: window keys (330-d) → cosine argmax + continuity/speaking bonus
+                             → 5-frame crossfade  (== animacy.model.retrieval.RetrievalIndex.query)
+                   envelope:  serve.envelope_motion heuristic (no model; labelled as such)
+     ──motionToFrames──► canonical frames (face_valid=1) ──► Track ──► LiveRetargeter × 2
+audio ──AudioBufferSourceNode──► speakers; TalkSource.time = ctx.currentTime − startedAt
+```
+
+`web/models/model.json` (written by `animacy/model/export.py`) is the contract:
+channel order, `stats`, sampling defaults, smoothing cutoff, file names. The
+manifest's `bundle` flags say which files exist; missing ones remove that
+backend from the picker and the Talk tab still works on the envelope heuristic.
+
+Parity with Python: `tests/test_web_features_parity.py` (features to 1e-4,
+`filtfilt` to 1e-9, node) and `tests/test_web_model_parity.py` (headless
+Chromium running `model.js` on the real bundle vs onnxruntime + `infer.py`:
+logits < 1e-3, decoder < 1e-3, greedy codes identical, full greedy generate
+< 2e-3, retrieval ids identical). The stochastic sampler uses sfc32 rather than
+numpy's PCG64, so seeded sequences are reproducible in the browser but not
+bit-identical to Python; the test scores the JS draws under Python's per-step
+distribution instead.
 
 * `js/main.js` — boot, UI, the single `requestAnimationFrame` loop, and the
   `window.animacy` API used by the dev scripts (`setSource`, `setClip`,
@@ -58,10 +96,15 @@ motion source (js/motion_source.js)          frame            per robot
   missing (`?standin=1` forces them; `?urdf_lamp=<url>` / `?urdf_reachy_mini=<url>`
   point at any URDF). The LeLamp stand-in is GPL reference material and is
   never the shipped default.
-* `manifest.json` — what exists on disk (URDFs, native clips, captured clips),
-  written by `python web/dev/build_manifest.py`, so the static site never
-  probes for files that would 404. Re-run it after adding clips or URDFs; on a
-  local `http.server` new files in `web/clips/` are picked up anyway.
+* `manifest.json` — what exists on disk (URDFs, native clips, captured clips,
+  `web/models/*.onnx`), written by `python web/dev/build_manifest.py`, so the
+  static site never probes for files that would 404. Re-run it after adding
+  clips, URDFs or models; on a local `http.server` new files in `web/clips/`
+  are picked up anyway. The **Model** tab reads `manifest.models`: with no
+  model present it says "coming soon"; with `a2m.onnx`/`vq_decoder.onnx`
+  present it names them. Nothing is fetched until a runner is wired
+  (`ModelSource` in `js/motion_source.js`; the bundle's contract is in
+  `web/models/model.json`, written by `animacy/model/export.py`).
 
 URL parameters: `?source=native|canonical|webcam|model`, `?clip=<id>`
 (e.g. `lamp/nod`, `synth/cal_look_left_right`, `clip/<name>`), `?mode=default|puppet`,
@@ -73,30 +116,49 @@ URDFs are z-up; three.js is y-up. The robot root sits under a group rotated
 −90° about x, so URDF +x (forward) stays +x, URDF +z becomes +y (up) and
 URDF +y (robot's left) becomes three −z. "Front" view (`animacy.setView('front')`)
 puts the camera on +x: the robot's left is on the viewer's right, which is the
-quickest way to eyeball a sign.
+quickest way to eyeball a sign. `animacy.linkForward(robot, 'head')` returns a
+link's world forward axis so a sign can be *measured*: `screenshot.py` requires
+both heads to swing to −z on the "look LEFT" calibration clip and to +y on
+"look UP", whatever the gains in `ROBOT.md` are.
 
 ## The JS retargeter mirrors the Python one
 
 `js/retarget.js` is a line-for-line port of `animacy/retarget.py`:
 
 ```
-LiveRetargeter.step(channels, dt):
+LiveRetargeter.step(channels, dt):           # docs/RETARGET.md
   x      = Σ gain·channel                     (missing / NaN channel → 0)
   x      = 0 if |x| < deadband else x − sign(x)·deadband
-  target = clamp(x + offset + rest, [min, max])   # mapping bounds, else joint limits
-  alpha  = 1 − exp(−2π·cutoff·dt)             # cutoff = smooth_hz or the 6 Hz default
-  y      = prev + alpha·(target − prev)
+  u      = softClip(x + offset + rest, soft_limit)   # tanh knee over the last soft_limit of the range
+  u      = clamp(u, [min, max])               # mapping bounds, else joint limits
+  u      = clamp(u + gate·idleValue(clock))   # idle sway, gated off while the target moves
+  y      = spring ? springStep(prev, vel, u)  # semi-implicit Euler, hz/zeta
+         : prev + (1 − exp(−2π·cutoff·dt))·(u − prev)   # one-pole, cutoff = smooth_hz or 6 Hz
   y      = prev + clamp(y − prev, ±max_speed·dt)
-  y      = clamp(y, [joint.min, joint.max])
+  y      = clamp(y, [joint.min, joint.max]);  vel = (y − prev)/dt
 toUrdfValues: (value + urdf_offset)·urdf_sign, deg→rad, mm→m, keyed by urdf_joint
 ```
 
 `tests/test_web_retarget_parity.py` runs both implementations on the same
 random channel stream (via `node web/dev/retarget_parity.mjs`) and requires
-agreement to 1e-6; it also checks that `web/robots/*.json` and `manifest.json`
-are current. Clip playback hands the retargeter *clip-time* `dt` (so 2× speed
+agreement to 1e-6 — on the shipped profiles and on a synthetic v1.1 profile
+that uses `soft_limit`, `idle` and `spring`; it also checks that
+`web/robots/*.json` and `manifest.json` are current. Clip playback hands the retargeter *clip-time* `dt` (so 2× speed
 is a faster robot, as it would be on hardware); the webcam hands it wall-clock
 `dt` from the video frame timestamps.
+
+## Record mode (contribute data from the page)
+
+In **Webcam live**: `subject` + role (speaking / listening) → **● Record** /
+**■ Stop** → **Download take** gives `<subject>_<slug>.zip` containing
+`motion.json` (canonical clip JSON, 30 Hz, `null` where the face was not
+tracked), `audio.webm` (MediaRecorder opus, t = 0 at the first audio sample)
+and `meta.json` (`source: webcam-browser`, role, arm, the raw neutral pose,
+`license: CC-BY-4.0`, tool versions). **Guided session** walks through the
+same prompts as `scripts/record_me.py` (read aloud with the Web Speech API,
+3-2-1 countdown, timed take) and bundles every take into one zip. Import with
+`animacy import-browser <zip> -o data/clips/<name>`. Listening takes get
+`speaking = 0` (the microphone hears the podcast, not the contributor).
 
 ## Adding a robot's viewer entry
 
@@ -116,11 +178,13 @@ bounding box.
 ## Verification
 
 ```
-python web/dev/screenshot.py        # headless: zero console errors, both robots load,
-                                    # native/canonical/puppet/A-B/webcam checks, PNGs in web/dev/shots/
+python web/dev/screenshot.py        # headless: zero console errors, both robots load, native/canonical/
+                                    # puppet/A-B/captured/talk(backends)/listen/webcam checks, PNGs in web/dev/shots/
+python web/dev/screenshot.py --with-tts   # + Kokoro TTS in the page (downloads ~90 MB once)
+python web/dev/verify_pages.py      # the LIVE GitHub Pages deployment: URDFs/meshes/clips over Pages, zero errors
 python web/dev/fps.py               # headed: FPS on the machine's GPU
 python web/dev/probe.py "<js expr>" # evaluate anything against the live page
-python -m pytest tests/test_web_retarget_parity.py
+python -m pytest tests/test_web_retarget_parity.py tests/test_web_features_parity.py tests/test_web_model_parity.py
 ```
 
 Webcam mode is exercised with Chromium's fake camera (`--use-fake-device-for-media-capture`)

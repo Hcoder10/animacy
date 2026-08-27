@@ -53,6 +53,25 @@
       <video id="webcam-video" playsinline muted></video>
       <canvas id="webcam-overlay"></canvas>
       <div class="wc-status" id="webcam-status">starting…</div>
+      <div class="rec-dot" id="rec-dot" hidden>REC <span id="rec-time">0.0</span> s</div>
+    </div>
+    <div id="session-panel" hidden>
+      <div class="sp-head">
+        <span class="sp-title">Guided recording session</span>
+        <label class="lbl chk"><input type="checkbox" id="sp-quick" /> quick (3 prompts)</label>
+        <label class="lbl chk"><input type="checkbox" id="sp-speak" checked /> read prompts aloud</label>
+        <span class="sp-progress" id="sp-progress"></span>
+        <button id="sp-close" class="icon" title="close">✕</button>
+      </div>
+      <div class="sp-prompt" id="sp-prompt">Sit ~60–90 cm from the camera, face fully in frame, lit from the front. Look at the camera as if it were the person. Don't perform, just talk. Each prompt is read out, then a 3-2-1 countdown, then it records for the stated time.</div>
+      <div class="sp-count" id="sp-count"></div>
+      <div class="sp-actions">
+        <button id="sp-start" class="primary">Start session</button>
+        <button id="sp-skip" disabled>Skip prompt</button>
+        <button id="sp-stop" disabled>Stop session</button>
+        <button id="sp-download" disabled>Download session (zip)</button>
+      </div>
+      <ul class="sp-takes" id="sp-takes"></ul>
     </div>
   </main>
 
@@ -62,9 +81,21 @@
         <button data-source="native" class="active" title="the vendor's own hand-authored clips">Native clip</button>
         <button data-source="canonical" title="human motion (captured or synthetic) retargeted through each ROBOT.md">Canonical clip</button>
         <button data-source="webcam" title="live MediaPipe face + pose → canonical channels → both robots">Webcam live</button>
-        <button data-source="model" title="ONNX motion model: speech + text → canonical channels (not wired yet)">Model <small>(coming)</small></button>
+        <button data-source="talk" title="type a line: Kokoro TTS in the browser → audio features → motion model → both robots, in sync with the voice">Talk <small>(model)</small></button>
+        <button data-source="listen" title="microphone → VAD → causal motion model (speaking = 0): the robots listen to you (experimental)">Listen <small>(mic)</small></button>
       </div>
       <select id="clip-select" class="wide" aria-label="clip"></select>
+      <span id="talk-controls" class="group" hidden>
+        <input id="talk-text" type="text" class="talk-text" aria-label="text to say" value="Hi! I'm animacy: one motion space for any expressive robot. Watch us move while I talk." />
+        <select id="talk-voice" aria-label="voice"></select>
+        <select id="talk-backend" aria-label="motion backend" title="model = learned audio→motion (ONNX); retrieval = motion matching against the human corpus; envelope = labelled heuristic"></select>
+        <button id="talk-say" class="primary">Say it</button>
+        <span id="talk-progress" class="progress" hidden><span class="fill"></span></span>
+      </span>
+      <span id="listen-controls" class="group" hidden>
+        <select id="listen-backend" aria-label="motion backend"></select>
+        <span id="listen-stat" class="muted">experimental: energy VAD → causal model, no gaze overlay yet</span>
+      </span>
       <label class="lbl">mapping
         <select id="mode-select" aria-label="retarget mode">
           <option value="default">default (face + torso)</option>
@@ -81,6 +112,13 @@
           </select>
         </label>
         <span id="webcam-stat" class="muted"></span>
+        <span class="group" id="record-controls" title="record the canonical stream + your microphone into a clip you can contribute (CC-BY-4.0)">
+          <input id="rec-subject" type="text" class="short" placeholder="subject" value="me" aria-label="subject id" />
+          <select id="rec-role" aria-label="role"><option value="speaking">speaking</option><option value="listening">listening</option></select>
+          <button id="rec-toggle" title="record a single take">● Record</button>
+          <button id="rec-download" disabled title="download the last take as <subject>_<slug>.zip">Download take</button>
+          <button id="rec-session" title="guided 12-minute session: the same prompts as scripts/record_me.py">Guided session</button>
+        </span>
       </span>
     </div>
     <div class="row transport">

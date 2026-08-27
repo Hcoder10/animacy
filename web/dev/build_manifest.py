@@ -75,7 +75,21 @@ def build() -> dict:
             except Exception as e:  # noqa: BLE001
                 print(f"warning: could not read {meta}: {e}", file=sys.stderr)
         models.append(entry)
-    return {"generated": time.strftime("%Y-%m-%dT%H:%M:%S"), "robots": robots, "native": native, "clips": captured, "models": models}
+    mdir = os.path.join(WEB, "models")
+    bundle = {k: os.path.isfile(os.path.join(mdir, f)) for k, f in (
+        ("model_json", "model.json"), ("a2m", "a2m.onnx"), ("vq_decoder", "vq_decoder.onnx"),
+        ("bigram", "bigram.bin"), ("retrieval", "retrieval.json"))}
+    bundle["retrieval"] = bundle["retrieval"] and os.path.isfile(os.path.join(mdir, "retrieval.bin"))
+    if bundle["model_json"]:
+        try:
+            mj = json.load(open(os.path.join(mdir, "model.json"), encoding="utf-8"))
+            bundle["default_backend"] = mj.get("default_backend", "retrieval")
+            bundle["arch"] = mj.get("arch", "a2m")
+            bundle["verdict"] = mj.get("verdict", {}).get("summary", "") if isinstance(mj.get("verdict"), dict) else ""
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: could not read model.json: {e}", file=sys.stderr)
+    return {"generated": time.strftime("%Y-%m-%dT%H:%M:%S"), "robots": robots, "native": native, "clips": captured,
+            "models": models, "bundle": bundle}
 
 
 def main() -> int:
@@ -85,7 +99,9 @@ def main() -> int:
         json.dump(m, fh, indent=1)
     for n, r in m["robots"].items():
         print(f"{n}: urdf {r['urdf']} {'OK' if r['exists'] else 'MISSING (viewer uses the dev stand-in)'}; {len(m['native'][n])} native clips")
-    print(f"{len(m['clips'])} captured clip(s) in web/clips; {len(m['models'])} model(s) in web/models; wrote {os.path.relpath(out, ROOT)}")
+    b = m["bundle"]
+    print(f"{len(m['clips'])} captured clip(s) in web/clips; model bundle: a2m={b['a2m']} vq={b['vq_decoder']} "
+          f"bigram={b['bigram']} retrieval={b['retrieval']}; wrote {os.path.relpath(out, ROOT)}")
     return 0
 
 

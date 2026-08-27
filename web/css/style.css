@@ -82,6 +82,12 @@ button.icon { font-family: var(--mono); min-width: 40px; }
 .group { display: inline-flex; gap: 8px; align-items: center; padding-left: 10px; border-left: 1px solid var(--line); }
 .group[hidden] { display: none; }
 .muted { color: var(--muted); font-weight: 400; }
+.talk-text { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; color: var(--text); font: inherit; min-width: 340px; width: 34vw; }
+button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+button.primary:disabled { opacity: 0.5; cursor: wait; }
+.progress { display: inline-block; width: 140px; height: 6px; background: #1d2432; border-radius: 3px; overflow: hidden; vertical-align: middle; }
+.progress[hidden] { display: none; }
+.progress .fill { display: block; height: 100%; width: 0; background: var(--accent-2); transition: width 0.2s; }
 .mono { font-family: var(--mono); font-size: 12px; }
 .transport #scrub { flex: 1; min-width: 160px; accent-color: var(--accent); }
 #speed { width: 110px; accent-color: var(--accent-2); }
@@ -114,6 +120,26 @@ select:disabled { opacity: 0.45; }
 #webcam-thumb video, #webcam-thumb canvas { position: absolute; inset: 0; width: 100%; height: 100%; transform: scaleX(-1); }
 #webcam-thumb canvas { pointer-events: none; }
 .wc-status { position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 8px; font-size: 11px; background: rgba(0, 0, 0, 0.55); color: var(--text); }
+
+/* ---------- record + guided session ---------- */
+input.short { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; color: var(--text); font: inherit; width: 90px; }
+#rec-toggle.on { background: var(--bad); border-color: var(--bad); color: #fff; }
+.rec-dot { position: absolute; top: 6px; left: 8px; font-size: 11px; font-weight: 700; color: #fff; background: rgba(220, 40, 40, 0.85); border-radius: 4px; padding: 1px 6px; font-family: var(--mono); }
+.rec-dot[hidden] { display: none; }
+#session-panel {
+  position: absolute; right: 14px; bottom: 14px; width: min(560px, 46vw); z-index: 6;
+  background: rgba(18, 23, 34, 0.96); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6); display: flex; flex-direction: column; gap: 10px;
+}
+#session-panel[hidden] { display: none; }
+.sp-head { display: flex; align-items: center; gap: 12px; }
+.sp-title { font-weight: 700; flex: 1; }
+.sp-progress { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.sp-prompt { font-size: 17px; line-height: 1.35; min-height: 3em; }
+.sp-count { font-family: var(--mono); font-size: 40px; font-weight: 700; color: var(--accent); min-height: 48px; }
+.sp-count.rec { color: var(--bad); }
+.sp-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.sp-takes { margin: 0; padding-left: 18px; font-size: 12px; color: var(--muted); max-height: 110px; overflow: auto; }
 
 /* ---------- toast ---------- */
 #toast { position: fixed; left: 50%; bottom: 200px; transform: translateX(-50%); background: #2a1a1a; color: #ffd0d0; border: 1px solid #5a2a2a; padding: 8px 14px; border-radius: 8px; font-size: 12.5px; max-width: 70vw; z-index: 20; }

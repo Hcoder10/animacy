@@ -55,6 +55,10 @@ retarget:                        # one or more named mappings from canonical cha
       max: 60
       deadband: 0.5              # |value| below this → 0 (kills tracker jitter)
       smooth_hz: 6               # one-pole low-pass cutoff for live use; offline uses zero-phase
+      # v1.1 keys — all optional, absent = v1 behaviour (exact equations: docs/RETARGET.md)
+      spring: { hz: 4, zeta: 0.7 }   # 2nd-order tracker instead of smooth_hz (overshoot-and-settle)
+      idle: { amp: 2, hz: 0.2 }      # deterministic sway added while the target is still; `still:` optional
+      soft_limit: 0.15               # tanh knee over the last 15 % of the range before the hard clamp
   puppet:                        # e.g. drive the lamp with your own arm
     base_yaw:      { from: shoulder_yaw }
     base_pitch:    { from: shoulder_pitch, gain: -1, offset: 90 }
@@ -84,9 +88,13 @@ native_clips:                    # the vendor's own hand-authored moves, if any
    `joints[].name`; the URDF may differ (`urdf_joint`, `urdf_sign`,
    `urdf_offset`) so vendor URDFs are used unmodified.
 2. **Values are `rest`-relative in `retarget`.** `joint = rest + offset + Σ gain·channel`,
-   then clamped to `[min, max]` (mapping bounds if given, else joint bounds),
-   then rate-limited to `max_speed` (offline: time is *stretched* so nothing is
-   clipped; live: velocity is clipped), then smoothed.
+   then deadband, then (if `soft_limit`) a tanh knee, then clamped to
+   `[min, max]` (mapping bounds if given, else joint bounds), then (if `idle`)
+   the gated sway is added, then tracked (`spring` if given, else the
+   `smooth_hz` one-pole; offline uses a zero-phase filter for the one-pole
+   case), then rate-limited to `max_speed` (offline: time is *stretched* so
+   nothing is clipped; live: velocity is clipped — always the last step
+   before the hard clamp). `docs/RETARGET.md` is the exact per-frame spec.
 3. **Every `from` must be a canonical channel** (`docs/CANONICAL.md`). Unknown
    channel = validation error, not silently zero.
 4. **Signs are fixed here, never in captured data.** If "look up" moves the

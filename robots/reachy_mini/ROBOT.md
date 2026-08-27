@@ -35,30 +35,67 @@ retarget:
   # A human head in conversation is a 6-DoF signal and Reachy's head is a 6-DoF
   # Stewart platform: near 1:1. Brows → antennas transfers *function* (each is
   # its owner's most legible affect channel), not geometry.
+  # Head/body gains were FITTED to Pollen's emotion library by
+  # scripts/retarget_fit.py: per joint, the |.|p95 excursion of the retargeted
+  # human corpus is matched to the |.|p95 of the 16 native clips, capped by
+  # headroom and by 1.25x the library's velocity p95 (docs/RETARGET.md has the
+  # before/after tables). Trackers are `spring`s (docs/RETARGET.md §spring):
+  # head zeta 0.7, translations and body critically damped, antennas zeta 0.45
+  # (they bounce and settle, ~20% overshoot). `idle` (§idle) sways the antennas
+  # and breathes the head while the person is still; `soft_limit` (§soft) is a
+  # tanh knee over the last 15% of each range.
   default:
-    head_yaw:   { from: head_yaw,   gain: 0.8, deadband: 0.3, smooth_hz: 6 }
-    head_pitch: { from: head_pitch, gain: 0.8, deadband: 0.3, smooth_hz: 6 }
-    head_roll:  { from: head_roll,  gain: 0.8, deadband: 0.3, smooth_hz: 6 }
-    head_x:     { from: head_x, gain: 0.2, smooth_hz: 4 }
-    head_y:     { from: head_y, gain: 0.2, smooth_hz: 4 }
-    head_z:     { from: head_z, gain: 0.25, smooth_hz: 4 }
+    head_yaw:   { from: head_yaw, gain: 2.363, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_pitch: { from: head_pitch, gain: 2.014, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15, idle: { amp: 0.5, hz: 0.22 } }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_roll:  { from: head_roll, gain: 1.919, deadband: 0.3, spring: { hz: 4.0, zeta: 0.7 }, soft_limit: 0.15, idle: { amp: 0.4, hz: 0.17 } }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_x:     { from: head_x, gain: 0.1445, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_y:     { from: head_y, gain: 0.3705, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15 }  # fitted by scripts/retarget_fit.py 2026-08-26
+    head_z:     { from: head_z, gain: 0.2551, spring: { hz: 2.5, zeta: 1.0 }, soft_limit: 0.15, idle: { amp: 1.0, hz: 0.22 } }  # fitted by scripts/retarget_fit.py 2026-08-26
     body_yaw:
       mix:
-        - { from: torso_yaw, gain: 0.8 }
-        - { from: head_yaw,  gain: 0.25 }   # big turns bring the body along
-      smooth_hz: 3
+        - { from: torso_yaw, gain: 2.4 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: head_yaw, gain: 0.75 }   # big turns bring the body along  # fitted by scripts/retarget_fit.py 2026-08-26
+      spring: { hz: 2.0, zeta: 1.0 }
+      soft_limit: 0.15
+    # Antennas. The two hinges are MIRROR images on the vendor URDF/daemon
+    # (+right = outward, +left = inward, both toward −y), so a symmetric "ears
+    # out" is antenna_left = −antenna_right — Pollen's whole library is
+    # authored that way, and so is this mapping: every expressive term has
+    # opposite signs on the two joints (a symmetric brow raise splays both ears
+    # OUTWARD), while the head-roll term has the same sign on both (a
+    # common-mode tilt). Anchors fitted from the library's statistics
+    # (docs/RETARGET.md §antennas; splay = (right − left)/2, degrees):
+    #   attentive1/amazed1/curious1 hold a splay of 31/49/16 (p95 45/55/49)
+    #     → a full brow raise = 55 of splay;
+    #   sad1/confused1/boredom1 droop to 87/81/74 (p95 130/112/131)
+    #     → a full brow furrow = 85 (ears down);
+    #   laughing1/yes1/cheerful1 perk 14/16/21 → a full mouth open = 15;
+    #   head down drags the ears down: pooled slope −2.2 splay/deg of pitch,
+    #     damped to −0.8 so ordinary nods only flutter them;
+    #   common-mode tilt vs head roll: pooled slope −0.67 (counter-rotation).
+    # Hardware array order ([left, right] on this unit vs the SDK's
+    # [right, left]) is the sink's business, not this mapping's: the signs
+    # here are per named joint.
     antenna_left:
       mix:
-        - { from: brow_l,    gain: 90 }
-        - { from: head_roll, gain: -0.5 }
-        - { from: mouth_open, gain: 15 }
-      smooth_hz: 8
+        - { from: brow_l, gain: -55 }
+        - { from: brow_furrow, gain: -85 }
+        - { from: mouth_open, gain: -15 }
+        - { from: head_pitch, gain: 0.8 }
+        - { from: head_roll, gain: -0.67 }
+      spring: { hz: 3.5, zeta: 0.45 }
+      idle: { amp: 3.0, hz: 0.3 }
+      soft_limit: 0.15
     antenna_right:
       mix:
-        - { from: brow_r,    gain: 90 }
-        - { from: head_roll, gain: 0.5 }
+        - { from: brow_r, gain: 55 }
+        - { from: brow_furrow, gain: 85 }
         - { from: mouth_open, gain: 15 }
-      smooth_hz: 8
+        - { from: head_pitch, gain: -0.8 }
+        - { from: head_roll, gain: -0.67 }
+      spring: { hz: 3.5, zeta: 0.45 }
+      idle: { amp: 3.0, hz: 0.3 }
+      soft_limit: 0.15
   # Puppet mode: the hand is the head (fist-bump / high-five behaviours).
   puppet:
     head_yaw:   { from: shoulder_yaw, gain: 0.6, smooth_hz: 6 }

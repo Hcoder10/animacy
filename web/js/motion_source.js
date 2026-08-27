@@ -321,42 +321,7 @@ export class WebcamSource extends MotionSource {
   }
 }
 
-/**
- * The motion model slot (coming soon).
- *
- * Contract for the ONNX model that will plug in here:
- *   inputs, per tick at `rate_hz` (30 Hz):
- *     text_tokens   int64 [1, T]      what the robot is saying (already tokenised)
- *     audio_feats   float32 [1, F, 80] log-mel frames of the robot's own TTS audio,
- *                                     aligned so the last frame ends at this tick
- *     speaking      float32 [1]       1 while the robot is talking, 0 while listening
- *     state         float32 [1, S]    recurrent state from the previous tick (zeros at start)
- *   outputs:
- *     channels      float32 [1, C]    C = MAPPABLE canonical channels, in canonical
- *                                     units (deg / mm / 0..1), neutral-relative
- *     state_out     float32 [1, S]
- * The runner keeps `state`, calls the session once per tick, and emits
- * {t, dt: 1/rate_hz, channels} — identical to what a canonical clip yields, so
- * every robot consumes it through its ROBOT.md with no viewer changes.
- * `channels` is masked with face_valid=1, arm_valid=0 (the model is head+torso
- * only until the puppet-arm corpus exists).
- */
-export class ModelSource extends MotionSource {
-  /**
-   * @param {Array<{file:string,name:string,bytes?:number,meta?:object}>} [models]
-   *        entries from web/manifest.json `models` (web/models/*.onnx on disk).
-   *        Nothing is fetched here: an absent model is the normal, non-error state.
-   */
-  constructor(models = []) {
-    super();
-    this.models = models || [];
-    this.available = false; // flips to true once a runner is wired to a present model
-    this.description = this.models.length
-      ? `model ${this.models[0].file}${this.models[0].bytes ? ` (${(this.models[0].bytes / 1e6).toFixed(1)} MB)` : ''} is in web/models/ — the ONNX runner is not wired in this build yet (contract in web/js/motion_source.js)`
-      : 'Model (coming soon): no model in web/models/ yet — an ONNX motion model will stream canonical channels from speech + text';
-  }
-
-  /** Never throws: with no runner the robots simply rest. */
-  async start() { return this; }
-  update(_realDt) { return null; }
-}
+// The learned motion model lives in model.js (ONNX runner, retrieval index,
+// envelope heuristic) and is driven by TalkSource / ListenSource in talk.js:
+// text → Kokoro TTS → features.js → model.js → canonical frames → the same
+// {t, dt, channels} frames as a canonical clip.

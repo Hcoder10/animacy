@@ -2,14 +2,17 @@
 
 * code NLL / top-1 vs a unigram ("majority code") floor and vs retrieval;
 * motion statistics: per-channel |velocity| histogram distance (Wasserstein-1)
-  and stillness ratio vs ground truth, for model / retrieval / shuffled-audio;
+  and stillness ratio vs ground truth, for every generator and its
+  shuffled-audio control;
 * beat alignment: fraction of ground-truth head-velocity peaks within +-150 ms
-  of a generated peak, and the same with block-shuffled audio (the model must
-  beat its own shuffle);
+  of a generated peak, and the same with block-shuffled audio (a generator
+  must beat its own shuffle);
 * retarget legality: speed-cap violations after ``retarget_clip`` on every
   robot profile given.
 
-Everything here is computed on whole contiguous runs of held-out clips.
+Generators: ``model`` = the feed-forward audio -> codes model ("ff"),
+``ar`` = the autoregressive one, ``retrieval`` = motion matching. Everything
+is computed on whole contiguous runs of held-out clips.
 """
 from __future__ import annotations
 
@@ -32,6 +35,9 @@ BEAT_MIN_PROMINENCE = 10.0  # deg/s
 SHUFFLE_BLOCK = 60          # 2 s blocks
 METRIC_SMOOTH_HZ = 6.0      # every condition, ground truth included, is filtered the same way
                             # before velocities are taken: tracking jitter is not motion
+BEAT_MARGIN = 0.05          # recall points a generator must beat its own shuffle by; the shuffle
+                            # itself moves by ~+-0.04 across sampling settings on 3 min of held-out data
+ARCH_COND = {"ff": "model", "ar": "ar"}     # arch -> condition name in the tables
 
 
 def head_speed(motion: np.ndarray, rate_hz: float = RATE_HZ) -> np.ndarray:
@@ -57,8 +63,7 @@ def block_shuffle(x: np.ndarray, block: int, rng: np.random.Generator) -> np.nda
     n_blocks = max(1, n // block)
     idx = np.arange(n_blocks)
     if n_blocks > 1:
-        # a derangement-ish permutation: keep re-drawing until no block stays put
-        for _ in range(20):
+        for _ in range(20):                       # a derangement-ish permutation
             rng.shuffle(idx)
             if not np.any(idx == np.arange(n_blocks)):
                 break
@@ -92,6 +97,14 @@ def beat_alignment(gt_speed: np.ndarray, gen_speed: np.ndarray, prominence: floa
     return {"n_gt_peaks": int(len(pg)), "n_gen_peaks": int(len(pm)), "recall": recall, "precision": precision, "f1": f1}
 
 
+def _pooled_beats(ba: List[Dict]) -> Dict[str, float]:
+    n_gt = sum(x["n_gt_peaks"] for x in ba)
+    n_gen = sum(x["n_gen_peaks"] for x in ba)
+    rec = sum(x["recall"] * x["n_gt_peaks"] for x in ba) / max(n_gt, 1)
+    prec = sum(x["precision"] * x["n_gen_peaks"] for x in ba) / max(n_gen, 1)
+    return {"n_gt_peaks": n_gt, "n_gen_peaks": n_gen, "recall": rec, "precision": prec, "f1": 2 * rec * prec / max(rec + prec, 1e-9)}
+
+
 def wasserstein_per_channel(gen: np.ndarray, gt: np.ndarray) -> np.ndarray:
     from scipy.stats import wasserstein_distance
 
@@ -112,37 +125,63 @@ def speed_violations(joints, profile: Profile) -> Dict[str, float]:
     return {"violations": n_viol, "worst_speed_ratio": worst, "duration_s": float(t[-1] - t[0]) if len(t) else 0.0}
 
 
-BEAT_MARGIN = 0.05          # recall points the model must beat its own shuffle by; the shuffle
-                            # itself moves by ~+-0.04 across sampling settings on 3 min of held-out data
+def _log_softmax(lg: np.ndarray) -> np.ndarray:
+    lg = np.asarray(lg, np.float64)
+    lg = lg - lg.max(axis=1, keepdims=True)
+    return lg - np.log(np.exp(lg).sum(axis=1, keepdims=True))
 
 
 def compute_verdict(out: Dict) -> Dict:
-    """The learned model ships as the default only if it beats its shuffled-audio
-    control on head-beat recall by at least ``BEAT_MARGIN``; otherwise retrieval does."""
-    b = out["beat"]
-    rm, rs = b.get("model", {}).get("recall"), b.get("model_shuffled", {}).get("recall")
-    margin = (rm - rs) if (rm is not None and rs is not None) else None
-    beats = margin is not None and margin >= BEAT_MARGIN
+    """Which generator ships as the default. A learned generator qualifies only if it beats
+    its own shuffled-audio control on head-beat recall by ``BEAT_MARGIN`` AND its held-out
+    code NLL is below the unigram floor; the autoregressive model is preferred, then the
+    feed-forward one, else retrieval."""
+    b, c = out["beat"], out["codes"]
+    floor = c.get("nll_unigram_floor")
+    cands = {}
+    for arch, cond in ARCH_COND.items():
+        if cond not in b:
+            continue
+        rm, rs = b[cond]["recall"], b[f"{cond}_shuffled"]["recall"]
+        nll = c.get(f"nll_{cond}")
+        margin = rm - rs
+        cands[arch] = {"condition": cond, "beat_recall": rm, "shuffled_beat_recall": rs, "margin": margin,
+                       "nll": nll, "nll_unigram_floor": floor,
+                       "beats_shuffle": bool(margin >= BEAT_MARGIN),
+                       "below_floor": bool(nll is not None and floor is not None and nll < floor),
+                       "stillness": out["stillness"].get(cond), "w1_relative_mean": out["velocity"].get(cond, {}).get("w1_relative_mean")}
+        cands[arch]["qualifies"] = cands[arch]["beats_shuffle"] and cands[arch]["below_floor"]
+    default = "retrieval"
+    for arch in ("ar", "ff"):
+        if arch in cands and cands[arch]["qualifies"]:
+            default = arch if arch == "ar" else "model"
+            break
+    best_arch = max(cands, key=lambda a: cands[a]["margin"]) if cands else None
     return {
-        "model_beats_shuffled_audio_on_beat_recall": bool(beats),
         "required_margin": BEAT_MARGIN,
-        "margin": margin,
-        "model_beat_recall": rm,
-        "model_shuffled_beat_recall": rs,
+        "candidates": cands,
+        "default_backend": default,
+        "default_arch": best_arch,
         "retrieval_beat_recall": b.get("retrieval", {}).get("recall"),
         "retrieval_shuffled_beat_recall": b.get("retrieval_shuffled", {}).get("recall"),
-        "nll_model_vs_unigram_floor": [out["codes"].get("nll_model"), out["codes"].get("nll_unigram_floor")],
-        "default_backend": "model" if beats else "retrieval",
+        # kept for readers of the v1 metrics.json
+        "model_beats_shuffled_audio_on_beat_recall": bool(cands.get("ff", {}).get("beats_shuffle", False)),
+        "model_beat_recall": cands.get("ff", {}).get("beat_recall"),
+        "model_shuffled_beat_recall": cands.get("ff", {}).get("shuffled_beat_recall"),
+        "margin": cands.get("ff", {}).get("margin"),
+        "nll_model_vs_unigram_floor": [c.get("nll_model"), floor],
     }
 
 
 def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Sequence[ClipData],
              profiles: Sequence[Profile], seed: int = 0, temperature: float = 0.8, bigram_weight: float = 0.5,
-             max_runs: Optional[int] = None, verbose: bool = True) -> Dict:
+             top_p: float = 0.9, archs: Optional[Sequence[str]] = None, max_runs: Optional[int] = None,
+             verbose: bool = True, repeat_penalty: float = 0.0, stay_bias: float = 0.0, stay_energy: float = -0.3) -> Dict:
     rng = np.random.default_rng(seed)
     stats = model.vq.stats
     unigram = model.info.get("unigram")
     unigram = np.asarray(unigram, np.float64) if unigram is not None else None
+    archs = list(archs) if archs is not None else model.archs
 
     runs = [(c, a, b) for c in val_clips if c.has_audio for a, b in c.runs]
     if max_runs:
@@ -150,25 +189,31 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
     if not runs:
         return {"error": "no held-out runs with audio"}
 
-    conds = ["model", "model_shuffled", "model_causal", "retrieval", "retrieval_shuffled"]
+    conds: List[str] = []
+    for arch in archs:
+        cn = ARCH_COND[arch]
+        conds += [cn, f"{cn}_shuffled", f"{cn}_causal"]
+    if index is not None and len(index):
+        conds += ["retrieval", "retrieval_shuffled"]
     gen: Dict[str, List[np.ndarray]] = {k: [] for k in conds}
     gts: List[np.ndarray] = []
     spk: List[np.ndarray] = []
-    nll = {"model": [], "model_causal": [], "unigram": [], "retrieval_eps": []}
-    acc = {"model": [], "model_causal": [], "majority": [], "retrieval": []}
+    nll: Dict[str, List[np.ndarray]] = {}
+    acc: Dict[str, List[np.ndarray]] = {}
     n_steps = 0
     for k, (c, a, b) in enumerate(runs):
         n = ((b - a) // FRAMES_PER_CODE) * FRAMES_PER_CODE
         f, s, gt = c.features[a:a + n], c.speaking[a:a + n], c.motion[a:a + n]
         fs = block_shuffle(f, SHUFFLE_BLOCK, rng)
         ss = block_shuffle(s, SHUFFLE_BLOCK, rng)
-        m_model, _ = generate_motion(model, f, s, causal=False, temperature=temperature, bigram_weight=bigram_weight, seed=seed + k)
-        m_shuf, _ = generate_motion(model, fs, ss, causal=False, temperature=temperature, bigram_weight=bigram_weight, seed=seed + k)
-        m_causal, _ = generate_motion(model, f, s, causal=True, temperature=temperature, bigram_weight=bigram_weight, seed=seed + k)
-        gen["model"].append(m_model)
-        gen["model_shuffled"].append(m_shuf)
-        gen["model_causal"].append(m_causal)
-        if index is not None and len(index):
+        kw = dict(temperature=temperature, bigram_weight=bigram_weight, top_p=top_p, seed=seed + k, repeat_penalty=repeat_penalty,
+                  stay_bias=stay_bias, stay_energy=stay_energy)
+        for arch in archs:
+            cn = ARCH_COND[arch]
+            gen[cn].append(generate_motion(model, f, s, causal=False, arch=arch, **kw)[0])
+            gen[f"{cn}_shuffled"].append(generate_motion(model, fs, ss, causal=False, arch=arch, **kw)[0])
+            gen[f"{cn}_causal"].append(generate_motion(model, f, s, causal=True, arch=arch, **kw)[0])
+        if "retrieval" in gen:
             gen["retrieval"].append(index.query(f, s))
             gen["retrieval_shuffled"].append(index.query(fs, ss))
         gts.append(gt)
@@ -177,40 +222,51 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
         # --- code-level metrics on this run
         codes_gt = model.vq.encode(normalise(gt, stats))
         f15, s15 = pool_pairs(f), pool_flag(s)
-        for name, causal in (("model", False), ("model_causal", True)):
-            lg = model.a2m.logits(f15, s15, causal=causal).astype(np.float64)
-            lg = lg - lg.max(axis=1, keepdims=True)
-            logp = lg - np.log(np.exp(lg).sum(axis=1, keepdims=True))
-            nll[name].append(-logp[np.arange(len(codes_gt)), codes_gt])
-            acc[name].append((lg.argmax(axis=1) == codes_gt).astype(np.float64))
+        for arch in archs:
+            cn = ARCH_COND[arch]
+            for name, causal in ((cn, False), (f"{cn}_causal", True)):
+                if arch == "ff":
+                    lg = model.a2m.logits(f15, s15, causal=causal)
+                else:
+                    lg = model.ar.teacher_forced_logits(f15, s15, codes_gt, causal=causal)
+                logp = _log_softmax(lg)
+                nll.setdefault(name, []).append(-logp[np.arange(len(codes_gt)), codes_gt])
+                acc.setdefault(name, []).append((logp.argmax(axis=1) == codes_gt).astype(np.float64))
         if unigram is not None:
-            nll["unigram"].append(-np.log(np.maximum(unigram[codes_gt], 1e-12)))
-            acc["majority"].append((codes_gt == int(unigram.argmax())).astype(np.float64))
-        if gen["retrieval"]:
+            nll.setdefault("unigram", []).append(-np.log(np.maximum(unigram[codes_gt], 1e-12)))
+            acc.setdefault("majority", []).append((codes_gt == int(unigram.argmax())).astype(np.float64))
+        if "retrieval" in gen:
             codes_r = model.vq.encode(normalise(gen["retrieval"][-1], stats))
             eps, nc = 0.05, model.n_codes
             hit = codes_r[:len(codes_gt)] == codes_gt
-            acc["retrieval"].append(hit.astype(np.float64))
-            nll["retrieval_eps"].append(-np.log(np.where(hit, 1 - eps + eps / nc, eps / nc)))
+            acc.setdefault("retrieval", []).append(hit.astype(np.float64))
+            nll.setdefault("retrieval_eps", []).append(-np.log(np.where(hit, 1 - eps + eps / nc, eps / nc)))
         n_steps += len(codes_gt)
 
-    def cat(xs):
-        return np.concatenate(xs) if xs else np.zeros(0)
+    def mean_of(d, key):
+        return float(np.concatenate(d[key]).mean()) if key in d and d[key] else None
 
+    codes_out = {
+        "nll_unigram_floor": mean_of(nll, "unigram"),
+        "top1_majority_floor": mean_of(acc, "majority"),
+        "nll_retrieval_eps0.05": mean_of(nll, "retrieval_eps"),
+        "top1_retrieval": mean_of(acc, "retrieval"),
+    }
+    for arch in archs:
+        cn = ARCH_COND[arch]
+        codes_out[f"nll_{cn}"] = mean_of(nll, cn)
+        codes_out[f"nll_{cn}_causal"] = mean_of(nll, f"{cn}_causal")
+        codes_out[f"top1_{cn}"] = mean_of(acc, cn)
+        codes_out[f"top1_{cn}_causal"] = mean_of(acc, f"{cn}_causal")
     out: Dict = {
         "held_out": {"n_clips": len({c.name for c, _, _ in runs}), "n_runs": len(runs),
                      "frames": int(sum(len(g) for g in gts)), "seconds": round(sum(len(g) for g in gts) / RATE_HZ, 1),
                      "code_steps": int(n_steps)},
-        "codes": {
-            "nll_model": float(cat(nll["model"]).mean()),
-            "nll_model_causal": float(cat(nll["model_causal"]).mean()),
-            "nll_unigram_floor": float(cat(nll["unigram"]).mean()) if nll["unigram"] else None,
-            "nll_retrieval_eps0.05": float(cat(nll["retrieval_eps"]).mean()) if nll["retrieval_eps"] else None,
-            "top1_model": float(cat(acc["model"]).mean()),
-            "top1_model_causal": float(cat(acc["model_causal"]).mean()),
-            "top1_majority_floor": float(cat(acc["majority"]).mean()) if acc["majority"] else None,
-            "top1_retrieval": float(cat(acc["retrieval"]).mean()) if acc["retrieval"] else None,
-        },
+        "archs": archs,
+        "conditions": conds,
+        "sampling": {"temperature": temperature, "bigram_weight": bigram_weight, "top_p": top_p, "repeat_penalty": repeat_penalty,
+                     "stay_bias": stay_bias, "stay_energy": stay_energy},
+        "codes": codes_out,
     }
 
     # --- motion statistics
@@ -238,27 +294,15 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
         }
         sp = np.concatenate([head_speed(g) for g in gen[cond]])
         out["stillness"][cond] = float((sp < STILL_DEG_PER_S).mean())
-        ba = [beat_alignment(head_speed(gt), head_speed(g), prominence) for gt, g in zip(gts, gen[cond])]
-        n_gt = sum(x["n_gt_peaks"] for x in ba)
-        n_gen = sum(x["n_gen_peaks"] for x in ba)
-        rec = sum(x["recall"] * x["n_gt_peaks"] for x in ba) / max(n_gt, 1)
-        prec = sum(x["precision"] * x["n_gen_peaks"] for x in ba) / max(n_gen, 1)
-        out["beat"][cond] = {"n_gt_peaks": n_gt, "n_gen_peaks": n_gen, "recall": rec, "precision": prec,
-                             "f1": 2 * rec * prec / max(rec + prec, 1e-9)}
-        ba = [beat_alignment(all_channel_speed(gt, stats["std"]), all_channel_speed(g, stats["std"]), prominence_all)
-              for gt, g in zip(gts, gen[cond])]
-        n_gt = sum(x["n_gt_peaks"] for x in ba)
-        n_gen = sum(x["n_gen_peaks"] for x in ba)
-        rec = sum(x["recall"] * x["n_gt_peaks"] for x in ba) / max(n_gt, 1)
-        prec = sum(x["precision"] * x["n_gen_peaks"] for x in ba) / max(n_gen, 1)
-        out["beat_all_channels"][cond] = {"n_gt_peaks": n_gt, "n_gen_peaks": n_gen, "recall": rec, "precision": prec,
-                                          "f1": 2 * rec * prec / max(rec + prec, 1e-9)}
+        out["beat"][cond] = _pooled_beats([beat_alignment(head_speed(gt), head_speed(g), prominence) for gt, g in zip(gts, gen[cond])])
+        out["beat_all_channels"][cond] = _pooled_beats([beat_alignment(all_channel_speed(gt, stats["std"]), all_channel_speed(g, stats["std"]), prominence_all)
+                                                        for gt, g in zip(gts, gen[cond])])
 
     # --- retarget legality on every generated clip
     out["legality"] = {}
     for prof in profiles:
-        for cond in ("model", "model_causal", "retrieval"):
-            if not gen[cond]:
+        for cond in conds:
+            if cond.endswith("_shuffled") or not gen[cond]:
                 continue
             viol, worst, stretch = 0, 0.0, []
             for g, s in zip(gen[cond], spk):
@@ -272,12 +316,13 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
                                                        "mean_time_stretch": round(float(np.mean(stretch)), 4)}
 
     out["verdict"] = compute_verdict(out)
-    beats_shuffle = out["verdict"]["model_beats_shuffled_audio_on_beat_recall"]
     if verbose:
         c = out["codes"]
-        print(f"  codes: NLL model {c['nll_model']:.3f} / causal {c['nll_model_causal']:.3f} / unigram floor "
-              f"{c['nll_unigram_floor'] if c['nll_unigram_floor'] is None else round(c['nll_unigram_floor'], 3)} ; "
-              f"top1 model {c['top1_model']:.3f} / majority {c['top1_majority_floor']} / retrieval {c['top1_retrieval']}")
+        line = f"  codes: unigram floor NLL {c['nll_unigram_floor'] if c['nll_unigram_floor'] is None else round(c['nll_unigram_floor'], 3)}"
+        for arch in archs:
+            cn = ARCH_COND[arch]
+            line += f" | {cn}: NLL {c[f'nll_{cn}']:.3f} / causal {c[f'nll_{cn}_causal']:.3f}, top1 {c[f'top1_{cn}']:.3f}"
+        print(line + f" | retrieval top1 {c['top1_retrieval']}")
         for cond in conds:
             if cond in out["beat"]:
                 bb, st, vv, bA = out["beat"][cond], out["stillness"][cond], out["velocity"][cond], out["beat_all_channels"][cond]
@@ -285,5 +330,10 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
                       f"all-ch recall {bA['recall']:.3f} prec {bA['precision']:.3f}  still {st:.3f} (gt {out['stillness']['gt']:.3f})  W1 rel {vv['w1_relative_mean']:.3f}")
         for k, v in out["legality"].items():
             print(f"  legality {k}: {v['violations']} violations, worst ratio {v['worst_speed_ratio']}, stretch x{v['mean_time_stretch']}")
-        print(f"  verdict: {'model beats shuffled audio' if beats_shuffle else 'MODEL DOES NOT BEAT SHUFFLED AUDIO'} -> default backend = {out['verdict']['default_backend']}")
+        vd = out["verdict"]
+        for arch, cd in vd["candidates"].items():
+            print(f"  {arch}: margin over shuffle {cd['margin']:+.3f} (need >= {BEAT_MARGIN}), NLL {cd['nll']:.3f} vs floor "
+                  f"{cd['nll_unigram_floor'] if cd['nll_unigram_floor'] is None else round(cd['nll_unigram_floor'], 3)} -> "
+                  f"{'QUALIFIES' if cd['qualifies'] else 'does not qualify'}")
+        print(f"  verdict: default backend = {vd['default_backend']}")
     return out

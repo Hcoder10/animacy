@@ -12,6 +12,11 @@ Asserts:
   * joint values change during native `nod` / `headshake` playback on the lamp
   * a calibration clip moves BOTH robots with the documented signs
   * puppet mode + A/B viewport work
+  * every captured clip in web/clips drives both robots
+  * Talk tab: a synthetic 24 kHz voice goes through features → each available
+    backend (model / retrieval / envelope) → both robots, clocked to WebAudio
+    (--with-tts additionally runs Kokoro TTS in the page)
+  * Listen tab starts on the fake microphone
   * webcam mode initialises without throwing (fake camera; no face expected)
 Exit code 1 on any failure. Run with --keep to leave the http server running.
 """
@@ -28,6 +33,10 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 SHOTS = os.path.join(HERE, "shots")
+
+# Windows consoles default to cp1252; the page's status strings are UTF-8.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def wait_port(port: int, timeout: float = 15.0) -> None:
@@ -54,6 +63,7 @@ def main() -> int:
     ap.add_argument("--skip-webcam", action="store_true")
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--query", default="", help="extra query string, e.g. standin=1")
+    ap.add_argument("--with-tts", action="store_true", help="also run Kokoro TTS in the page (downloads ~90 MB once)")
     a = ap.parse_args()
 
     from playwright.sync_api import sync_playwright
@@ -89,7 +99,8 @@ def main() -> int:
             page = ctx.new_page()
 
             # MediaPipe's wasm runtime routes its own INFO lines through console.error; not ours.
-            benign = ("INFO: Created TensorFlow Lite XNNPACK delegate",)
+            # ...and kokoro-js' bundled onnxruntime logs its EP-assignment warnings the same way.
+            benign = ("INFO: Created TensorFlow Lite XNNPACK delegate", "[W:onnxruntime", "Unable to determine content-length")
 
             def on_console(msg):
                 if msg.type == "error":
@@ -160,24 +171,44 @@ def main() -> int:
             ev("window.animacy.pause(); window.animacy.seek(0)")
             page.wait_for_timeout(120)
             l0, r0 = joints("lamp"), joints("reachy_mini")
+            fwd0 = {n: ev(f"window.animacy.linkForward('{n}', 'head')") for n in ("lamp", "reachy_mini")}
             ev("window.animacy.seek(0.55); window.animacy.play()")  # peak head_yaw=+30 at t=1.0 s
             page.wait_for_timeout(520)
             l1, r1 = joints("lamp"), joints("reachy_mini")
             ch = ev("window.animacy.getChannels()")
+            fwd1 = {n: ev(f"window.animacy.linkForward('{n}', 'head')") for n in ("lamp", "reachy_mini")}
             print(f"cal look-left: head_yaw={ch['head_yaw']:.1f} lamp wrist_roll {l0['wrist_roll']:.1f}->{l1['wrist_roll']:.1f} base_yaw {l0['base_yaw']:.1f}->{l1['base_yaw']:.1f} | reachy head_yaw {r0['head_yaw']:.1f}->{r1['head_yaw']:.1f} body_yaw {r0['body_yaw']:.1f}->{r1['body_yaw']:.1f}")
             if ch["head_yaw"] < 15:
                 failures.append(f"expected head_yaw near +30 at t≈1 s, got {ch['head_yaw']}")
-            if not (l1["wrist_roll"] > l0["wrist_roll"] + 5):
-                failures.append("lamp wrist_roll did not go POSITIVE on look-left (default mapping gain +1)")
-            if not (r1["head_yaw"] > r0["head_yaw"] + 5):
-                failures.append("reachy head_yaw did not go POSITIVE on look-left")
+            # physical check, independent of ROBOT.md gain signs: each head's forward axis must swing
+            # toward the robot's LEFT (three.js −z) when the human looks left
+            for n in ("lamp", "reachy_mini"):
+                if fwd0[n] and fwd1[n]:
+                    dz = fwd1[n]["z"] - fwd0[n]["z"]
+                    print(f"  {n} head forward z: {fwd0[n]['z']:+.3f} -> {fwd1[n]['z']:+.3f} ({'LEFT' if dz < 0 else 'RIGHT'})")
+                    if dz > -0.05:
+                        failures.append(f"{n}: head did not turn LEFT on canonical head_yaw=+30 (Δz={dz:+.3f}); check the yaw gains in robots/{n}/ROBOT.md vs the URDF axis")
+                else:
+                    warnings.append(f"{n}: no link named 'head' — left/right check skipped")
             shot("04_cal_look_left_both")
             # front view, frozen at the peak: the robots' LEFT must be on the viewer's RIGHT
             ev("window.animacy.pause(); window.animacy.seek(1.0); window.animacy.setView('front')")
             page.wait_for_timeout(600)
             shot("04b_cal_look_left_FRONT_view")
-            ev("(async () => { await window.animacy.setClip('synth/cal_look_up_down'); window.animacy.pause(); window.animacy.seek(1.0); })()")
-            page.wait_for_timeout(700)
+            ev("(async () => { await window.animacy.setClip('synth/cal_look_up_down'); window.animacy.pause(); window.animacy.seek(0); })()")
+            page.wait_for_timeout(500)
+            up0 = {n: ev(f"window.animacy.linkForward('{n}', 'head')") for n in ("lamp", "reachy_mini")}
+            ev("window.animacy.seek(0.55); window.animacy.play()")  # peak head_pitch=+20 at t=1.0 s
+            page.wait_for_timeout(520)
+            up1 = {n: ev(f"window.animacy.linkForward('{n}', 'head')") for n in ("lamp", "reachy_mini")}
+            for n in ("lamp", "reachy_mini"):
+                if up0[n] and up1[n]:
+                    dy = up1[n]["y"] - up0[n]["y"]
+                    print(f"  look-up: {n} head forward y: {up0[n]['y']:+.3f} -> {up1[n]['y']:+.3f} ({'UP' if dy > 0 else 'DOWN'})")
+                    if dy < 0.03:
+                        failures.append(f"{n}: head did not tip UP on canonical head_pitch=+20 (Δy={dy:+.3f})")
+            ev("window.animacy.pause(); window.animacy.seek(1.0)")
+            page.wait_for_timeout(400)
             shot("04c_cal_look_up_FRONT_view")
             ev("window.animacy.setView('iso'); window.animacy.play()")
 
@@ -239,7 +270,7 @@ def main() -> int:
                     chc = ev("window.animacy.getChannels()")
                     best_l = max(best_l, max(abs(lc[j] - rest_l[j]) for j in rest_l))
                     best_r = max(best_r, max(abs(rc[j] - rest_r[j]) for j in rest_r))
-                    valid += int(chc["face_valid"] == 1)
+                    valid += int(bool(chc) and chc["face_valid"] == 1)
                     page.wait_for_timeout(100)
                 print(f"captured {cid}: dur={dur:.1f}s, over 3 s from t={min(20.0, dur * 0.3):.0f}: lamp max |joint-rest| {best_l:.1f}, reachy {best_r:.1f} (deg/mm), face_valid samples {valid}")
                 if best_l < 1.0 or best_r < 1.0:
@@ -249,15 +280,64 @@ def main() -> int:
             if not captured:
                 print("no captured clips in web/clips (skipped)")
 
-            # ---- Model tab: must degrade gracefully with no web/models/*.onnx ------
-            ev("window.animacy.setSource('model')")
-            page.wait_for_function("window.animacy.sourceInfo().kind === 'model'", timeout=20_000)
-            page.wait_for_timeout(600)
-            model_status = ev("({status: document.getElementById('status').textContent, cls: document.getElementById('status').className, models: (window.animacy.source && window.animacy.source.models) || []})")
-            print(f"model tab: {model_status['status']!r} ({len(model_status['models'])} model file(s) in manifest)")
-            if "err" in model_status["cls"]:
-                failures.append(f"model tab reported an error: {model_status['status']}")
-            shot("10_model_tab")
+            # ---- Talk tab: synthetic voice → features → every available backend → both robots --
+            # (TTS itself needs the ~90 MB Kokoro download: --with-tts runs it too)
+            ev("window.animacy.setSource('talk')")
+            page.wait_for_function("window.animacy.sourceInfo().kind === 'talk'", timeout=20_000)
+            page.wait_for_timeout(300)
+            talk0 = ev("({status: document.getElementById('status').textContent, cls: document.getElementById('status').className, available: window.animacy.backends.available()})")
+            print(f"talk tab: {talk0['status']!r}")
+            if "err" in talk0["cls"]:
+                failures.append(f"talk tab reported an error: {talk0['status']}")
+            # a 2.5 s synthetic voice at 24 kHz (what Kokoro would hand back)
+            voice_js = """(() => { const sr = 24000, n = Math.round(2.5 * sr), out = new Float32Array(n);
+                for (let i = 0; i < n; i++) { const t = i / sr; const env = (t % 0.45) < 0.25 ? Math.sin(Math.PI * ((t % 0.45) / 0.25)) : 0;
+                  let v = 0; for (let k = 1; k < 6; k++) v += Math.sin(2 * Math.PI * 130 * k * t) / k; out[i] = 0.5 * env * v + 0.01 * (Math.random() - 0.5); }
+                return Array.from(out); })()"""
+            for backend in talk0["available"]:
+                t_b = time.time()
+                info = ev(f"(async () => {{ const a = {voice_js}; return await window.animacy.sayAudio(a, 24000, '{backend}'); }})()")
+                elapsed = time.time() - t_b
+                # motion is clocked to the AudioContext, which headless Chromium can take a few
+                # seconds to start the first time; the robots hold until the audio really runs
+                for _ in range(60):
+                    page.wait_for_timeout(100)
+                    ti = ev("window.animacy.talkInfo()")
+                    if ti["time"] > 0.6:
+                        break
+                page.wait_for_timeout(300)
+                ti = ev("window.animacy.talkInfo()")
+                lc, rc = joints("lamp"), joints("reachy_mini")
+                best_l = max(abs(lc[j] - rest_l[j]) for j in rest_l)
+                best_r = max(abs(rc[j] - rest_r[j]) for j in rest_r)
+                print(f"talk/{backend}: used={info['backend']} frames={info['frames']} motion {info['motionMs']:.0f} ms (wall {elapsed:.1f} s incl. load) · audio clock t={ti['time']:.2f}/{ti['duration']:.2f} playing={ti['playing']} · lamp |Δ| {best_l:.1f} reachy |Δ| {best_r:.1f}")
+                if info["backend"] != backend:
+                    failures.append(f"talk backend '{backend}' fell back to '{info['backend']}'")
+                if info["frames"] < 70:
+                    failures.append(f"talk/{backend}: expected ~75 frames for 2.5 s, got {info['frames']}")
+                if not ti["playing"] or ti["time"] < 0.3:
+                    failures.append(f"talk/{backend}: audio clock did not advance (t={ti['time']}, playing={ti['playing']})")
+                if best_l < 0.5 or best_r < 0.5:
+                    failures.append(f"talk/{backend}: robots did not move (lamp {best_l:.2f}, reachy {best_r:.2f})")
+                if backend == talk0["available"][0]:
+                    shot("10_talk_tab")
+            if a.with_tts:
+                t_b = time.time()
+                said = ev("(async () => await window.animacy.say('Hello from animacy.'))()")
+                print(f"talk/TTS: {said} in {time.time() - t_b:.1f} s")
+                if not said:
+                    failures.append("TTS say() failed (see app errors)")
+                page.wait_for_timeout(1500)
+                shot("11_talk_tts")
+
+            # ---- Listen tab: must start on the fake microphone without throwing --------
+            ev("window.animacy.setSource('listen').catch(e => { window.__listenErr = String(e && e.message || e); })")
+            page.wait_for_function("window.__listenErr || window.animacy.sourceInfo().kind === 'listen'", timeout=30_000)
+            page.wait_for_timeout(800)
+            li = ev("({err: window.__listenErr || null, kind: window.animacy.sourceInfo().kind, running: !!(window.animacy.source && window.animacy.source.running), stat: document.getElementById('listen-stat').textContent})")
+            print(f"listen tab: {li}")
+            if li["err"] or not li["running"]:
+                failures.append(f"listen mode failed to initialise: {li}")
             ev("window.animacy.setSource('canonical')")
             page.wait_for_function("window.animacy.sourceInfo().kind === 'canonical'", timeout=20_000)
 
@@ -280,6 +360,42 @@ def main() -> int:
                 if wc["err"] or not wc["running"]:
                     failures.append(f"webcam mode failed to initialise: {wc['err'] or wc['errors']}")
                 shot("08_webcam_mode")
+                # ---- record mode: a 1.5 s take on the fake camera + fake microphone --------
+                if wc["running"]:
+                    import base64
+                    import io
+                    import zipfile
+
+                    ev("window.__recErr = null; window.animacy.record.start({subject: 'ci', slug: 'smoke', role: 'speaking', prompt: 'smoke test', seconds: 1.5}).catch(e => { window.__recErr = String(e && e.message || e); })")
+                    page.wait_for_function("window.__recErr || (window.animacy.recorder && window.animacy.recorder.recording)", timeout=20_000)
+                    page.wait_for_timeout(1500)
+                    ev("window.animacy.record.stop().catch(e => { window.__recErr = String(e && e.message || e); })")
+                    page.wait_for_function("window.__recErr || window.animacy.record.lastTake()", timeout=20_000)
+                    rec_err = ev("window.__recErr")
+                    take = ev("(() => { const t = window.animacy.record.lastTake(); if (!t) return null; const { motion, ...rest } = t; return { ...rest, n_channels: motion.channels.length, n_t: motion.data.t.length, first_t: motion.data.t[0], last_t: motion.data.t[motion.data.t.length - 1] }; })()")
+                    print(f"record: err={rec_err} take={ {k: v for k, v in (take or {}).items() if k != 'meta'} }")
+                    if rec_err or not take:
+                        failures.append(f"record mode failed: {rec_err}")
+                    else:
+                        if take["n"] < 30 or take["n_channels"] != 28 or take["n_t"] != take["n"]:
+                            failures.append(f"record: bad motion table ({take['n']} frames, {take['n_channels']} channels)")
+                        if take["audioBytes"] <= 0:
+                            failures.append("record: empty audio")
+                        meta = take["meta"]
+                        for k in ("source", "role", "neutral", "license", "tool_versions", "rate_hz", "audio"):
+                            if k not in meta:
+                                failures.append(f"record: meta.json missing '{k}'")
+                        zb = base64.b64decode(ev("window.animacy.record.lastZipBase64()"))
+                        with zipfile.ZipFile(io.BytesIO(zb)) as z:
+                            names = z.namelist()
+                            bad = z.testzip()
+                            motion = json.loads(z.read(f"{take['name']}/motion.json"))
+                            print(f"record zip: {len(zb)} bytes, {names}, testzip={bad}, motion schema={motion['schema']} n={motion['n']} rate={motion['rate_hz']}")
+                            if bad or set(names) != {f"{take['name']}/motion.json", f"{take['name']}/audio.webm", f"{take['name']}/meta.json"}:
+                                failures.append(f"record: zip contents wrong: {names} bad={bad}")
+                            if motion["schema"] != "animacy.human.v1" or motion["n"] != len(motion["data"]["head_yaw"]):
+                                failures.append("record: motion.json is not a canonical clip table")
+                    shot("12_record_take")
                 ev("window.animacy.setSource('native')")
 
             app_errors = ev("window.animacy.errors")

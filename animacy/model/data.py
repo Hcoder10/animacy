@@ -104,6 +104,7 @@ class ClipData:
     speaking: np.ndarray        # [T] int64
     runs: List[Tuple[int, int]]
     has_audio: bool = True
+    weight: float = 1.0         # keep-probability for windows of this clip (per-speaker cap)
 
     @property
     def n_frames(self) -> int:
@@ -142,7 +143,26 @@ def _to_16k(wav: np.ndarray, sr: int) -> np.ndarray:
     return resample_poly(np.asarray(wav, dtype=np.float64), FEAT_SR // g, int(sr) // g).astype(np.float32)
 
 
-def clip_to_data(clip: HumanClip, name: str) -> Optional[ClipData]:
+def _cached_features(clip_dir: str, clip: HumanClip, n: int, cache_dir: Optional[str]) -> np.ndarray:
+    """audio_features() keyed by the clip's audio file identity; a data refresh only recomputes new clips."""
+    wav = os.path.join(clip_dir, "audio.wav")
+    key = None
+    if cache_dir and os.path.exists(wav):
+        st = os.stat(wav)
+        key = os.path.join(cache_dir, f"{os.path.basename(clip_dir)}__{st.st_size}__{st.st_mtime_ns}__{n}.npz")
+        if os.path.exists(key):
+            try:
+                return np.load(key)["features"].astype(np.float32)
+            except Exception:  # noqa: BLE001 - a corrupt cache entry is just recomputed
+                pass
+    feats = audio_features(_to_16k(clip.audio, clip.sr), FEAT_SR, n_ticks=n).astype(np.float32)
+    if key:
+        os.makedirs(cache_dir, exist_ok=True)
+        np.savez(key, features=feats)
+    return feats
+
+
+def clip_to_data(clip: HumanClip, name: str, clip_dir: Optional[str] = None, cache_dir: Optional[str] = None) -> Optional[ClipData]:
     f = clip.frames
     if abs(clip.rate_hz - RATE_HZ) > 1e-6:
         print(f"  skip {name}: rate_hz={clip.rate_hz} (model grid is {RATE_HZ})")
@@ -159,7 +179,10 @@ def clip_to_data(clip: HumanClip, name: str) -> Optional[ClipData]:
     motion = smooth_runs(detrend_runs(motion, runs), runs)
     has_audio = clip.audio is not None and len(clip.audio) > 0
     if has_audio:
-        features = audio_features(_to_16k(clip.audio, clip.sr), FEAT_SR, n_ticks=n)
+        if clip_dir is not None:
+            features = _cached_features(clip_dir, clip, n, cache_dir)
+        else:
+            features = audio_features(_to_16k(clip.audio, clip.sr), FEAT_SR, n_ticks=n)
     else:
         features = np.zeros((n, N_FEATS), dtype=np.float32)
     return ClipData(
@@ -174,6 +197,87 @@ def clip_to_data(clip: HumanClip, name: str) -> Optional[ClipData]:
     )
 
 
+# ---------------------------------------------------------------------------
+# augmentation (train split only)
+# ---------------------------------------------------------------------------
+MIRROR_NEGATE = ["head_yaw", "head_roll", "head_y", "torso_lean_side", "torso_yaw"]
+MIRROR_SWAP = [("brow_l", "brow_r")]
+
+
+def mirror_clip(c: ClipData) -> ClipData:
+    """Left-right mirror of the human: a valid new speaker, same audio."""
+    m = c.motion.copy()
+    for ch in MIRROR_NEGATE:
+        m[:, MODEL_CHANNELS.index(ch)] *= -1.0
+    for a, b in MIRROR_SWAP:
+        ia, ib = MODEL_CHANNELS.index(a), MODEL_CHANNELS.index(b)
+        m[:, [ia, ib]] = m[:, [ib, ia]]
+    return replace(c, name=c.name + "~mirror", motion=m)
+
+
+def warp_arrays(features: np.ndarray, speaking: np.ndarray, motion: np.ndarray, factor: float):
+    """Time-stretch a run by ``factor`` (1.08 = 8 % slower) with linear interpolation;
+    features, speaking and motion move together."""
+    n = len(motion)
+    n2 = max(FRAMES_PER_CODE, int(round(n * factor)))
+    src = np.linspace(0.0, n - 1, n2)
+    grid = np.arange(n)
+    f = np.stack([np.interp(src, grid, features[:, i]) for i in range(features.shape[1])], axis=1).astype(np.float32)
+    m = np.stack([np.interp(src, grid, motion[:, i]) for i in range(motion.shape[1])], axis=1).astype(np.float32)
+    s = speaking[np.clip(np.round(src).astype(np.int64), 0, n - 1)]
+    return f, s, m
+
+
+def load_speaker_index(data_dir: str) -> Dict[str, str]:
+    """clip name -> speaker from ``<data_dir>/_index.json`` (the fetcher's index); {} if absent."""
+    path = os.path.join(data_dir, "_index.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        d = json.load(open(path, encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    items = d if isinstance(d, list) else next((v for v in d.values() if isinstance(v, list)), [])
+    out = {}
+    for it in items:
+        if isinstance(it, dict) and it.get("name") and it.get("speaker"):
+            out[str(it["name"])] = str(it["speaker"])
+    return out
+
+
+def apply_speaker_cap(clips: Sequence[ClipData], speakers: Dict[str, str], cap: float) -> Tuple[List[ClipData], Dict]:
+    """No speaker may exceed ``cap`` of the effective training mass: an over-represented
+    speaker's windows are kept with probability f = cap * rest / ((1 - cap) * own)."""
+    def spk(c: ClipData) -> str:
+        base = c.name.split("~")[0]
+        return speakers.get(base) or c.subject or base
+
+    total = {}
+    for c in clips:
+        total[spk(c)] = total.get(spk(c), 0.0) + c.n_valid * c.weight
+    before = {k: round(v / RATE_HZ / 60.0, 2) for k, v in total.items()}
+    weights = {k: 1.0 for k in total}
+    if cap and 0 < cap < 1 and len(total) > 1:
+        for _ in range(8):
+            eff = {k: total[k] * weights[k] for k in total}
+            k_max = max(eff, key=eff.get)
+            rest = sum(v for k, v in eff.items() if k != k_max)
+            if eff[k_max] <= cap * (eff[k_max] + rest) + 1e-6 or rest <= 0:
+                break
+            weights[k_max] *= cap * rest / ((1.0 - cap) * eff[k_max])
+    out = [replace(c, weight=c.weight * weights[spk(c)]) for c in clips]
+    after = {k: round(total[k] * weights[k] / RATE_HZ / 60.0, 2) for k in total}
+    return out, {"cap": cap, "minutes_before": before, "minutes_effective": after,
+                 "weights": {k: round(v, 3) for k, v in weights.items() if v < 1.0}}
+
+
+def _keep(n: int, weight: float, rng: Optional[np.random.Generator]) -> np.ndarray:
+    if weight >= 1.0:
+        return np.ones(n, bool)
+    rng = rng if rng is not None else np.random.default_rng(0)
+    return rng.random(n) < weight
+
+
 def list_clip_dirs(data_dir: str) -> List[str]:
     if not os.path.isdir(data_dir):
         return []
@@ -185,7 +289,7 @@ def list_clip_dirs(data_dir: str) -> List[str]:
     return out
 
 
-def load_clips(data_dir: str, verbose: bool = True) -> List[ClipData]:
+def load_clips(data_dir: str, verbose: bool = True, cache_dir: Optional[str] = None) -> List[ClipData]:
     clips: List[ClipData] = []
     for p in list_clip_dirs(data_dir):
         name = os.path.basename(p)
@@ -194,7 +298,7 @@ def load_clips(data_dir: str, verbose: bool = True) -> List[ClipData]:
         except Exception as e:  # a half-written clip from a concurrent capture must not kill training
             print(f"  skip {name}: {type(e).__name__}: {e}")
             continue
-        cd = clip_to_data(hc, name)
+        cd = clip_to_data(hc, name, clip_dir=p, cache_dir=cache_dir)
         if cd is None:
             continue
         clips.append(cd)
@@ -326,14 +430,17 @@ def pool_flag(x: np.ndarray) -> np.ndarray:
 
 
 def vq_segments(clips: Sequence[ClipData], stats: Dict[str, np.ndarray],
-                segment: int = SEGMENT, stride: int = SEGMENT_STRIDE) -> np.ndarray:
+                segment: int = SEGMENT, stride: int = SEGMENT_STRIDE, rng: Optional[np.random.Generator] = None) -> np.ndarray:
     """[N, segment, 14] standardised windows, only from inside contiguous runs."""
     out = []
     for c in clips:
         for a, b in c.runs:
             z = normalise(c.motion[a:b], stats)
-            for s in range(0, len(z) - segment + 1, stride):
-                out.append(z[s:s + segment])
+            starts = list(range(0, len(z) - segment + 1, stride))
+            keep = _keep(len(starts), c.weight, rng)
+            for s, k in zip(starts, keep):
+                if k:
+                    out.append(z[s:s + segment])
     if not out:
         return np.zeros((0, segment, N_MODEL), dtype=np.float32)
     return np.stack(out).astype(np.float32)
@@ -341,33 +448,50 @@ def vq_segments(clips: Sequence[ClipData], stats: Dict[str, np.ndarray],
 
 def a2m_chunks(clips: Sequence[ClipData], stats: Dict[str, np.ndarray],
                encode: Callable[[np.ndarray], np.ndarray],
-               chunk: int = CHUNK_FRAMES, stride: int = CHUNK_STRIDE) -> Dict[str, np.ndarray]:
-    """2 s chunks for audio -> codes. Short tails (>= 1 s) are kept and padded;
-    ``mask`` marks real steps. ``encode`` maps standardised frames [n,14] -> codes [n/2]."""
+               chunk: int = CHUNK_FRAMES, stride: int = CHUNK_STRIDE,
+               warps: Sequence[float] = (1.0,), rng: Optional[np.random.Generator] = None) -> Dict[str, np.ndarray]:
+    """Fixed-length chunks for audio -> codes. Short tails (>= 1 s) are kept and
+    padded; ``mask`` marks real steps. ``encode`` maps standardised frames [n,14]
+    -> codes [n/2]. ``warps`` adds time-stretched copies of every run (train only).
+    A clip's ``weight`` < 1 keeps only that fraction of its chunks (speaker cap)."""
     steps = chunk // FRAMES_PER_CODE
     F, S, C, M = [], [], [], []
+    rng = rng if rng is not None else np.random.default_rng(0)
+
+    def add(feat_run, spk_run, mot_run, weight):
+        b = len(mot_run)
+        for s in range(0, b, stride):
+            e = min(s + chunk, b)
+            n = ((e - s) // FRAMES_PER_CODE) * FRAMES_PER_CODE
+            if n < MIN_RUN:
+                continue
+            if weight < 1.0 and rng.random() >= weight:
+                if e == b:
+                    break
+                continue
+            feats = pool_pairs(feat_run[s:s + n])
+            spk = pool_flag(spk_run[s:s + n])
+            codes = np.asarray(encode(normalise(mot_run[s:s + n], stats)), dtype=np.int64)
+            L = len(codes)
+            assert L == len(feats) == len(spk), (L, len(feats), len(spk))
+            pf = np.zeros((steps, N_FEATS), np.float32)
+            ps = np.zeros(steps, np.int64)
+            pc = np.zeros(steps, np.int64)
+            pm = np.zeros(steps, bool)
+            pf[:L], ps[:L], pc[:L], pm[:L] = feats, spk, codes, True
+            F.append(pf), S.append(ps), C.append(pc), M.append(pm)
+            if e == b:
+                break
+
     for c in clips:
         if not c.has_audio:
             continue
         for a, b in c.runs:
-            for s in range(a, b, stride):
-                e = min(s + chunk, b)
-                n = ((e - s) // FRAMES_PER_CODE) * FRAMES_PER_CODE
-                if n < MIN_RUN:
-                    continue
-                feats = pool_pairs(c.features[s:s + n])
-                spk = pool_flag(c.speaking[s:s + n])
-                codes = np.asarray(encode(normalise(c.motion[s:s + n], stats)), dtype=np.int64)
-                L = len(codes)
-                assert L == len(feats) == len(spk), (L, len(feats), len(spk))
-                pf = np.zeros((steps, N_FEATS), np.float32)
-                ps = np.zeros(steps, np.int64)
-                pc = np.zeros(steps, np.int64)
-                pm = np.zeros(steps, bool)
-                pf[:L], ps[:L], pc[:L], pm[:L] = feats, spk, codes, True
-                F.append(pf), S.append(ps), C.append(pc), M.append(pm)
-                if e == b:
-                    break
+            for w in warps:
+                if abs(w - 1.0) < 1e-6:
+                    add(c.features[a:b], c.speaking[a:b], c.motion[a:b], c.weight)
+                else:
+                    add(*warp_arrays(c.features[a:b], c.speaking[a:b], c.motion[a:b], w), c.weight)
     if not F:
         z = np.zeros((0, steps), np.int64)
         return {"features": np.zeros((0, steps, N_FEATS), np.float32), "speaking": z, "codes": z, "mask": z.astype(bool)}

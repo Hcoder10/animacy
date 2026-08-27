@@ -104,20 +104,30 @@ class AudioToMotion(nn.Module):
             bias = bias.masked_fill(key_padding_mask[:, None, None, :], NEG)
         return bias
 
-    def forward(self, features: torch.Tensor, speaking: torch.Tensor, causal,
-                key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """features [B, L, 66] float, speaking [B, L] int64, causal bool | int64 tensor [1]
-        -> logits [B, L, n_codes]."""
+    @staticmethod
+    def causal_tensor(causal, device) -> torch.Tensor:
         if not torch.is_tensor(causal):
-            causal = torch.tensor([1 if causal else 0], dtype=torch.int64, device=features.device)
-        causal = causal.reshape(-1)[:1]
+            causal = torch.tensor([1 if causal else 0], dtype=torch.int64, device=device)
+        return causal.reshape(-1)[:1]
+
+    def encode(self, features: torch.Tensor, speaking: torch.Tensor, causal,
+               key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """The trunk: features [B, L, 66], speaking [B, L] -> hidden states [B, L, d_model]
+        (shared with the autoregressive model in ``a2m_ar``)."""
+        causal = self.causal_tensor(causal, features.device)
         x = self.in_proj(features) + self.speak_emb(speaking.clamp(0, 1))
         x = x + self.pos_conv(F.pad(x.transpose(1, 2), (self.pos_kernel - 1, 0))).transpose(1, 2)
         x = self.drop(x)
         bias = self.attention_bias(features.shape[1], causal, key_padding_mask, features.device)
         for blk in self.blocks:
             x = blk(x, bias)
-        return self.head(self.ln_f(x))
+        return self.ln_f(x)
+
+    def forward(self, features: torch.Tensor, speaking: torch.Tensor, causal,
+                key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """features [B, L, 66] float, speaking [B, L] int64, causal bool | int64 tensor [1]
+        -> logits [B, L, n_codes]."""
+        return self.head(self.encode(features, speaking, causal, key_padding_mask))
 
     @torch.no_grad()
     def logits(self, features: np.ndarray, speaking: np.ndarray, causal: bool = False) -> np.ndarray:

@@ -54,19 +54,29 @@ class RetrievalIndex:
     @classmethod
     def build(cls, clips: Sequence[ClipData], max_windows: int = 3000, win: int = WIN, hop: int = HOP,
               seed: int = 0) -> "RetrievalIndex":
-        keys, motion, spk, nxt, owner = [], [], [], [], []
-        for ci, c in enumerate(clips):
+        keys, motion, spk, nxt = [], [], [], []
+        rng = np.random.default_rng(seed)
+        for c in clips:
             if not c.has_audio:
                 continue
-            for ri, (a, b) in enumerate(c.runs):
+            for a, b in c.runs:
                 starts = list(range(a, b - win + 1, hop))
+                # a clip's weight < 1 (speaker cap) keeps that fraction of its windows; the
+                # continuity link only survives when the next window is kept too
+                kept = [bool(k) for k in (rng.random(len(starts)) < c.weight)] if c.weight < 1.0 else [True] * len(starts)
                 base = len(keys)
+                pos = {}
                 for si, s in enumerate(starts):
+                    if not kept[si]:
+                        continue
+                    pos[si] = base + len(pos)
+                for si, s in enumerate(starts):
+                    if not kept[si]:
+                        continue
                     keys.append(window_key(c.features[s:s + win]))
                     motion.append(c.motion[s:s + win])
                     spk.append(float(c.speaking[s:s + win].mean()))
-                    nxt.append(base + si + 1 if si + 1 < len(starts) else -1)
-                    owner.append((ci, ri))
+                    nxt.append(pos.get(si + 1, -1))
         if not keys:
             return cls(np.zeros((0, KEY_DIM), np.float32), np.zeros((0, win, N_MODEL), np.float32),
                        np.zeros(0, np.int32), np.zeros(0, np.float32), {"win": win, "hop": hop})

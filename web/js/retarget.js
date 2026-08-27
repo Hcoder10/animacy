@@ -1,19 +1,65 @@
 // Canonical human motion → robot joints, in the browser.
 //
 // This is a line-for-line port of `animacy/retarget.py:LiveRetargeter.step`
-// and `to_urdf_values`. The Python side is the reference; if you change one,
-// change the other (tests/test_web_retarget_parity.py runs both on the same
-// input and diffs the output).
+// and `to_urdf_values` (spec with a numeric example in docs/RETARGET.md). The
+// Python side is the reference; if you change one, change the other
+// (tests/test_web_retarget_parity.py runs both on the same input and diffs).
 //
-//   joint = rest + offset + Σ gain·channel
-//         → deadband (|x| < db → 0, else x − sign(x)·db)
-//         → clamp [min, max]           (mapping bounds, already resolved by
-//                                        `profile.to_web_json`; else joint bounds)
-//         → one-pole low-pass           alpha = 1 − exp(−2π·cutoff·dt)
-//         → velocity clip               |Δ| ≤ max_speed·dt
-//         → clamp [joint.min, joint.max]
+// Per joint and frame:
+//   u = rest + offset + Σ gain·channel
+//     → deadband (|x| < db → 0, else x − sign(x)·db)
+//     → soft limit (tanh knee over the last `soft_limit` of the range)
+//     → clamp [min, max]           (mapping bounds, already resolved by
+//                                    `profile.to_web_json`; else joint bounds)
+//     → + gated idle sway          (only while the mapped target is near-still)
+//     → clamp
+//     → tracker: spring (semi-implicit Euler) | one-pole, alpha = 1 − exp(−2π·cutoff·dt)
+//     → velocity clip               |Δ| ≤ max_speed·dt
+//     → clamp [joint.min, joint.max]
 //
-// Profile JSON is what `animacy profile export` writes (web/robots/<name>.json).
+// Profile JSON is what `animacy profile export` writes (web/robots/<name>.json):
+// mapping = {terms[], offset, min, max, deadband, smooth_hz, spring{hz,zeta}|null,
+//            idle{amp,hz,still}|null, soft_limit|null}.
+
+// Idle sway generator (docs/RETARGET.md §idle): three sines around `hz`.
+export const IDLE_RATIOS = [1.0, 1.31, 0.67];
+export const IDLE_WEIGHTS = [0.5, 0.3, 0.2];
+export const IDLE_GOLDEN = 2.39996322972865332;
+export const IDLE_RELEASE_S = 0.5;
+
+/** Fixed phase of sine k (0..2) for the joint at `jointIndex` in profile.joints. */
+export function idlePhase(jointIndex, k) {
+  return (IDLE_GOLDEN * (3 * jointIndex + k + 1)) % (2.0 * Math.PI);
+}
+
+/** Band-limited sway at time t (seconds on the joint's idle clock). */
+export function idleValue(t, amp, hz, jointIndex) {
+  let s = 0.0;
+  for (let k = 0; k < 3; k++) s += IDLE_WEIGHTS[k] * Math.sin(2.0 * Math.PI * IDLE_RATIOS[k] * hz * t + idlePhase(jointIndex, k));
+  return amp * s;
+}
+
+/** tanh knee over the last `frac` of the range at each end; identity for frac null/0. */
+export function softClip(x, lo, hi, frac) {
+  if (!frac) return x;
+  const k = frac * (hi - lo);
+  if (k <= 0) return x;
+  const top = hi - k, bot = lo + k;
+  if (x > top) return top + k * Math.tanh((x - top) / k);
+  if (x < bot) return bot - k * Math.tanh((bot - x) / k);
+  return x;
+}
+
+/** One semi-implicit Euler step of y'' = w²(u − y) − 2ζw y'. Returns [y, v]. */
+export function springStep(y, v, u, dt, hz, zeta) {
+  const w = 2.0 * Math.PI * hz;
+  const acc = w * w * (u - y) - 2.0 * zeta * w * v;
+  v = v + acc * dt;
+  y = y + v * dt;
+  return [y, v];
+}
+
+const isNil = (v) => v === null || v === undefined;
 
 export class LiveRetargeter {
   /**
@@ -29,12 +75,22 @@ export class LiveRetargeter {
     this.mode = mode;
     this.mp = profile.retarget[mode];
     this.defaultSmoothHz = defaultSmoothHz;
-    this.state = {};
     this.reset();
   }
 
   reset() {
-    for (const j of this.profile.joints) this.state[j.name] = j.rest;
+    this.state = {};        // last output
+    this.vel = {};          // spring velocity
+    this.env = {};          // idle activity envelope
+    this.prevTarget = {};   // previous pre-idle target
+    this.clock = {};        // idle clock
+    for (const j of this.profile.joints) {
+      this.state[j.name] = j.rest;
+      this.vel[j.name] = 0.0;
+      this.env[j.name] = 0.0;
+      this.prevTarget[j.name] = j.rest;
+      this.clock[j.name] = 0.0;
+    }
   }
 
   /**
@@ -45,11 +101,15 @@ export class LiveRetargeter {
    */
   step(channels, dt) {
     const out = {};
-    for (const j of this.profile.joints) {
+    const joints = this.profile.joints;
+    for (let idx = 0; idx < joints.length; idx++) {
+      const j = joints[idx];
       const m = this.mp[j.name];
-      let target, cutoff;
+      const lo = !m || isNil(m.min) ? j.min : m.min;
+      const hi = !m || isNil(m.max) ? j.max : m.max;
+      let u, cutoff;
       if (!m) {
-        target = j.rest;
+        u = j.rest;
         cutoff = this.defaultSmoothHz;
       } else {
         let x = 0.0;
@@ -58,23 +118,36 @@ export class LiveRetargeter {
           if (v === undefined || v === null || Number.isNaN(v)) v = 0.0;
           x += term.gain * Number(v);
         }
-        if (m.deadband > 0) {
-          x = Math.abs(x) < m.deadband ? 0.0 : x - Math.sign(x) * m.deadband;
+        if (m.deadband > 0) x = Math.abs(x) < m.deadband ? 0.0 : x - Math.sign(x) * m.deadband;
+        u = x + m.offset + j.rest;
+        u = softClip(u, lo, hi, m.soft_limit);
+        u = Math.min(Math.max(u, lo), hi);
+        cutoff = isNil(m.smooth_hz) ? this.defaultSmoothHz : m.smooth_hz;
+        if (m.idle) {
+          const a = Math.abs(u - this.prevTarget[j.name]) / dt;
+          this.prevTarget[j.name] = u;
+          const e = Math.max(a, this.env[j.name] * Math.exp(-dt / IDLE_RELEASE_S));
+          this.env[j.name] = e;
+          const still = isNil(m.idle.still) ? 10.0 * m.idle.amp * m.idle.hz : m.idle.still;
+          const g = Math.min(Math.max(1.0 - e / still, 0.0), 1.0);
+          this.clock[j.name] += dt;
+          u = Math.min(Math.max(u + g * idleValue(this.clock[j.name], m.idle.amp, m.idle.hz, idx), lo), hi);
         }
-        target = x + m.offset + j.rest;
-        const lo = m.min === null || m.min === undefined ? j.min : m.min;
-        const hi = m.max === null || m.max === undefined ? j.max : m.max;
-        target = Math.min(Math.max(target, lo), hi);
-        cutoff = m.smooth_hz === null || m.smooth_hz === undefined ? this.defaultSmoothHz : m.smooth_hz;
       }
       const prev = this.state[j.name];
-      // one-pole low-pass, alpha from cutoff
-      const alpha = !cutoff ? 1.0 : 1.0 - Math.exp(-2.0 * Math.PI * cutoff * dt);
-      let y = prev + alpha * (target - prev);
+      let y;
+      if (m && m.spring) {
+        [y] = springStep(prev, this.vel[j.name], u, dt, m.spring.hz, m.spring.zeta);
+      } else {
+        // one-pole low-pass, alpha from cutoff
+        const alpha = !cutoff ? 1.0 : 1.0 - Math.exp(-2.0 * Math.PI * cutoff * dt);
+        y = prev + alpha * (u - prev);
+      }
       // velocity clip
       const vmax = j.max_speed * dt;
       y = prev + Math.min(Math.max(y - prev, -vmax), vmax);
       y = Math.min(Math.max(y, j.min), j.max);
+      this.vel[j.name] = (y - prev) / dt;
       this.state[j.name] = y;
       out[j.name] = y;
     }

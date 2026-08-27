@@ -121,138 +121,228 @@
         "terms": [
           {
             "from": "head_yaw",
-            "gain": 0.8
+            "gain": 2.363
           }
         ],
         "offset": 0.0,
         "min": -60.0,
         "max": 60.0,
         "deadband": 0.3,
-        "smooth_hz": 6.0
+        "smooth_hz": null,
+        "spring": {
+          "hz": 4.0,
+          "zeta": 0.7
+        },
+        "idle": null,
+        "soft_limit": 0.15
       },
       "head_pitch": {
         "terms": [
           {
             "from": "head_pitch",
-            "gain": 0.8
+            "gain": 2.014
           }
         ],
         "offset": 0.0,
         "min": -30.0,
         "max": 30.0,
         "deadband": 0.3,
-        "smooth_hz": 6.0
+        "smooth_hz": null,
+        "spring": {
+          "hz": 4.0,
+          "zeta": 0.7
+        },
+        "idle": {
+          "amp": 0.5,
+          "hz": 0.22,
+          "still": 1.1
+        },
+        "soft_limit": 0.15
       },
       "head_roll": {
         "terms": [
           {
             "from": "head_roll",
-            "gain": 0.8
+            "gain": 1.919
           }
         ],
         "offset": 0.0,
         "min": -30.0,
         "max": 30.0,
         "deadband": 0.3,
-        "smooth_hz": 6.0
+        "smooth_hz": null,
+        "spring": {
+          "hz": 4.0,
+          "zeta": 0.7
+        },
+        "idle": {
+          "amp": 0.4,
+          "hz": 0.17,
+          "still": 0.68
+        },
+        "soft_limit": 0.15
       },
       "head_x": {
         "terms": [
           {
             "from": "head_x",
-            "gain": 0.2
+            "gain": 0.1445
           }
         ],
         "offset": 0.0,
         "min": -25.0,
         "max": 25.0,
         "deadband": 0.0,
-        "smooth_hz": 4.0
+        "smooth_hz": null,
+        "spring": {
+          "hz": 2.5,
+          "zeta": 1.0
+        },
+        "idle": null,
+        "soft_limit": 0.15
       },
       "head_y": {
         "terms": [
           {
             "from": "head_y",
-            "gain": 0.2
+            "gain": 0.3705
           }
         ],
         "offset": 0.0,
         "min": -25.0,
         "max": 25.0,
         "deadband": 0.0,
-        "smooth_hz": 4.0
+        "smooth_hz": null,
+        "spring": {
+          "hz": 2.5,
+          "zeta": 1.0
+        },
+        "idle": null,
+        "soft_limit": 0.15
       },
       "head_z": {
         "terms": [
           {
             "from": "head_z",
-            "gain": 0.25
+            "gain": 0.2551
           }
         ],
         "offset": 0.0,
         "min": -15.0,
         "max": 25.0,
         "deadband": 0.0,
-        "smooth_hz": 4.0
+        "smooth_hz": null,
+        "spring": {
+          "hz": 2.5,
+          "zeta": 1.0
+        },
+        "idle": {
+          "amp": 1.0,
+          "hz": 0.22,
+          "still": 2.2
+        },
+        "soft_limit": 0.15
       },
       "body_yaw": {
         "terms": [
           {
             "from": "torso_yaw",
-            "gain": 0.8
+            "gain": 2.4
           },
           {
             "from": "head_yaw",
-            "gain": 0.25
+            "gain": 0.75
           }
         ],
         "offset": 0.0,
         "min": -120.0,
         "max": 120.0,
         "deadband": 0.0,
-        "smooth_hz": 3.0
+        "smooth_hz": null,
+        "spring": {
+          "hz": 2.0,
+          "zeta": 1.0
+        },
+        "idle": null,
+        "soft_limit": 0.15
       },
       "antenna_left": {
         "terms": [
           {
             "from": "brow_l",
-            "gain": 90.0
+            "gain": -55.0
           },
           {
-            "from": "head_roll",
-            "gain": -0.5
+            "from": "brow_furrow",
+            "gain": -85.0
           },
           {
             "from": "mouth_open",
-            "gain": 15.0
+            "gain": -15.0
+          },
+          {
+            "from": "head_pitch",
+            "gain": 0.8
+          },
+          {
+            "from": "head_roll",
+            "gain": -0.67
           }
         ],
         "offset": 0.0,
         "min": -140.0,
         "max": 140.0,
         "deadband": 0.0,
-        "smooth_hz": 8.0
+        "smooth_hz": null,
+        "spring": {
+          "hz": 3.5,
+          "zeta": 0.45
+        },
+        "idle": {
+          "amp": 3.0,
+          "hz": 0.3,
+          "still": 9.0
+        },
+        "soft_limit": 0.15
       },
       "antenna_right": {
         "terms": [
           {
             "from": "brow_r",
-            "gain": 90.0
+            "gain": 55.0
           },
           {
-            "from": "head_roll",
-            "gain": 0.5
+            "from": "brow_furrow",
+            "gain": 85.0
           },
           {
             "from": "mouth_open",
             "gain": 15.0
+          },
+          {
+            "from": "head_pitch",
+            "gain": -0.8
+          },
+          {
+            "from": "head_roll",
+            "gain": -0.67
           }
         ],
         "offset": 0.0,
         "min": -140.0,
         "max": 140.0,
         "deadband": 0.0,
-        "smooth_hz": 8.0
+        "smooth_hz": null,
+        "spring": {
+          "hz": 3.5,
+          "zeta": 0.45
+        },
+        "idle": {
+          "amp": 3.0,
+          "hz": 0.3,
+          "still": 9.0
+        },
+        "soft_limit": 0.15
       }
     },
     "puppet": {
@@ -267,7 +357,10 @@
         "min": -60.0,
         "max": 60.0,
         "deadband": 0.0,
-        "smooth_hz": 6.0
+        "smooth_hz": 6.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
       },
       "head_pitch": {
         "terms": [
@@ -280,7 +373,10 @@
         "min": -30.0,
         "max": 30.0,
         "deadband": 0.0,
-        "smooth_hz": 6.0
+        "smooth_hz": 6.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
       },
       "head_roll": {
         "terms": [
@@ -293,7 +389,10 @@
         "min": -30.0,
         "max": 30.0,
         "deadband": 0.0,
-        "smooth_hz": 6.0
+        "smooth_hz": 6.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
       },
       "head_z": {
         "terms": [
@@ -306,7 +405,10 @@
         "min": -15.0,
         "max": 25.0,
         "deadband": 0.0,
-        "smooth_hz": 4.0
+        "smooth_hz": 4.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
       },
       "head_x": {
         "terms": [
@@ -319,7 +421,10 @@
         "min": -25.0,
         "max": 25.0,
         "deadband": 0.0,
-        "smooth_hz": 4.0
+        "smooth_hz": 4.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
       },
       "antenna_left": {
         "terms": [
@@ -332,7 +437,10 @@
         "min": -140.0,
         "max": 140.0,
         "deadband": 0.0,
-        "smooth_hz": 8.0
+        "smooth_hz": 8.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
       },
       "antenna_right": {
         "terms": [
@@ -345,7 +453,10 @@
         "min": -140.0,
         "max": 140.0,
         "deadband": 0.0,
-        "smooth_hz": 8.0
+        "smooth_hz": 8.0,
+        "spring": null,
+        "idle": null,
+        "soft_limit": null
       }
     }
   },

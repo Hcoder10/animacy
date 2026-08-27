@@ -86,6 +86,62 @@ def test_js_matches_python(robot: str, mode: str):
     assert worst < 1e-6
 
 
+V11_SPEC = {
+    # a synthetic profile exercising every v1.1 key (docs/RETARGET.md): soft limit,
+    # idle sway (explicit and default `still`), spring tracker (under- and critically damped)
+    "schema": "animacy.robot.v1", "name": "v11", "display_name": "v1.1 test body", "description": {"urdf": "x.urdf"},
+    "joints": [
+        {"name": "a", "min": -60, "max": 60, "rest": 5, "max_speed": 300},
+        {"name": "b", "min": -90, "max": 90, "rest": -10, "max_speed": 120},
+        {"name": "c", "unit": "mm", "min": -30, "max": 30, "rest": 0, "max_speed": 200},
+        {"name": "d", "min": -45, "max": 45, "rest": 0, "max_speed": 500},
+        {"name": "e", "min": -45, "max": 45, "rest": 0, "max_speed": 500},
+    ],
+    "retarget": {"default": {
+        "a": {"from": "head_yaw", "gain": 1.0, "soft_limit": 0.2, "spring": {"hz": 2.0, "zeta": 0.6}},
+        "b": {"mix": [{"from": "head_pitch", "gain": 0.8}, {"from": "brow_l", "gain": 5}], "deadband": 0.5, "idle": {"amp": 3.0, "hz": 0.4}, "smooth_hz": 4},
+        "c": {"from": "head_x", "gain": 0.3, "idle": {"amp": 2.0, "hz": 0.25, "still": 40}, "spring": {"hz": 1.5, "zeta": 1.0}, "soft_limit": 0.1},
+        "d": {"from": "head_roll", "gain": 1.0, "min": -20, "max": 20, "soft_limit": 0.3},
+    }},
+}
+
+
+def _v11_profile():
+    from animacy.profile import Profile
+
+    return Profile(**V11_SPEC)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("kind", ["jittery", "still-then-move"])
+def test_js_matches_python_v11_features(kind: str):
+    """soft limit + idle sway + spring tracker: same numbers to 1e-6 (idle only
+    switches on while the target is still, so the second stream holds for 3 s)."""
+    prof = _v11_profile()
+    dt = 1 / 30
+    if kind == "jittery":
+        frames = _frames(240, seed=11)
+    else:
+        frames = [{"head_yaw": 3.0, "head_pitch": -2.0, "head_x": 5.0, "head_roll": 1.0, "brow_l": 0.1}] * 90
+        frames += _frames(90, seed=12)
+    job = {"profile": prof.to_web_json(), "mode": "default", "dt": dt, "frames": _nan_to_null(frames)}
+    res = subprocess.run([NODE, HARNESS], input=json.dumps(job), capture_output=True, text=True, cwd=ROOT, timeout=60)
+    assert res.returncode == 0, res.stderr
+    js = json.loads(res.stdout)["joints"]
+    rt = LiveRetargeter(prof, mode="default")
+    py = [rt.step(f, dt) for f in frames]
+    worst = {j: 0.0 for j in prof.joint_names}
+    for i, (a, b) in enumerate(zip(js, py)):
+        for j in prof.joint_names:
+            d = abs(a[j] - b[j])
+            worst[j] = max(worst[j], d)
+            assert d < 1e-6, f"v1.1/{kind} frame {i} joint {j}: js={a[j]} py={b[j]}"
+    # sanity: the idle joints actually swayed (else the test proves nothing about idle)
+    if kind == "still-then-move":
+        b_vals = [p["b"] for p in py[30:90]]
+        assert max(b_vals) - min(b_vals) > 0.5, "idle sway did not engage on joint b while still"
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_exported_profile_json_is_what_the_page_loads():
     """web/robots/<name>.json must be a current export of robots/<name>/ROBOT.md."""
@@ -106,7 +162,7 @@ def test_manifest_matches_disk():
     spec.loader.exec_module(bm)
     fresh = bm.build()
     on_disk = json.load(open(os.path.join(ROOT, "web", "manifest.json"), encoding="utf-8"))
-    for k in ("robots", "native", "clips", "models"):
+    for k in ("robots", "native", "clips", "models", "bundle"):
         assert on_disk.get(k) == fresh[k], f"web/manifest.json '{k}' is stale — run python web/dev/build_manifest.py"
     for name, r in fresh["robots"].items():
         assert r["exists"], f"{name}: {r['urdf']} missing (viewer would fall back to the dev stand-in)"

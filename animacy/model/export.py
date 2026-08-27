@@ -40,6 +40,19 @@ class _A2MWrapper(nn.Module):
         return self.a2m(features, speaking, causal)
 
 
+class _ARWrapper(nn.Module):
+    """One AR step, full recompute: audio + BOS-prefixed code history -> logits for the next code
+    (and the teacher-forced logits for every history position)."""
+
+    def __init__(self, ar: nn.Module) -> None:
+        super().__init__()
+        self.ar = ar
+
+    def forward(self, features, speaking, causal, codes):
+        logits_all = self.ar(features, speaking, causal, codes)          # [1, t, n_codes]
+        return logits_all[:, -1, :], logits_all
+
+
 class _DecoderWrapper(nn.Module):
     def __init__(self, vq: nn.Module) -> None:
         super().__init__()
@@ -72,6 +85,34 @@ def _export(module: nn.Module, args, path: str, input_names, output_names, dynam
     raise RuntimeError("ONNX export failed:\n  " + "\n  ".join(errors))
 
 
+def to_fp16_initializers(path: str, min_elems: int = 64) -> Dict:
+    """Store every float32 initializer with >= ``min_elems`` values as float16 and Cast it
+    back at load: compute stays float32, the file halves. Returns size before/after."""
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    before = os.path.getsize(path)
+    m = onnx.load(path)
+    g = m.graph
+    inits, casts, n_conv = [], [], 0
+    for init in g.initializer:
+        if init.data_type == TensorProto.FLOAT and int(np.prod(init.dims)) >= min_elems:
+            arr = numpy_helper.to_array(init).astype(np.float16)
+            name16 = init.name + "__fp16"
+            inits.append(numpy_helper.from_array(arr, name16))
+            casts.append(helper.make_node("Cast", [name16], [init.name], to=TensorProto.FLOAT, name="cast__" + init.name))
+            n_conv += 1
+        else:
+            inits.append(init)
+    del g.initializer[:]
+    g.initializer.extend(inits)
+    nodes = list(g.node)
+    del g.node[:]
+    g.node.extend(casts + nodes)
+    onnx.save(m, path)
+    return {"bytes_before": before, "bytes_after": os.path.getsize(path), "n_converted": n_conv}
+
+
 def _ort_session(path: str):
     import onnxruntime as ort
 
@@ -80,18 +121,10 @@ def _ort_session(path: str):
     return ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
 
 
-def export_a2m(model: MotionModel, path: str, verify_lengths=(30, 97), tol: float = 1e-4) -> Dict:
-    a2m = model.a2m.eval().cpu()
-    wrapper = _A2MWrapper(a2m).eval()
-    L0 = 30
-    feats = torch.randn(1, L0, N_FEATS)
-    spk = torch.randint(0, 2, (1, L0), dtype=torch.int64)
-    causal = torch.tensor([0], dtype=torch.int64)
-    exporter = _export(wrapper, (feats, spk, causal), path, ["features", "speaking", "causal"], ["logits"],
-                       {"features": {1: "L"}, "speaking": {1: "L"}, "logits": {1: "L"}})
+def _verify_a2m(wrapper, path, verify_lengths, rng):
+    """(max abs logits diff, position-wise argmax agreement) of the graph vs torch."""
     sess = _ort_session(path)
-    worst = 0.0
-    rng = np.random.default_rng(0)
+    worst, agree, n = 0.0, 0, 0
     for L in verify_lengths:
         f = rng.normal(size=(1, L, N_FEATS)).astype(np.float32)
         s = rng.integers(0, 2, size=(1, L)).astype(np.int64)
@@ -101,9 +134,108 @@ def export_a2m(model: MotionModel, path: str, verify_lengths=(30, 97), tol: floa
             got = sess.run(None, {"features": f, "speaking": s, "causal": np.array([c], np.int64)})[0]
             assert got.shape == ref.shape, (got.shape, ref.shape)
             worst = max(worst, float(np.abs(got - ref).max()))
-    ok = worst < tol
-    return {"path": path, "bytes": os.path.getsize(path), "exporter": exporter, "max_abs_diff": worst, "ok": ok,
-            "verify_lengths": list(verify_lengths), "tol": tol}
+            agree += int((got.argmax(-1) == ref.argmax(-1)).sum())
+            n += int(np.prod(ref.shape[:-1]))
+    return worst, agree / max(n, 1)
+
+
+def export_a2m(model: MotionModel, path: str, verify_lengths=(30, 97), tol: float = 1e-4, fp16: bool = False,
+               tol_fp16: float = 1e-3) -> Dict:
+    a2m = model.a2m.eval().cpu()
+    wrapper = _A2MWrapper(a2m).eval()
+    L0 = 30
+    feats = torch.randn(1, L0, N_FEATS)
+    spk = torch.randint(0, 2, (1, L0), dtype=torch.int64)
+    causal = torch.tensor([0], dtype=torch.int64)
+    exporter = _export(wrapper, (feats, spk, causal), path, ["features", "speaking", "causal"], ["logits"],
+                       {"features": {1: "L"}, "speaking": {1: "L"}, "logits": {1: "L"}})
+    worst, agree = _verify_a2m(wrapper, path, verify_lengths, np.random.default_rng(0))
+    rep = {"path": path, "bytes": os.path.getsize(path), "exporter": exporter, "max_abs_diff": worst, "ok": worst < tol,
+           "argmax_agreement": agree, "verify_lengths": list(verify_lengths), "tol": tol, "fp16": False}
+    if fp16:
+        conv = to_fp16_initializers(path)
+        worst16, agree16 = _verify_a2m(wrapper, path, verify_lengths, np.random.default_rng(0))
+        rep.update({"fp16": True, "bytes": conv["bytes_after"], "bytes_fp32": conv["bytes_before"],
+                    "max_abs_diff_fp32_graph": worst, "max_abs_diff": worst16, "argmax_agreement": agree16,
+                    "tol": tol_fp16, "ok": worst16 < tol_fp16,
+                    "fp16_note": "logits diff of the fp16-initializer graph vs torch; the fp32 graph diff is max_abs_diff_fp32_graph; "
+                                 "argmax_agreement = fraction of positions whose most likely code is unchanged"})
+    return rep
+
+
+def _ar_code_agreement(ar, sess, L: int = 45, seed: int = 11) -> Dict:
+    """Run the ONNX step loop and the Python generator with the same RNG stream: fraction of
+    identical codes (talk + listen). The decision-relevant check for a reduced-precision graph."""
+    rng = np.random.default_rng(seed)
+    f = rng.normal(size=(L, N_FEATS)).astype(np.float32)
+    s = rng.integers(0, 2, size=L).astype(np.int64)
+    out = {}
+    for causal in (0, 1):
+        codes_py = ar.generate(f, s, causal=bool(causal), temperature=0.8, top_p=0.9, seed=seed)
+        rng2 = np.random.default_rng(seed)
+        hist = [ar.bos]
+        for _ in range(L):
+            nxt, _ = sess.run(None, {"features": f[None], "speaking": s[None], "causal": np.array([causal], np.int64),
+                                     "codes": np.asarray(hist, np.int64)[None]})
+            hist.append(ar.sample(nxt[0], 0.8, 0.9, rng2, prev=hist[-1] if len(hist) > 1 else None))
+        out["listen" if causal else "talk"] = float(np.mean(np.asarray(hist[1:]) == codes_py))
+    return out
+
+
+def export_ar(model: MotionModel, path: str, verify_cases=((30, 1), (97, 40), (60, 60)), tol: float = 1e-4,
+              fp16: bool = False, tol_fp16: float = 1e-3) -> Dict:
+    """``a2m_ar.onnx``: features [1, L, 66], speaking [1, L], causal [1], codes [1, t] (BOS then the
+    codes so far) -> logits_next [1, n_codes], logits_all [1, t, n_codes]. Verified against torch at
+    several (L, t) and against the windowed Python generator path."""
+    ar = model.ar.eval().cpu()
+    wrapper = _ARWrapper(ar).eval()
+    L0, t0 = 30, 5
+    feats = torch.randn(1, L0, N_FEATS)
+    spk = torch.randint(0, 2, (1, L0), dtype=torch.int64)
+    causal = torch.tensor([0], dtype=torch.int64)
+    codes = torch.cat([torch.tensor([[ar.bos]]), torch.randint(0, ar.n_codes, (1, t0 - 1))], dim=1)
+    exporter = _export(wrapper, (feats, spk, causal, codes), path, ["features", "speaking", "causal", "codes"],
+                       ["logits_next", "logits_all"],
+                       {"features": {1: "L"}, "speaking": {1: "L"}, "codes": {1: "t"}, "logits_all": {1: "t"}})
+    rep = _verify_ar(ar, wrapper, path, verify_cases)
+    rep.update({"path": path, "bytes": os.path.getsize(path), "exporter": exporter, "tol": tol, "ok": rep["max_abs_diff"] < tol,
+                "verify_lengths": [list(x) for x in verify_cases], "fp16": False})
+    if fp16:
+        conv = to_fp16_initializers(path)
+        rep16 = _verify_ar(ar, wrapper, path, verify_cases)
+        rep.update({"fp16": True, "bytes": conv["bytes_after"], "bytes_fp32": conv["bytes_before"],
+                    "max_abs_diff_fp32_graph": rep["max_abs_diff"], "max_abs_diff": rep16["max_abs_diff"],
+                    "argmax_agreement": rep16["argmax_agreement"], "code_agreement_fp16": rep16["code_agreement"],
+                    "tol": tol_fp16, "ok": rep16["max_abs_diff"] < tol_fp16,
+                    "fp16_note": "logits diff of the fp16-initializer graph vs torch; argmax_agreement = fraction of positions "
+                                 "whose most likely code is unchanged; code_agreement_fp16 = identical sampled codes vs the "
+                                 "Python generator under the same RNG (a single early divergence changes the rest of the sequence)"})
+    return rep
+
+
+def _verify_ar(ar, wrapper, path, verify_cases) -> Dict:
+    sess = _ort_session(path)
+    worst, agree, n = 0.0, 0, 0
+    rng = np.random.default_rng(0)
+    for L, t in verify_cases:
+        f = rng.normal(size=(1, L, N_FEATS)).astype(np.float32)
+        s = rng.integers(0, 2, size=(1, L)).astype(np.int64)
+        c = np.concatenate([[ar.bos], rng.integers(0, ar.n_codes, size=t - 1)]).astype(np.int64)[None]
+        for cf in (0, 1):
+            with torch.no_grad():
+                ref_next, ref_all = wrapper(torch.from_numpy(f), torch.from_numpy(s), torch.tensor([cf], dtype=torch.int64), torch.from_numpy(c))
+                # the windowed decode used by AudioToMotionAR.generate must equal the full recompute
+                mem = ar.encode_audio(torch.from_numpy(f), torch.from_numpy(s), torch.tensor([cf]))
+                ctx = ar.window * ar.dec_layers
+                tail = c[0][-ctx:]
+                win = ar.decode(mem, torch.from_numpy(tail)[None], torch.tensor([cf]), offset=len(c[0]) - len(tail))[0, -1]
+            got_next, got_all = sess.run(None, {"features": f, "speaking": s, "causal": np.array([cf], np.int64), "codes": c})
+            assert got_next.shape == (1, ar.n_codes) and got_all.shape == (1, t, ar.n_codes), (got_next.shape, got_all.shape)
+            worst = max(worst, float(np.abs(got_next - ref_next.numpy()).max()), float(np.abs(got_all - ref_all.numpy()).max()),
+                        float(np.abs(win.numpy() - ref_next.numpy()[0]).max()))
+            agree += int((got_all.argmax(-1) == ref_all.numpy().argmax(-1)).sum())
+            n += t
+    return {"max_abs_diff": worst, "argmax_agreement": agree / max(n, 1), "code_agreement": _ar_code_agreement(ar, sess)}
 
 
 def export_vq_decoder(model: MotionModel, path: str, verify_lengths=(15, 61), tol: float = 1e-4) -> Dict:
@@ -136,21 +268,29 @@ def export_vq_decoder(model: MotionModel, path: str, verify_lengths=(15, 61), to
 
 
 def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: str, metrics: Optional[Dict] = None,
-                  tol: float = 1e-4) -> Dict:
-    """Write ``a2m.onnx``, ``vq_decoder.onnx``, ``bigram.bin``, ``model.json`` (+ retrieval index)."""
+                  tol: float = 1e-4, fp16: bool = False) -> Dict:
+    """Write ``a2m.onnx``, ``a2m_ar.onnx``, ``vq_decoder.onnx``, ``bigram.bin``, ``model.json`` (+ retrieval
+    index). ``fp16`` stores the two predictors' weights as float16 (compute stays float32)."""
     os.makedirs(out_dir, exist_ok=True)
     report: Dict = {}
-    report["a2m"] = export_a2m(model, os.path.join(out_dir, "a2m.onnx"), tol=tol)
+    if model.a2m is not None:
+        report["a2m"] = export_a2m(model, os.path.join(out_dir, "a2m.onnx"), tol=tol, fp16=fp16)
+    if model.ar is not None:
+        report["a2m_ar"] = export_ar(model, os.path.join(out_dir, "a2m_ar.onnx"), tol=tol, fp16=fp16)
     report["vq_decoder"] = export_vq_decoder(model, os.path.join(out_dir, "vq_decoder.onnx"), tol=tol)
 
-    bigram16 = np.asarray(model.bigram_logp, np.float32).astype(np.float16)
     bigram_path = os.path.join(out_dir, "bigram.bin")
-    with open(bigram_path, "wb") as fh:
-        fh.write(bigram16.tobytes())
-    report["bigram"] = {"path": bigram_path, "bytes": os.path.getsize(bigram_path)}
+    if model.bigram_logp is not None:
+        bigram16 = np.asarray(model.bigram_logp, np.float32).astype(np.float16)
+        with open(bigram_path, "wb") as fh:
+            fh.write(bigram16.tobytes())
+        report["bigram"] = {"path": bigram_path, "bytes": os.path.getsize(bigram_path)}
+    else:
+        report["bigram"] = {"path": None, "bytes": 0}
 
     stats = model.vq.stats
     verdict = (metrics or {}).get("verdict", {})
+    default_arch = verdict.get("default_arch") or model.info.get("default_arch") or ("ar" if model.ar is not None else "ff")
     model_json = {
         "schema": "animacy.model.v1",
         "feature_contract": FEATURE_CONTRACT,
@@ -162,14 +302,43 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
         "channels": list(MODEL_CHANNELS),
         "stats": {"mean": [float(x) for x in stats["mean"]], "std": [float(x) for x in stats["std"]],
                   "norm_clip": NORM_CLIP},
+        "archs": model.archs,
+        "default_arch": default_arch,
         "a2m": {
+            "arch": "ff",
             "file": "a2m.onnx",
             "inputs": {"features": "float32 [1, L, 66] (30 Hz features averaged in pairs -> 15 Hz)",
                        "speaking": "int64 [1, L] (any of the pair)",
                        "causal": "int64 [1]: 0 = talk (non-causal), 1 = listen (causal)"},
             "outputs": {"logits": "float32 [1, L, 512]"},
+            "weights": "float16 initializers, float32 compute" if report["a2m"].get("fp16") else "float32",
             "bytes": report["a2m"]["bytes"],
-        },
+        } if model.a2m is not None else None,
+        "a2m_ar": {
+            "arch": "ar",
+            "file": "a2m_ar.onnx",
+            "bos": model.n_codes,
+            "window": model.ar.window,
+            "dec_layers": model.ar.dec_layers,
+            "inputs": {"features": "float32 [1, L, 66] (15 Hz, same as a2m)",
+                       "speaking": "int64 [1, L]",
+                       "causal": "int64 [1]: 0 = talk, 1 = listen (causal audio trunk AND causal cross-attention)",
+                       "codes": "int64 [1, t]: BOS (= n_codes) followed by the codes sampled so far; t >= 1, t <= L"},
+            "outputs": {"logits_next": "float32 [1, 512]: logits for the code at position t-1 (the next code to sample)",
+                        "logits_all": "float32 [1, t, 512]: teacher-forced logits for positions 0..t-1"},
+            "step": "single-step graph with full recompute: codes = [BOS]; for i in 0..L-1: run(features, speaking, causal, codes) -> "
+                    "logits_next[prev] -= repeat_penalty (prev = last sampled code, skip at i = 0); "
+                    "if features[i][64] < stay_energy: logits_next[prev] += stay_bias (feature 64 = normalised log energy) -> "
+                    "sample softmax(logits / temperature) with top-p -> append. Passing the whole history is exact "
+                    "(the decoder's self-attention window is `window` codes per layer).",
+            "sampling": {"temperature": model.info.get("sampling", {}).get("temperature", 0.8),
+                         "top_p": model.info.get("sampling", {}).get("top_p", 0.9),
+                         "repeat_penalty": model.info.get("sampling", {}).get("repeat_penalty", 0.0),
+                         "stay_bias": model.info.get("sampling", {}).get("stay_bias", 0.0),
+                         "stay_energy": model.info.get("sampling", {}).get("stay_energy", -0.3)},
+            "weights": "float16 initializers, float32 compute" if report["a2m_ar"].get("fp16") else "float32",
+            "bytes": report["a2m_ar"]["bytes"],
+        } if model.ar is not None else None,
         "vq_decoder": {
             "file": "vq_decoder.onnx",
             "inputs": {"codes": "int64 [1, L]"},
@@ -177,9 +346,9 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
             "bytes": report["vq_decoder"]["bytes"],
         },
         "bigram": {"file": "bigram.bin", "dtype": "float16", "shape": [model.n_codes, model.n_codes],
-                   "meaning": "log P(next | prev), row = prev"},
+                   "meaning": "log P(next | prev), row = prev (used by the feed-forward a2m sampler only)"} if model.bigram_logp is not None else None,
         "sampling": {"temperature": 0.8, "bigram_weight": 0.5,
-                     "rule": "softmax(logits / temperature + bigram_weight * bigram[prev]) per step, prev = last sampled code"},
+                     "rule": "ff: softmax(logits / temperature + bigram_weight * bigram[prev]) per step, prev = last sampled code; ar: see a2m_ar.step"},
         "smoothing": {"kind": "zero-phase butterworth order 2", "cutoff_hz": DEFAULT_SMOOTH_HZ},
         "detrend": {"channels": list(POSE_CHANNELS), "cutoff_hz": DETREND_HZ,
                     "meaning": "pose channels are the residual above cutoff_hz: output motion is centred on neutral; add the gaze overlay for where to look"},
@@ -208,19 +377,26 @@ def main(argv=None) -> int:
     p.add_argument("--ckpt", default="checkpoints/v1")
     p.add_argument("--out", default="web/models")
     p.add_argument("--tol", type=float, default=1e-4)
+    p.add_argument("--fp16", action="store_true", help="float16 weights for a2m.onnx and a2m_ar.onnx")
     a = p.parse_args(argv)
     model = MotionModel.load(a.ckpt, "cpu")
     idx_path = os.path.join(a.ckpt, "retrieval.json")
     index = RetrievalIndex.load(idx_path) if os.path.exists(idx_path) else None
     m_path = os.path.join(a.ckpt, "metrics.json")
     metrics = json.load(open(m_path, encoding="utf-8")) if os.path.exists(m_path) else None
-    rep = export_bundle(model, index, a.out, (metrics or {}).get("eval"), tol=a.tol)
+    rep = export_bundle(model, index, a.out, (metrics or {}).get("eval"), tol=a.tol, fp16=a.fp16)
     ok = True
-    for k in ("a2m", "vq_decoder"):
+    for k in ("a2m", "a2m_ar", "vq_decoder"):
+        if k not in rep:
+            continue
         r = rep[k]
         ok &= bool(r["ok"])
+        extra = ""
+        if r.get("fp16"):
+            extra = f" [fp16 weights: {r['bytes_fp32'] / 1e6:.2f} -> {r['bytes'] / 1e6:.2f} MB, fp32-graph diff {r['max_abs_diff_fp32_graph']:.2e}" \
+                    + (f", code agreement {r['code_agreement_fp16']}" if "code_agreement_fp16" in r else "") + "]"
         print(f"{os.path.basename(r['path'])}: {r['bytes'] / 1e6:.2f} MB ({r['exporter']}), max abs diff vs torch "
-              f"{r['max_abs_diff']:.2e} -> {'OK' if r['ok'] else 'MISMATCH'}")
+              f"{r['max_abs_diff']:.2e} (tol {r['tol']}) -> {'OK' if r['ok'] else 'MISMATCH'}{extra}")
     if "retrieval" in rep:
         print(f"retrieval: {rep['retrieval']['n_windows']} windows, {rep['retrieval']['bytes'] / 1e6:.2f} MB")
     print(f"bundle {rep['total_bytes'] / 1e6:.2f} MB -> {a.out}; default backend = "

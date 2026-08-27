@@ -41,54 +41,82 @@ retarget:
   # Talking-head mode: the person's face and torso drive the lamp like a
   # curious creature. Gains were seeded from the vendor's own clips (a
   # "headshake" is ~117° of wrist_roll + 39° of base_yaw; a "nod" is ~12° base
-  # + 26° elbow + 17° wrist_pitch; "sad" droops 32/45/64) so the retarget lands
-  # inside the envelope the body was authored for.
+  # + 26° elbow + 17° wrist_pitch; "sad" droops 32/45/64) and then FITTED to
+  # the vendor envelope by scripts/retarget_fit.py: per joint, the |.|p95
+  # excursion of the retargeted human corpus is matched to the |.|p95 of the
+  # 31 native clips, capped by headroom and by 1.25x the vendor's velocity p95
+  # (docs/RETARGET.md has the before/after tables).
   # Vendor signs (see "Sign conventions" below): +base_yaw and +wrist_roll pan
   # RIGHT, +wrist_pitch tips the head DOWN — all opposite to the canonical
   # channels (+yaw = left, +pitch = up), hence the negative gains. Rule 4 of
   # the spec: signs are fixed here, never in the URDF or the data.
+  # Trackers: `spring` (2nd-order, docs/RETARGET.md §spring) replaces
+  # smooth_hz — base joints critically damped, head joints zeta 0.7 (a hint of
+  # overshoot). `idle` (§idle): amp ≈ 0.8x the per-joint std of the vendor's own
+  # idle.csv (0.6/2.3/2.1/6.2/4.4 for yaw/base/elbow/roll/wrist), hz = its
+  # dominant FFT peak (0.2–0.3 Hz); it only plays while the mapped target is
+  # still. `soft_limit` (§soft): tanh knee over the last fraction of each range
+  # (wrist_pitch uses 0.08 because rest sits 22° from its upper bound).
   default:
     base_yaw:
       mix:
-        - { from: head_yaw,  gain: -0.45 }
-        - { from: torso_yaw, gain: -0.6 }
+        - { from: head_yaw, gain: -1.335 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: torso_yaw, gain: -1.779 }  # fitted by scripts/retarget_fit.py 2026-08-26
       deadband: 0.3
-      smooth_hz: 5
+      spring: { hz: 2.5, zeta: 1.0 }
+      soft_limit: 0.15
     wrist_roll:
       # With the head pitched down toward the desk, rolling about the forearm
       # axis pans the lamp head left/right — that is the vendor's own
       # "headshake". So gaze yaw lives here, not on base_yaw.
       mix:
-        - { from: head_yaw,  gain: -1.0 }
-        - { from: head_roll, gain: -0.3 }
+        - { from: head_yaw, gain: -1.886 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: head_roll, gain: -0.5658 }  # fitted by scripts/retarget_fit.py 2026-08-26
       deadband: 0.3
-      smooth_hz: 6
       min: -60
       max: 70
+      spring: { hz: 4.0, zeta: 0.7 }
+      idle: { amp: 5.0, hz: 0.2 }
+      soft_limit: 0.15
     wrist_pitch:
+      # Gaze pitch + affect, plus GAZE COMPENSATION. The lamp's pitch chain is
+      # planar, so (URDF FK, docs/RETARGET.md §gaze) the head's elevation is
+      # exactly rest_elev − Δbase_pitch + Δelbow_pitch − Δwrist_pitch. Every
+      # channel that moves base_pitch or elbow_pitch therefore carries the
+      # cancelling term here, gain = −g_base + g_elbow, written by
+      # scripts/retarget_fit.py; "lean in", "rise" and the talking lift keep
+      # the head pointed at the person.
       mix:
-        - { from: head_pitch, gain: -0.9 }
-        - { from: brow_l,     gain: -5.0 }  # brow raise = "perk up" (head tips up a touch)
-        - { from: brow_r,     gain: -5.0 }
-        - { from: torso_lean_fwd, gain: 0.5 }  # keep looking at the person while leaning in
-      smooth_hz: 6
+        - { from: head_pitch, gain: -1.3 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: brow_l, gain: -7.224 }  # brow raise = "perk up" (head tips up a touch)  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: brow_r, gain: -7.224 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: torso_lean_fwd, gain: -0.3728 }  # gaze-comp  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: head_x, gain: -0.1197 }  # gaze-comp  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: head_z, gain: 0.5468 }  # gaze-comp  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: mouth_open, gain: 9.374 }  # gaze-comp  # fitted by scripts/retarget_fit.py 2026-08-26
       min: -85
       max: 30
+      spring: { hz: 4.0, zeta: 0.7 }
+      idle: { amp: 3.0, hz: 0.2 }
+      soft_limit: 0.08
     base_pitch:
       mix:
-        - { from: torso_lean_fwd, gain: 1.0 }
-        - { from: head_x,         gain: 0.12 }
-      smooth_hz: 4
+        - { from: torso_lean_fwd, gain: 0.9977 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: head_x, gain: 0.1197 }  # fitted by scripts/retarget_fit.py 2026-08-26
       min: 0
       max: 75
+      spring: { hz: 2.0, zeta: 1.0 }
+      soft_limit: 0.15
     elbow_pitch:
       mix:
-        - { from: head_z,         gain: 0.35 }  # rise up / droop down
-        - { from: torso_lean_fwd, gain: 0.4 }
-        - { from: mouth_open,     gain: 6.0 }   # a little lift while talking
-      smooth_hz: 4
+        - { from: head_z, gain: 0.5468 }  # rise up / droop down  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: torso_lean_fwd, gain: 0.6249 }  # fitted by scripts/retarget_fit.py 2026-08-26
+        - { from: mouth_open, gain: 9.374 }   # a little lift while talking  # fitted by scripts/retarget_fit.py 2026-08-26
       min: -5
       max: 62
+      spring: { hz: 2.5, zeta: 0.9 }
+      idle: { amp: 1.5, hz: 0.25 }
+      soft_limit: 0.15
   # Puppet mode: your own arm IS the lamp. Shoulder → base, elbow → elbow,
   # wrist → neck/head. Offsets put a relaxed forearm-forward pose at the
   # vendor's rest.

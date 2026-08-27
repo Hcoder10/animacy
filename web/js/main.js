@@ -12,7 +12,9 @@ import { RobotViewer } from './viewer.js';
 import { LiveRetargeter, toUrdfValues, restValues } from './retarget.js';
 import { CHANNELS, BOUNDS, UNITS, FLAGS } from './canonical.js';
 import { parseAutonomousCsv, parseJointJson, parseCanonicalJson, syntheticClips, listDir, normaliseListing, fetchJsonOrNull, fetchTextOrNull, urlExists } from './clips.js';
-import { ClipSource, SyntheticSource, WebcamSource, ModelSource } from './motion_source.js';
+import { ClipSource, SyntheticSource, WebcamSource } from './motion_source.js';
+import { TalkSource, ListenSource, MotionBackends, KOKORO_VOICES } from './talk.js';
+import { Recorder, SessionRunner } from './record.js';
 import { STANDINS } from './standins.js';
 
 // ---------------------------------------------------------------------------
@@ -61,6 +63,10 @@ const app = {
   webcam: null,
   loop: true,
   speed: 1.0,
+  backends: null,        // MotionBackends (model / retrieval / envelope), built from manifest.bundle
+  talk: null,            // TalkSource while the Talk tab is active
+  recorder: null,        // Recorder while Webcam live is active
+  session: null,         // SessionRunner while a guided session runs
 };
 window.animacy = app; // test / debugging API, extended at the bottom
 
@@ -277,20 +283,29 @@ function fillClipSelect(kind) {
 function stopSource() {
   if (app.source && app.source.stop) { try { app.source.stop(); } catch (e) { /* ignore */ } }
   app.source = null;
+  app.channels = null;
+  $('time').textContent = '0.00 / 0.00 s';
+  $('scrub').value = '0';
+  $('play').textContent = '▶';
 }
 
 async function setSource(kind) {
-  if (kind === app.sourceKind && kind !== 'webcam') { return; }
+  if (kind === 'model') kind = 'talk'; // old name
+  if (kind === app.sourceKind && kind !== 'webcam' && kind !== 'listen') { return; }
   const prev = app.sourceKind;
   stopSource();
+  app.talk = null;
   app.sourceKind = kind;
   for (const b of $('source-tabs').querySelectorAll('button')) b.classList.toggle('active', b.dataset.source === kind);
   const isClip = kind === 'native' || kind === 'canonical';
   $('clip-select').hidden = !isClip;
   $('webcam-controls').hidden = kind !== 'webcam';
   $('webcam-thumb').hidden = kind !== 'webcam';
+  $('talk-controls').hidden = kind !== 'talk';
+  $('listen-controls').hidden = kind !== 'listen';
   $('mode-select').disabled = kind === 'native';
-  for (const id of ['play', 'loop', 'scrub', 'speed']) $(id).disabled = !isClip;
+  for (const id of ['play', 'loop', 'scrub']) $(id).disabled = !(isClip || kind === 'talk');
+  $('speed').disabled = !isClip;
   restAll();
   try {
     if (isClip) {
@@ -300,15 +315,92 @@ async function setSource(kind) {
       else setStatus(kind === 'native' ? 'no native clips found' : 'no canonical clips', 'err');
     } else if (kind === 'webcam') {
       await startWebcam();
-    } else if (kind === 'model') {
-      app.source = new ModelSource((manifest && manifest.models) || []);
-      await app.source.start();
-      setStatus(app.source.description);
-      toast(app.source.description, 6000);
+    } else if (kind === 'talk') {
+      const t = new TalkSource({ backends: app.backends, backend: $('talk-backend').value, onStatus: talkStatus, loop: app.loop });
+      app.source = t;
+      app.talk = t;
+      const avail = app.backends.available();
+      setStatus(`talk: type a line and press Say it · backends: ${avail.join(' / ')}${app.backends.hasModel ? '' : ' (no model bundle in web/models/ — envelope heuristic only)'}`, 'ok');
+    } else if (kind === 'listen') {
+      const l = new ListenSource({ backends: app.backends, backend: $('listen-backend').value, onStatus: (m) => { $('listen-stat').textContent = m; setStatus(`listen: ${m}`); } });
+      app.source = l;
+      await l.start();
+      setStatus('listen: microphone → VAD → causal model (speaking = 0) → both robots · experimental', 'ok');
     }
   } catch (e) {
     reportError(`source ${kind}`, e);
-    if (kind === 'webcam' && prev && prev !== 'webcam') { await setSource(prev); }
+    if ((kind === 'webcam' || kind === 'listen') && prev && prev !== kind) { await setSource(prev); }
+  }
+}
+
+function talkStatus(msg, frac) {
+  const bar = $('talk-progress');
+  if (frac !== undefined && frac !== null && frac < 1) {
+    bar.hidden = false;
+    bar.querySelector('.fill').style.width = `${Math.round(frac * 100)}%`;
+  } else {
+    bar.hidden = true;
+  }
+  setStatus(`talk: ${msg}`, frac === 1 ? 'ok' : '');
+}
+
+async function sayText(text) {
+  if (!app.talk) await setSource('talk');
+  const btn = $('talk-say');
+  btn.disabled = true;
+  try {
+    app.talk.backend = $('talk-backend').value;
+    const info = await app.talk.say(text, { voice: $('talk-voice').value });
+    $('scrub').max = String(app.talk.duration || 1);
+    return info;
+  } catch (e) {
+    reportError('talk', e);
+    return null;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** Test/dev entry: animate a waveform without TTS (see web/dev/screenshot.py). */
+async function sayAudio(samples, sr, backend = null) {
+  if (!app.talk) await setSource('talk');
+  if (backend) { app.talk.backend = backend; $('talk-backend').value = backend; }
+  const info = await app.talk.sayAudio(Float32Array.from(samples), sr);
+  $('scrub').max = String(app.talk.duration || 1);
+  return info;
+}
+
+function fillBackendSelects() {
+  const avail = app.backends ? app.backends.available() : ['envelope'];
+  const labels = {
+    model: 'model (learned, ONNX) — experimental',
+    retrieval: 'retrieval (motion matching, default)',
+    envelope: 'envelope heuristic (no model)',
+  };
+  const titles = {
+    model: 'learned audio→motion (VQ codes + transformer). Experimental: beats its shuffled-audio control on one of two held-out speakers — see docs/RESULTS.md',
+    retrieval: 'motion matching: real human motion from the corpus, aligned to the speech (the default source)',
+    envelope: 'explicit speech-energy heuristic, labelled as such; the floor the learned sources must beat',
+  };
+  for (const id of ['talk-backend', 'listen-backend']) {
+    const sel = $(id);
+    sel.innerHTML = '';
+    for (const b of avail) {
+      const o = document.createElement('option');
+      o.value = b;
+      o.textContent = labels[b] || b;
+      if (titles[b]) o.title = titles[b];
+      sel.appendChild(o);
+    }
+    sel.value = avail[0];
+  }
+  const vs = $('talk-voice');
+  vs.innerHTML = '';
+  for (const v of KOKORO_VOICES) {
+    const o = document.createElement('option');
+    o.value = v;
+    o.textContent = v;
+    vs.appendChild(o);
   }
 }
 
@@ -347,7 +439,81 @@ async function startWebcam() {
   app.webcam = wc;
   await wc.start();
   for (const R of Object.values(app.robots)) for (const rt of Object.values(R.retargeters)) rt.reset();
+  app.recorder = new Recorder({ webcam: wc, onStatus: (m) => setStatus(`record: ${m}`, 'ok') });
+  wc.onFrame((f) => app.recorder.onFrame(f));
   setStatus('webcam live → canonical channels → both robots', 'ok');
+}
+
+// ---------------------------------------------------------------------------
+// record mode (Webcam live): single takes + the guided session
+// ---------------------------------------------------------------------------
+async function toggleRecord() {
+  const rec = app.recorder;
+  if (!rec) { toast('start Webcam live first'); return; }
+  const btn = $('rec-toggle');
+  try {
+    if (!rec.recording) {
+      const subject = $('rec-subject').value || 'me';
+      await rec.start({ subject, slug: `take${rec.takes.length + 1}`, role: $('rec-role').value, prompt: '(free take)' });
+      btn.textContent = '■ Stop';
+      btn.classList.add('on');
+      $('rec-dot').hidden = false;
+    } else {
+      await rec.stop();
+      btn.textContent = '● Record';
+      btn.classList.remove('on');
+      $('rec-dot').hidden = true;
+      $('rec-download').disabled = false;
+      toast(`saved ${rec.take.name}: ${rec.take.n} frames, ${rec.take.seconds.toFixed(1)} s — press "Download take"`, 6000);
+    }
+  } catch (e) {
+    reportError('record', e);
+  }
+}
+
+function sessionState(s) {
+  const p = s.prompt;
+  $('sp-progress').textContent = p ? `${s.index + 1}/${s.total} · ${p.slug} · ${p.role} · ${p.seconds}s` : `${s.done.length}/${s.total} takes`;
+  const count = $('sp-count');
+  count.classList.toggle('rec', s.phase === 'recording');
+  if (s.phase === 'prompt' || s.phase === 'countdown') { $('sp-prompt').textContent = p.text; count.textContent = s.phase === 'countdown' ? (s.remaining > 3 ? `read… ${s.remaining}` : String(s.remaining)) : ''; }
+  else if (s.phase === 'recording') { $('sp-prompt').textContent = p.text; count.textContent = `● ${s.remaining}s`; }
+  else if (s.phase === 'saved') { count.textContent = 'got it'; }
+  else if (s.phase === 'error') { $('sp-prompt').textContent = `could not start recording: ${s.error}`; count.textContent = ''; }
+  else if (s.phase === 'complete' || s.phase === 'aborted') {
+    $('sp-prompt').textContent = s.phase === 'complete' ? `Session complete: ${s.done.length} takes. Download the zip and send it in (CC-BY-4.0). Thank you.` : `Session stopped after ${s.done.length} take(s).`;
+    count.textContent = '';
+    $('sp-start').disabled = false; $('sp-skip').disabled = true; $('sp-stop').disabled = true;
+    $('sp-download').disabled = !s.done.length;
+    $('rec-download').disabled = !app.recorder || !app.recorder.take;
+  }
+  $('rec-dot').hidden = s.phase !== 'recording';
+  const ul = $('sp-takes');
+  ul.innerHTML = '';
+  for (const t of s.done) {
+    const li = document.createElement('li');
+    li.textContent = `${t.name} — ${t.n} frames, ${t.seconds.toFixed(1)} s, face ${(t.meta.face_valid_fraction * 100).toFixed(0)}%`;
+    ul.appendChild(li);
+  }
+}
+
+async function startSession() {
+  if (!app.recorder) { toast('start Webcam live first'); return; }
+  if (app.session && app.session.running) return;
+  app.session = new SessionRunner({ recorder: app.recorder, subject: $('rec-subject').value || 'me', quick: $('sp-quick').checked, speak: $('sp-speak').checked, onState: sessionState });
+  $('sp-start').disabled = true; $('sp-skip').disabled = false; $('sp-stop').disabled = false; $('sp-download').disabled = true;
+  try { await app.session.run(); } catch (e) { reportError('session', e); }
+}
+
+function wireRecordUi() {
+  $('rec-toggle').addEventListener('click', toggleRecord);
+  $('rec-download').addEventListener('click', () => { if (app.recorder) app.recorder.download(); });
+  $('rec-session').addEventListener('click', () => { $('session-panel').hidden = false; });
+  $('sp-close').addEventListener('click', () => { if (app.session && app.session.running) app.session.abort = true; $('session-panel').hidden = true; });
+  $('sp-start').addEventListener('click', startSession);
+  $('sp-skip').addEventListener('click', () => { if (app.session) app.session.skip = true; });
+  $('sp-stop').addEventListener('click', () => { if (app.session) app.session.abort = true; });
+  $('sp-download').addEventListener('click', () => { if (app.recorder) app.recorder.downloadSession($('rec-subject').value); });
 }
 
 function setMode(mode) {
@@ -510,6 +676,7 @@ function loop(now) {
       if (app.sourceKind === 'webcam' && app.webcam) {
         const w = app.webcam;
         $('webcam-stat').textContent = `${w.fps.toFixed(0)} fps · face ${w.stats.faceMs.toFixed(0)} ms · pose ${w.stats.poseMs.toFixed(0)} ms · ${w.hasFace ? 'face' : 'no face'} · ${w.hasPose ? 'pose' : 'no pose'}${w.speaking ? ' · speaking' : ''}`;
+        if (app.recorder && app.recorder.recording) $('rec-time').textContent = app.recorder.seconds.toFixed(1);
       }
     }
     if (app.ab.on && app.ab.source && app.ab.viewer) {
@@ -559,6 +726,11 @@ function wireUi() {
   $('ab-select').addEventListener('change', (e) => setAbClip(e.target.value).catch((err) => reportError('A/B clip', err)));
   $('set-neutral').addEventListener('click', () => { if (app.webcam) { if (!app.webcam.setNeutral()) toast('no face tracked yet — look at the camera'); } });
   $('arm-select').addEventListener('change', (e) => { if (app.webcam) app.webcam.arm = e.target.value; });
+  wireRecordUi();
+  $('talk-say').addEventListener('click', () => sayText($('talk-text').value));
+  $('talk-text').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sayText($('talk-text').value); } });
+  $('talk-backend').addEventListener('change', (e) => { if (app.talk) app.talk.backend = e.target.value; });
+  $('listen-backend').addEventListener('change', (e) => { if (app.source && app.source instanceof ListenSource) app.source.backend = e.target.value; });
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space' && !['INPUT', 'SELECT', 'BUTTON', 'TEXTAREA'].includes(document.activeElement.tagName)) {
       e.preventDefault();
@@ -590,7 +762,9 @@ async function boot() {
     else reportError(`load ${n}`, r.reason);
   });
   await discoverClips();
+  app.backends = new MotionBackends({ baseUrl: 'models/', bundle: (manifest && manifest.bundle) || {}, onStatus: talkStatus });
   buildReadouts();
+  fillBackendSelects();
   wireUi();
   requestAnimationFrame((t) => { lastNow = t; fpsAcc.t = t; loop(t); });
   const kind = params.get('source') || 'native';
@@ -618,6 +792,24 @@ Object.assign(app, {
   sourceInfo: () => ({ kind: app.sourceKind, clip: app.clipId, mode: app.mode, time: app.source && app.source.time, duration: app.source && app.source.duration, playing: app.source && app.source.playing }),
   robotInfo: (name) => { const R = app.robots[name]; return R ? { urdfUrl: R.urdfUrl, standin: !!R.standin, missingJoints: R.missingJoints, urdfJoints: R.viewer.jointNames } : null; },
   setView: (kind) => { for (const R of Object.values(app.robots)) R.viewer.setView(kind); if (app.ab.viewer) app.ab.viewer.viewer.setView(kind); },
+  say: sayText,
+  sayAudio,
+  record: {
+    start: (o) => app.recorder && app.recorder.start(o),
+    stop: () => app.recorder && app.recorder.stop(),
+    lastTake: () => (app.recorder && app.recorder.take ? { name: app.recorder.take.name, n: app.recorder.take.n, seconds: app.recorder.take.seconds, meta: app.recorder.take.meta, audioBytes: app.recorder.take.audio.size, zipBytes: app.recorder.take.zip.size, motion: app.recorder.take.motion } : null),
+    lastZipBase64: async () => { const t = app.recorder && app.recorder.take; if (!t) return null; const b = new Uint8Array(await t.zip.arrayBuffer()); let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s); },
+  },
+  talkInfo: () => (app.talk ? { last: app.talk.last, backend: app.talk.backend, time: app.talk.time, duration: app.talk.duration, playing: app.talk.playing, available: app.backends.available() } : null),
+  // World-space forward (+x) axis of a link, in three.js coordinates: x = robot forward,
+  // y = up, z = robot RIGHT (URDF −y). A head turning LEFT makes z go negative; looking UP makes y go positive.
+  linkForward: (name, link = 'head') => {
+    const R = app.robots[name];
+    if (!R || !R.viewer.robot || !R.viewer.robot.links[link]) return null;
+    R.viewer.scene.updateMatrixWorld(true);
+    const e = R.viewer.robot.links[link].matrixWorld.elements;
+    return { x: e[0], y: e[1], z: e[2] };
+  },
 });
 
 boot().catch((e) => reportError('boot', e));

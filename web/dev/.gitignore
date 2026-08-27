@@ -1,0 +1,2 @@
+# persistent Chromium profile used by tts_check.py (caches the ~90 MB Kokoro download)
+.chromium-profile/
