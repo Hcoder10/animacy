@@ -10,7 +10,10 @@ import { MotionSource, WebcamSource } from './motion_source.js';
 import { Track } from './clips.js';
 import { CHANNELS, BOUNDS, neutralFrame } from './canonical.js';
 import { audioFeatures, SR, RATE_HZ } from './features.js';
-import { MotionModel, RetrievalIndex, envelopeMotion, motionToFrames } from './model.js';
+import { MotionModel, RetrievalIndex, envelopeMotion, motionToFrames, postprocessMotion } from './model.js';
+import { analyse as analyseIntent, TAGS as INTENT_TAGS } from './intent.js';
+
+export { INTENT_TAGS };
 
 export const KOKORO_VERSION = '1.2.1';
 export const KOKORO_URL = `https://cdn.jsdelivr.net/npm/kokoro-js@${KOKORO_VERSION}/dist/kokoro.web.js`;
@@ -89,6 +92,24 @@ export class MotionBackends {
     this.index = null;
     this._modelPromise = null;
     this._indexPromise = null;
+    this.meta = null;             // model.json (intent + postprocess blocks), fetched lazily
+    this._metaPromise = null;
+  }
+
+  /** model.json, if the bundle has one (intent lexicon + postprocess defaults); null otherwise. */
+  async getMeta() {
+    if (!this.bundle.model_json) return null;
+    if (!this._metaPromise) {
+      this._metaPromise = fetch(`${this.baseUrl}model.json`, { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : null)).then((m) => { this.meta = m; return m; }).catch(() => null);
+    }
+    return this._metaPromise;
+  }
+
+  /** Text (+ optional forced tag) → intent, with the bundle's lexicon (intent.analyse). */
+  async intentFor(text, override = null) {
+    const meta = await this.getMeta();
+    if (!text && !override) return null;
+    return analyseIntent(text || '', { override: override || null, spec: meta && meta.intent });
   }
 
   get hasModel() { return !!((this.bundle.a2m || this.bundle.a2m_ar) && this.bundle.vq_decoder && this.bundle.model_json); }
@@ -126,15 +147,23 @@ export class MotionBackends {
    * features [T][66] + speaking [T] → {frames, backend, codes?}
    * @param {string} backend  requested backend; the one actually used is returned
    */
-  async motion(featRows, speaking, backend, { causal = false, seed = 0 } = {}) {
+  /**
+   * @param {object|null} [o.intent]  intent.analyse output (from the utterance text); sets the amplitude
+   *        (min(1.3, 0.8 + 0.5·arousal)) for every source and the retrieval arousal / thinking bonuses —
+   *        exactly what `animacy say` does through infer.generate / infer.retrieve
+   */
+  async motion(featRows, speaking, backend, { causal = false, seed = 0, intent = null } = {}) {
     const T = featRows.length;
+    const meta = await this.getMeta();
+    const pp = (meta && meta.postprocess) || {};
+    const amplitude = intent ? intent.amplitude : (pp.amplitude === undefined ? 1.0 : pp.amplitude);
     if (backend === 'model') {
       try {
         const model = await this.getModel();
         if (model) {
           const onStep = model.arch === 'ar' ? (i, L) => this.onStatus(`model (${model.describe}) step ${i}/${L}…`, i / L) : null;
-          const { motion, codes, arch } = await model.generate(featRows, speaking, { causal, seed, onStep });
-          return { frames: motionToFrames(motion, T, model.channels, speaking), backend: 'model', codes, arch };
+          const { motion, codes, arch } = await model.generate(featRows, speaking, { causal, seed, onStep, amplitude });
+          return { frames: motionToFrames(motion, T, model.channels, speaking), backend: 'model', codes, arch, amplitude, intent };
         }
       } catch (e) {
         console.warn('[talk] model backend failed, falling back:', e && e.message);
@@ -146,8 +175,12 @@ export class MotionBackends {
       try {
         const index = await this.getIndex();
         if (index) {
-          const { motion, ids } = index.query(featRows, speaking);
-          return { frames: motionToFrames(motion, T, index.channels, speaking), backend: 'retrieval', ids };
+          const q = index.query(featRows, speaking, { targetArousal: intent ? intent.arousal : null, intentTag: intent ? intent.tag : null });
+          // infer.retrieve: the same post-processing as the model (settle / pitch floor / amplitude)
+          const motion = postprocessMotion(q.motion, T, index.channels, {
+            speaking, featRows, settleS: pp.settle_s || 0, pitchFloor: pp.pitch_floor === undefined ? null : pp.pitch_floor, amplitude,
+          });
+          return { frames: motionToFrames(motion, T, index.channels, speaking), backend: 'retrieval', ids: q.ids, rawMotion: q.motion, amplitude, intent };
         }
       } catch (e) {
         console.warn('[talk] retrieval backend failed, falling back:', e && e.message);
@@ -220,8 +253,12 @@ export class TalkSource extends MotionSource {
     return ctx;
   }
 
-  /** Synthesise + animate `text`. Resolves when playback has started. */
-  async say(text, { voice = 'af_heart', seed = 0 } = {}) {
+  /**
+   * Synthesise + animate `text`. Resolves when playback has started.
+   * The text is also the intent source (intent.js): tag → amplitude + retrieval bonuses;
+   * `intentOverride` forces a tag (the "intent" dropdown / `animacy say --intent`).
+   */
+  async say(text, { voice = 'af_heart', seed = 0, intentOverride = null } = {}) {
     if (this.busy) throw new Error('still working on the previous line');
     text = (text || '').trim();
     if (!text) throw new Error('nothing to say');
@@ -232,7 +269,7 @@ export class TalkSource extends MotionSource {
       this.onStatus(`synthesising (${tts._device})…`, 0);
       const raw = await tts.generate(text, { voice });
       const tTts = performance.now() - t0;
-      return await this.sayAudio(raw.audio, raw.sampling_rate, { seed, text, ttsMs: tTts });
+      return await this.sayAudio(raw.audio, raw.sampling_rate, { seed, text, ttsMs: tTts, intentOverride });
     } finally {
       this.busy = false;
     }
@@ -241,8 +278,9 @@ export class TalkSource extends MotionSource {
   /**
    * Animate an existing waveform (any sample rate). Used by `say` and by the
    * verification suite, which injects a synthetic voice instead of running TTS.
+   * `text` (if any) drives the intent; `intentOverride` forces a tag.
    */
-  async sayAudio(audio, sr, { seed = 0, text = '(audio)', ttsMs = 0 } = {}) {
+  async sayAudio(audio, sr, { seed = 0, text = '', ttsMs = 0, intentOverride = null } = {}) {
     const ctx = await this._ensureRunning();
     this.onStatus('features…');
     const wav16 = await resampleTo16k(audio, sr);
@@ -251,19 +289,27 @@ export class TalkSource extends MotionSource {
     // talk mode (serve._speaking_from_audio): the robot is the speaker wherever its own voice has energy
     const speaking = new Uint8Array(nTicks);
     for (let i = 0; i < nTicks; i++) speaking[i] = feats[i][64] > -0.3 ? 1 : 0;
-    this.onStatus(`motion (${this.backend})…`);
+    const intent = await this.backends.intentFor(text, intentOverride);
+    this.onStatus(`motion (${this.backend}${intent ? `, intent ${intent.tag} a=${intent.arousal.toFixed(2)} ×${intent.amplitude.toFixed(2)}` : ''})…`);
     const t1 = performance.now();
-    const res = await this.backends.motion(feats, speaking, this.backend, { causal: false, seed });
+    const res = await this.backends.motion(feats, speaking, this.backend, { causal: false, seed, intent });
     const tMotion = performance.now() - t1;
-    this.track = framesToTrack(res.frames, text.slice(0, 40));
+    const label = text || '(audio)';
+    this.track = framesToTrack(res.frames, label.slice(0, 40));
     this.buffer = ctx.createBuffer(1, audio.length, sr);
     this.buffer.copyToChannel(Float32Array.from(audio), 0);
-    this.last = { text, backend: res.backend, arch: res.arch || null, seconds: audio.length / sr, ttsMs, motionMs: tMotion, codes: res.codes ? res.codes.length : 0, frames: res.frames.length };
+    this.last = {
+      text: label, backend: res.backend, arch: res.arch || null, seconds: audio.length / sr, ttsMs, motionMs: tMotion,
+      codes: res.codes ? res.codes.length : 0, frames: res.frames.length, amplitude: res.amplitude ?? null,
+      intent: intent ? { tag: intent.tag, arousal: intent.arousal, valence: intent.valence, amplitude: intent.amplitude, overridden: intent.overridden } : null,
+      retrievalIds: res.ids || null,
+    };
     this._offset = 0;
     this.finished = false;
     this._startAudio(0);
-    const label = res.backend === 'model' && res.arch ? `model/${res.arch}` : res.backend;
-    this.onStatus(`${label}: ${(audio.length / sr).toFixed(1)} s of speech · tts ${(ttsMs / 1000).toFixed(1)} s · motion ${tMotion.toFixed(0)} ms`, 1);
+    const src = res.backend === 'model' && res.arch ? `model/${res.arch}` : res.backend;
+    const intentNote = intent ? ` · intent ${intent.tag}${intent.overridden ? ' (forced)' : ''} ×${intent.amplitude.toFixed(2)}` : '';
+    this.onStatus(`${src}: ${(audio.length / sr).toFixed(1)} s of speech · tts ${(ttsMs / 1000).toFixed(1)} s · motion ${tMotion.toFixed(0)} ms${intentNote}`, 1);
     return this.last;
   }
 

@@ -13,7 +13,7 @@ import { LiveRetargeter, toUrdfValues, restValues } from './retarget.js';
 import { CHANNELS, BOUNDS, UNITS, FLAGS } from './canonical.js';
 import { parseAutonomousCsv, parseJointJson, parseCanonicalJson, syntheticClips, listDir, normaliseListing, fetchJsonOrNull, fetchTextOrNull, urlExists } from './clips.js';
 import { ClipSource, SyntheticSource, WebcamSource } from './motion_source.js';
-import { TalkSource, ListenSource, MotionBackends, KOKORO_VOICES } from './talk.js';
+import { TalkSource, ListenSource, MotionBackends, KOKORO_VOICES, INTENT_TAGS } from './talk.js';
 import { Recorder, SessionRunner } from './record.js';
 import { STANDINS } from './standins.js';
 
@@ -495,7 +495,7 @@ async function sayText(text) {
   btn.disabled = true;
   try {
     app.talk.backend = $('talk-backend').value;
-    const info = await app.talk.say(text, { voice: $('talk-voice').value });
+    const info = await app.talk.say(text, { voice: $('talk-voice').value, intentOverride: $('talk-intent').value || null });
     $('scrub').max = String(app.talk.duration || 1);
     return info;
   } catch (e) {
@@ -506,11 +506,11 @@ async function sayText(text) {
   }
 }
 
-/** Test/dev entry: animate a waveform without TTS (see web/dev/screenshot.py). */
-async function sayAudio(samples, sr, backend = null) {
+/** Test/dev entry: animate a waveform without TTS (see web/dev/screenshot.py); `text` drives the intent. */
+async function sayAudio(samples, sr, backend = null, text = '', intentOverride = null) {
   if (!app.talk) await setSource('talk');
   if (backend) { app.talk.backend = backend; $('talk-backend').value = backend; }
-  const info = await app.talk.sayAudio(Float32Array.from(samples), sr);
+  const info = await app.talk.sayAudio(Float32Array.from(samples), sr, { text, intentOverride });
   $('scrub').max = String(app.talk.duration || 1);
   return info;
 }
@@ -546,6 +546,14 @@ function fillBackendSelects() {
     o.value = v;
     o.textContent = v;
     vs.appendChild(o);
+  }
+  const is = $('talk-intent');
+  is.innerHTML = '<option value="">intent: from text</option>';
+  for (const tag of INTENT_TAGS) {
+    const o = document.createElement('option');
+    o.value = tag;
+    o.textContent = `intent: ${tag}`;
+    is.appendChild(o);
   }
 }
 

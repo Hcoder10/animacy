@@ -17,9 +17,67 @@
 // browser but not bit-identical to Python; with T → 0 both reduce to argmax and
 // tests/test_web_model_parity.py checks that path exactly for both archs.
 
-import { float16ToFloat32, seededRng, smoothColumns, hanning, convolveSame } from './dsp.js';
+import { float16ToFloat32, seededRng, smoothColumns, hanning, convolveSame, butter2, filtfilt } from './dsp.js';
 import { N_FEATS, RATE_HZ } from './features.js';
 import { neutralFrame, BOUNDS } from './canonical.js';
+
+// ---------------------------------------------------------------------------
+// generation-side post-processing — infer.postprocess_motion, applied to every
+// source (model, retrieval) in the order model.json `postprocess.order`:
+//   amplitude (per-channel scale) → pitch floor → utterance-final settle → (clamp in motionToFrames)
+// ---------------------------------------------------------------------------
+export const BASELINE_HZ = 0.3;   // the cutoff the pose channels were detrended with
+export const QUIET_ENERGY = -0.3; // normalised log energy below this = silence (feature 64)
+
+/**
+ * @param {Float32Array} motion  flat [T*C] canonical units (copied, not modified)
+ * @param {number} T
+ * @param {string[]} channels    channel order (needs 'head_pitch' for the floor)
+ * @param {object} o
+ * @param {Uint8Array|number[]|null} [o.speaking]  [T]
+ * @param {Float32Array[]|null} [o.featRows]        [T][66]
+ * @param {number} [o.settleS]        seconds of end-of-utterance blend to neutral (0 = off)
+ * @param {number|null} [o.pitchFloor] degrees the 0.3 Hz head_pitch baseline may not go below
+ * @param {number|number[]} [o.amplitude]  scalar or per-channel scale
+ */
+export function postprocessMotion(motion, T, channels, { speaking = null, featRows = null, settleS = 0, pitchFloor = null, amplitude = 1.0, rateHz = RATE_HZ } = {}) {
+  const C = channels.length;
+  const m = Float32Array.from(motion);
+  const amp = Array.isArray(amplitude) ? amplitude : new Array(C).fill(Number(amplitude));
+  if (amp.some((a) => a !== 1.0)) for (let t = 0; t < T; t++) for (let c = 0; c < C; c++) m[t * C + c] *= amp[c];
+  const pi = channels.indexOf('head_pitch');
+  if (pitchFloor !== null && pitchFloor !== undefined && T > 0 && pi >= 0) {
+    const p = new Float64Array(T);
+    for (let t = 0; t < T; t++) p[t] = m[t * C + pi];
+    let base;
+    if (T >= 12) {
+      const { b, a } = butter2(BASELINE_HZ, rateHz);
+      base = filtfilt(b, a, p, Math.min(9, T - 1));
+    } else {
+      let s = 0; for (let t = 0; t < T; t++) s += p[t];
+      base = new Float64Array(T).fill(s / T);
+    }
+    for (let t = 0; t < T; t++) m[t * C + pi] = p[t] + Math.max(0.0, pitchFloor - base[t]);
+  }
+  if (settleS && settleS > 0 && T > 0) {
+    const n = Math.max(1, Math.round(settleS * rateHz));
+    let end = T;
+    if (speaking && speaking.length === T && Array.from(speaking).some((v) => v > 0)) {
+      for (let t = T - 1; t >= 0; t--) if (speaking[t] > 0) { end = t + 1; break; }
+    } else if (featRows && featRows.length === T && featRows[0].length > 64) {
+      end = 0;
+      for (let t = T - 1; t >= 0; t--) if (featRows[t][64] > QUIET_ENERGY) { end = t + 1; break; }
+      if (end === 0) end = T;
+    }
+    const w = new Float32Array(T);
+    const a0 = Math.max(0, end - n);
+    // np.linspace(0, 1, n+1)[1:] = k/n for k = 1..n; keep the last (end − a0) of them
+    for (let t = a0; t < end; t++) w[t] = (n - (end - t) + 1) / n;
+    for (let t = end; t < T; t++) w[t] = 1.0;
+    for (let t = 0; t < T; t++) { const g = 1.0 - w[t]; for (let c = 0; c < C; c++) m[t * C + c] *= g; }
+  }
+  return m;
+}
 
 export const ORT_VERSION = '1.20.1';
 export const ORT_URL = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/ort.min.mjs`;
@@ -246,6 +304,7 @@ export class MotionModel {
     this.arch = arch;
     this.sampling = meta.sampling || { temperature: 0.8, bigram_weight: 0.5 };
     this.smoothHz = (meta.smoothing && meta.smoothing.cutoff_hz) || 6.0;
+    this.postprocess = meta.postprocess || {};      // {settle_s, pitch_floor, amplitude}
     if (!SAMPLERS[this.arch] || !sessions[this.arch]) throw new Error(`model.json arch '${this.arch}' is not runnable here (samplers: ${Object.keys(SAMPLERS).join(', ')})`);
   }
 
@@ -334,14 +393,21 @@ export class MotionModel {
    * @param {Float32Array[]} featRows
    * @param {Uint8Array|number[]} speaking
    */
-  async generate(featRows, speaking, { causal = false, temperature = null, bigramWeight = null, topP = null, repeatPenalty = null, seed = 0, smoothHz = undefined, onStep = null } = {}) {
+  async generate(featRows, speaking, { causal = false, temperature = null, bigramWeight = null, topP = null, repeatPenalty = null, seed = 0, smoothHz = undefined, onStep = null, amplitude = null, settleS = null, pitchFloor = undefined } = {}) {
     const T = featRows.length;
     const C = this.channels.length;
     const stats = this.meta.stats || {};
+    const pp = this.postprocess;
+    const ppOpts = {
+      speaking, featRows,
+      settleS: settleS === null ? (pp.settle_s || 0) : settleS,
+      pitchFloor: pitchFloor === undefined ? (pp.pitch_floor === undefined ? null : pp.pitch_floor) : pitchFloor,
+      amplitude: amplitude === null ? (pp.amplitude === undefined ? 1.0 : pp.amplitude) : amplitude,
+    };
     if (T < FRAMES_PER_CODE) {
       const m = new Float32Array(T * C);
       for (let t = 0; t < T; t++) for (let c = 0; c < C; c++) m[t * C + c] = (stats.mean && stats.mean[c]) || 0;
-      return { motion: m, codes: new Int32Array(0), arch: this.arch };
+      return { motion: m, codes: new Int32Array(0), arch: this.arch, postprocess: ppOpts };
     }
     const L = Math.floor(T / FRAMES_PER_CODE);
     const f15 = poolPairs(featRows, N_FEATS);
@@ -368,7 +434,10 @@ export class MotionModel {
       for (let t = T2; t < T; t++) for (let c = 0; c < C; c++) padded[t * C + c] = m[(T2 - 1) * C + c];
       m = padded;
     }
-    return { motion: m.slice(0, T * C), codes, arch: this.arch };
+    m = m.slice(0, T * C);
+    const amp = Array.isArray(ppOpts.amplitude) ? ppOpts.amplitude.some((a) => a !== 1.0) : ppOpts.amplitude !== 1.0;
+    if (ppOpts.settleS || ppOpts.pitchFloor !== null || amp) m = postprocessMotion(m, T, this.channels, ppOpts);
+    return { motion: m, codes, arch: this.arch, postprocess: ppOpts };
   }
 }
 
@@ -391,6 +460,11 @@ export class RetrievalIndex {
     this.continuityBonus = header.continuity_bonus ?? 0.1;
     this.speakingBonus = header.speaking_bonus ?? 0.05;
     this.crossfade = header.crossfade ?? 5;
+    // intent fields (v2 indexes): per-window human arousal 0..1 and still-then-move −1..1
+    this.arousal = Array.isArray(header.arousal) && header.arousal.length === this.n ? Float32Array.from(header.arousal) : null;
+    this.stillThenMove = Array.isArray(header.still_then_move) && header.still_then_move.length === this.n ? Float32Array.from(header.still_then_move) : null;
+    this.arousalBonus = header.arousal_bonus ?? 0.15;
+    this.thinkingBonus = header.thinking_bonus ?? 0.10;
   }
 
   static async load(baseUrl = 'models/', onProgress = null) {
@@ -431,13 +505,19 @@ export class RetrievalIndex {
 
   /**
    * [T][66] features + [T] speaking → {motion: Float32Array [T*C], ids}
+   * Intent conditioning (RetrievalIndex.query): `targetArousal` (0..1, from the text)
+   * adds arousal_bonus·(1 − |window_arousal − target|) to every window's score;
+   * `intentTag === 'thinking'` adds thinking_bonus·max(0, still_then_move).
+   * Both need the v2 index fields and are no-ops without them.
    */
-  query(featRows, speaking) {
+  query(featRows, speaking, { targetArousal = null, intentTag = null } = {}) {
     const T = featRows.length;
     const C = this.channels.length;
     const win = this.win, hop = this.hop;
     const out = new Float32Array((T + win) * C);
     if (this.n === 0 || T === 0) return { motion: out.slice(0, T * C), ids: [] };
+    const useArousal = this.arousal !== null && this.arousalBonus > 0 && targetArousal !== null && targetArousal !== undefined;
+    const useThinking = intentTag === 'thinking' && this.stillThenMove !== null && this.thinkingBonus > 0;
     // edge-pad features and speaking by `win`
     const pad = featRows.slice();
     for (let i = 0; i < win; i++) pad.push(featRows[T - 1]);
@@ -461,6 +541,8 @@ export class RetrievalIndex {
         for (let d = 0; d < this.keyDim; d++) s += this.keys[off + d] * key[d];
         if (prev >= 0 && this.nextId[prev] === i) s += this.continuityBonus;
         s += this.speakingBonus * (1.0 - Math.abs(this.speaking[i] - sMean));
+        if (useArousal) s += this.arousalBonus * (1.0 - Math.abs(this.arousal[i] - targetArousal));
+        if (useThinking) s += this.thinkingBonus * Math.max(0.0, this.stillThenMove[i]);
         sims[i] = s;
         if (s > best) { best = s; j = i; }
       }

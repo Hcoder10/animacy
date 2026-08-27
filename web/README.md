@@ -71,6 +71,18 @@ text ──kokoro-js──► Float32 @ 24 kHz ──OfflineAudioContext──�
 audio ──AudioBufferSourceNode──► speakers; TalkSource.time = ctx.currentTime − startedAt
 ```
 
+**Intent + post-processing** (so the browser's Talk mode equals `animacy say`):
+the typed text is the intent source — `js/intent.js` mirrors
+`animacy/model/intent.py` with the lexicon from `model.json` (`intent` block):
+tag (greeting / agreement / doubt / excitement / thinking / neutral), arousal,
+valence, amplitude = min(1.3, 0.8 + 0.5·arousal); the "intent:" dropdown forces
+a tag like `--intent`. The amplitude scales every source's motion; retrieval
+adds 0.15·(1 − |window_arousal − target|) and, for thinking, 0.10·still_then_move
+to each window's score (v2 index fields). Then `postprocessMotion` applies the
+`postprocess` block in order: amplitude → pitch floor (0.3 Hz zero-phase
+baseline of head_pitch not below −3°) → utterance-final settle (linear blend to
+neutral over the last 0.5 s of speech) → schema clamp.
+
 `web/models/model.json` (written by `animacy/model/export.py`) is the contract:
 channel order, `stats`, sampling defaults, smoothing cutoff, file names. The
 manifest's `bundle` flags say which files exist; missing ones remove that
@@ -97,7 +109,9 @@ Chromium running `model.js` on the real bundle vs onnxruntime + `infer.py` /
 `a2m_ar.py`: ff logits < 1e-3, decoder < 1e-3, greedy codes identical for both
 archs, full greedy generate < 2e-3, retrieval ids identical, every AR draw
 inside Python's top-p nucleus, `sampleTopP` frequencies within sampling noise
-of `AudioToMotionAR.sample`). The stochastic samplers use sfc32 rather than
+of `AudioToMotionAR.sample`; intent analysis identical on 17 lines incl.
+negation / caps / ellipsis edge cases; intent-conditioned retrieval ids
+identical and post-processed motion < 2e-3 vs `infer.retrieve`). The stochastic samplers use sfc32 rather than
 numpy's PCG64, so seeded sequences are reproducible in the browser but not
 bit-identical to Python; the tests score the JS draws under Python's per-step
 distributions instead.

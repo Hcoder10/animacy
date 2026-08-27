@@ -11,6 +11,7 @@
 //     → soft limit (tanh knee over the last `soft_limit` of the range)
 //     → clamp [min, max]           (mapping bounds, already resolved by
 //                                    `profile.to_web_json`; else joint bounds)
+//     → settle toward rest+offset   (after `quiet` s of stillness and no speech; §settle)
 //     → + gated idle sway          (only while the mapped target is near-still)
 //     → clamp
 //     → tracker: spring (exact zero-order-hold) | one-pole, alpha = 1 − exp(−2π·cutoff·dt)
@@ -136,12 +137,18 @@ export class LiveRetargeter {
     this.env = {};          // idle activity envelope
     this.prevTarget = {};   // previous pre-idle target
     this.clock = {};        // idle clock
+    this.settlePrev = {};   // settle: previous raw target
+    this.quiet = {};        // settle: seconds of quiet so far
+    this.blend = {};        // settle: 0 (free) → 1 (at home)
     for (const j of this.profile.joints) {
       this.state[j.name] = j.rest;
       this.vel[j.name] = 0.0;
       this.env[j.name] = 0.0;
       this.prevTarget[j.name] = j.rest;
       this.clock[j.name] = 0.0;
+      this.settlePrev[j.name] = j.rest;
+      this.quiet[j.name] = 0.0;
+      this.blend[j.name] = 0.0;
     }
   }
 
@@ -154,6 +161,8 @@ export class LiveRetargeter {
   step(channels, dt) {
     const out = {};
     const joints = this.profile.joints;
+    let speaking = channels.speaking;
+    if (speaking === undefined || speaking === null || Number.isNaN(speaking)) speaking = 0;
     for (let idx = 0; idx < joints.length; idx++) {
       const j = joints[idx];
       const m = this.mp[j.name];
@@ -175,6 +184,19 @@ export class LiveRetargeter {
         u = softClip(u, lo, hi, m.soft_limit);
         u = Math.min(Math.max(u, lo), hi);
         cutoff = isNil(m.smooth_hz) ? this.defaultSmoothHz : m.smooth_hz;
+        if (m.settle) {
+          // step 5b (docs/RETARGET.md §settle == animacy.retarget.settle_update): after `quiet` s of
+          // (target speed < still AND not speaking) blend toward home = rest + offset over `seconds`;
+          // any motion or speech resets the quiet timer and releases the blend over seconds/4
+          const a = Math.abs(u - this.settlePrev[j.name]) / dt;
+          this.settlePrev[j.name] = u;
+          const quietNow = a < m.settle.still && speaking < 0.5;
+          this.quiet[j.name] = quietNow ? this.quiet[j.name] + dt : 0.0;
+          const bUp = Math.min(Math.max((this.quiet[j.name] - m.settle.quiet) / m.settle.seconds, 0.0), 1.0);
+          const b = Math.max(bUp, this.blend[j.name] - (4.0 * dt) / m.settle.seconds);
+          this.blend[j.name] = b;
+          u = u + b * (j.rest + m.offset - u);
+        }
         if (m.idle) {
           const a = Math.abs(u - this.prevTarget[j.name]) / dt;
           this.prevTarget[j.name] = u;

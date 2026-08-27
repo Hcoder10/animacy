@@ -108,7 +108,7 @@ V11_SPEC = {
         "c": {"from": "head_x", "gain": 0.3, "idle": {"amp": 2.0, "hz": 0.25, "still": 40}, "spring": {"hz": 1.5, "zeta": 1.0}, "soft_limit": 0.1},
         "d": {"from": "head_roll", "gain": 1.0, "min": -20, "max": 20, "soft_limit": 0.3},
         # over-damped spring on a slow joint: the rate limit engages, so the carried velocity is re-derived
-        "e": {"from": "head_yaw", "gain": 0.8, "spring": {"hz": 3.0, "zeta": 1.5}},
+        "e": {"from": "head_yaw", "gain": 0.8, "spring": {"hz": 3.0, "zeta": 1.5}, "settle": {"seconds": 0.6, "quiet": 0.4, "still": 12}},
     }},
 }
 

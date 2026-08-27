@@ -28,11 +28,22 @@ import pytest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 MODELS = os.path.join(ROOT, "web", "models")
-BUNDLE_OK = all(os.path.isfile(os.path.join(MODELS, f)) for f in ("model.json", "a2m.onnx", "vq_decoder.onnx", "bigram.bin"))
+FF_OK = all(os.path.isfile(os.path.join(MODELS, f)) for f in ("a2m.onnx", "bigram.bin"))      # v1 feed-forward arch
+AR_OK = os.path.isfile(os.path.join(MODELS, "a2m_ar.onnx"))                                    # v2 autoregressive arch
+BUNDLE_OK = all(os.path.isfile(os.path.join(MODELS, f)) for f in ("model.json", "vq_decoder.onnx")) and (FF_OK or AR_OK)
 RETRIEVAL_OK = all(os.path.isfile(os.path.join(MODELS, f)) for f in ("retrieval.json", "retrieval.bin"))
-AR_OK = os.path.isfile(os.path.join(MODELS, "a2m_ar.onnx"))
 
 pytestmark = pytest.mark.skipif(not BUNDLE_OK, reason="no model bundle in web/models")
+
+# text → intent parity lines: the module's own examples plus punctuation / negation / caps edge cases
+INTENT_LINES = [
+    "Hello there, welcome back!", "Hi, nice to meet you.", "Yeah, I agree, that makes sense.", "Of course, you're right about that.",
+    "I'm not sure that's true, honestly.", "Hmm, really? I doubt it.", "Wow, this is amazing, I can't believe it!",
+    "That's incredible, congratulations!", "Hmm... let me see, what if we tried the other one.", "Wait, I need to consider that for a moment.",
+    "WAIT, that is NOT right!!", "I don't think that's right, never sure.", "This is bad news, sorry.", "What time is it?",
+    "Good morning! Great to see you, thanks…", "no", "",
+]
+ff_only = pytest.mark.skipif(not FF_OK, reason="no feed-forward a2m.onnx in web/models (v2 bundles ship the AR model only)")
 
 
 def _free_port() -> int:
@@ -66,7 +77,8 @@ def js_results():
     feats = rng.normal(size=(T, N_FEATS)).astype(np.float32)
     speaking = (rng.random(T) > 0.3).astype(np.int64)
     codes = rng.integers(0, 512, size=23).astype(np.int64)
-    job = {"feats": feats.tolist(), "speaking": speaking.tolist(), "codes": codes.tolist(), "retrieval": RETRIEVAL_OK, "ar": AR_OK}
+    job = {"feats": feats.tolist(), "speaking": speaking.tolist(), "codes": codes.tolist(), "retrieval": RETRIEVAL_OK, "ar": AR_OK, "ff": FF_OK,
+           "intent_lines": INTENT_LINES}
 
     port = _free_port()
     srv = subprocess.Popen([sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"], cwd=ROOT,
@@ -83,19 +95,28 @@ def js_results():
             out = page.evaluate(
                 """async (job) => {
                     const M = await import('./js/model.js');
-                    // the ff path is tested regardless of what model.json's default_arch says
                     const metaAll = await (await fetch('models/model.json', {cache: 'no-cache'})).json();
-                    const ffMeta = { ...metaAll, default_arch: 'ff', archs: ['ff'] };
                     const origFetch = window.fetch;
-                    window.fetch = (url, o) => (String(url).endsWith('models/model.json') ? Promise.resolve(new Response(JSON.stringify(ffMeta))) : origFetch(url, o));
-                    const model = await M.MotionModel.load('models/');
-                    window.fetch = origFetch;
                     const rows = job.feats.map(r => Float32Array.from(r));
                     const spk = Uint8Array.from(job.speaking);
                     const L = Math.floor(rows.length / 2);
                     const f15 = M.poolPairs(rows, 66);
                     const s15 = M.poolFlag(spk);
-                    const res = { n_codes: model.nCodes, channels: model.channels, arch: model.arch, resolved_default: M.resolveArch(metaAll) && M.resolveArch(metaAll).arch, meta_archs: metaAll.archs || null, meta_default_arch: metaAll.default_arch || null };
+                    const res = { resolved_default: M.resolveArch(metaAll) && M.resolveArch(metaAll).arch, meta_archs: metaAll.archs || null, meta_default_arch: metaAll.default_arch || null, ff: !!job.ff };
+                    if (!job.ff) {
+                        // no feed-forward graph in this bundle: decode + stochastic checks come from the AR block below
+                        const bare = await M.MotionModel.load('models/');
+                        res.n_codes = bare.nCodes; res.channels = bare.channels; res.arch = bare.arch;
+                        res.decoded = Array.from(await bare.decode(Int32Array.from(job.codes)));
+                    }
+                    let model = null;
+                    if (job.ff) {
+                    // the ff path is tested regardless of what model.json's default_arch says
+                    const ffMeta = { ...metaAll, default_arch: 'ff', archs: ['ff'] };
+                    window.fetch = (url, o) => (String(url).endsWith('models/model.json') ? Promise.resolve(new Response(JSON.stringify(ffMeta))) : origFetch(url, o));
+                    model = await M.MotionModel.load('models/');
+                    window.fetch = origFetch;
+                    res.n_codes = model.nCodes; res.channels = model.channels; res.arch = model.arch;
                     res.logits0 = Array.from(await model.logits(f15, L, s15, false));
                     res.logits1 = Array.from(await model.logits(f15, L, s15, true));
                     res.decoded = Array.from(await model.decode(Int32Array.from(job.codes)));
@@ -123,16 +144,33 @@ def js_results():
                     const g = await model.generate(rows, spk, { causal: false, temperature: 1e-6, bigramWeight: 0.5, seed: 0 });
                     res.generated = Array.from(g.motion);
                     res.generated_codes = Array.from(g.codes);
+                    }
                     if (job.retrieval) {
                         const idx = await M.RetrievalIndex.load('models/');
                         const q = idx.query(rows, spk);
                         res.retrieval_ids = q.ids;
                         res.retrieval_motion = Array.from(q.motion);
                         res.retrieval_n = idx.n;
+                        res.retrieval_has_intent_fields = idx.arousal !== null && idx.stillThenMove !== null;
+                        // intent-conditioned query + the shared post-processing, per text line
+                        const I = await import('./js/intent.js');
+                        res.intent = {};
+                        for (const line of job.intent_lines) {
+                            const it = I.analyse(line, { spec: metaAll.intent || null });
+                            const qi = idx.query(rows, spk, { targetArousal: it.arousal, intentTag: it.tag });
+                            const pp = metaAll.postprocess || {};
+                            const post = M.postprocessMotion(qi.motion, rows.length, idx.channels, { speaking: spk, featRows: rows, settleS: pp.settle_s || 0, pitchFloor: pp.pitch_floor === undefined ? null : pp.pitch_floor, amplitude: it.amplitude });
+                            res.intent[line] = { tag: it.tag, arousal: it.arousal, valence: it.valence, amplitude: it.amplitude, hits: it.hits, ids: qi.ids, raw: Array.from(qi.motion), post: Array.from(post) };
+                        }
+                        for (const tag of ['thinking', 'excitement']) {
+                            const it = I.analyse('', { override: tag, spec: metaAll.intent || null });
+                            const qi = idx.query(rows, spk, { targetArousal: it.arousal, intentTag: it.tag });
+                            res.intent['override:' + tag] = { tag: it.tag, arousal: it.arousal, valence: it.valence, amplitude: it.amplitude, hits: it.hits, ids: qi.ids };
+                        }
                     }
                     if (job.ar && metaAll.a2m_ar) {
                         // load the AR arch explicitly and run greedy + stochastic generation
-                        const arMeta = { ...metaAll, default_arch: 'ar', archs: ['ff', 'ar'] };
+                        const arMeta = { ...metaAll, default_arch: 'ar', archs: (metaAll.archs || ['ar']).includes('ar') ? metaAll.archs || ['ar'] : [...(metaAll.archs || []), 'ar'] };
                         window.fetch = (url, o) => (String(url).endsWith('models/model.json') ? Promise.resolve(new Response(JSON.stringify(arMeta))) : origFetch(url, o));
                         const ar = await M.MotionModel.load('models/');
                         window.fetch = origFetch;
@@ -170,7 +208,7 @@ def _py_sessions():
 
     so = ort.SessionOptions()
     so.log_severity_level = 3
-    a2m = ort.InferenceSession(os.path.join(MODELS, "a2m.onnx"), so, providers=["CPUExecutionProvider"])
+    a2m = ort.InferenceSession(os.path.join(MODELS, "a2m.onnx"), so, providers=["CPUExecutionProvider"]) if FF_OK else None
     dec = ort.InferenceSession(os.path.join(MODELS, "vq_decoder.onnx"), so, providers=["CPUExecutionProvider"])
     return a2m, dec
 
@@ -181,6 +219,7 @@ def _bigram():
     return np.fromfile(os.path.join(MODELS, "bigram.bin"), dtype=np.float16).astype(np.float32).reshape(n, n), meta
 
 
+@ff_only
 def test_a2m_logits_match(js_results):
     from animacy.model.data import pool_flag, pool_pairs
 
@@ -202,6 +241,7 @@ def test_vq_decoder_matches(js_results):
     assert d < 1e-3, f"max |js - py| motion = {d:.2e}"
 
 
+@ff_only
 def test_greedy_sampling_matches(js_results):
     from animacy.model.data import pool_flag, pool_pairs
     from animacy.model.infer import sample_codes
@@ -218,6 +258,7 @@ def test_greedy_sampling_matches(js_results):
     assert mismatch == 0, f"{mismatch}/{len(ref)} greedy codes differ (near-ties in logits would explain ≤1)"
 
 
+@ff_only
 def test_generate_motion_matches_greedy_path(js_results):
     """decode(greedy codes) + zero-phase smoothing + odd-tail hold, in canonical units."""
     from animacy.model.infer import smooth_motion
@@ -248,6 +289,7 @@ def _seq_logprob(codes: np.ndarray, logits: np.ndarray, bigram: np.ndarray, temp
     return total / len(codes)
 
 
+@ff_only
 def test_stochastic_sampling_follows_the_same_distribution(js_results):
     """Different RNGs (sfc32 vs numpy PCG64), so sequences differ; the JS draws must
     be as likely under Python's per-step distribution as Python's own draws are."""
@@ -330,7 +372,8 @@ def test_arch_resolution_handles_both_model_json_shapes(js_results):
         assert js_results["resolved_default"] == expect, js_results
     else:
         assert js_results["resolved_default"] == "ff"
-    assert js_results["arch"] == "ff"  # the fixture forced ff for the ff tests
+    if js_results["ff"]:
+        assert js_results["arch"] == "ff"  # the fixture forced ff for the ff tests
 
 
 @pytest.mark.skipif(not AR_OK, reason="no a2m_ar.onnx in web/models")
@@ -346,14 +389,22 @@ def test_ar_greedy_generation_matches(js_results):
     print(f"AR greedy: {len(js)} codes in {js_results['ar_greedy_ms']:.0f} ms (browser wasm); mismatches {int((js != ref).sum())}")
     assert js.shape == ref.shape
     assert int((js != ref).sum()) == 0, f"greedy AR codes differ: js={js.tolist()} py={ref.tolist()}"
+    from animacy.model.infer import postprocess_motion
+
     _, dec = _py_sessions()
     m = dec.run(None, {"codes": ref[None]})[0][0]
     m = smooth_motion(m, 30.0, 6.0)
     T = len(js_results["feats"])
     if len(m) < T:
         m = np.concatenate([m, np.repeat(m[-1:], T - len(m), axis=0)])
-    d = np.abs(np.asarray(js_results["ar_greedy_motion"], np.float32).reshape(m[:T].shape) - m[:T]).max()
-    assert d < 2e-3, f"AR greedy motion differs by {d:.2e}"
+    m = m[:T]
+    # infer.generate applies the bundle's postprocess defaults (settle / pitch floor / amplitude); so does model.js
+    pp = meta.get("postprocess", {})
+    if pp.get("settle_s") or pp.get("pitch_floor") is not None or pp.get("amplitude", 1.0) != 1.0:
+        m = postprocess_motion(m, js_results["speaking"], js_results["feats"], settle_s=float(pp.get("settle_s", 0.0)),
+                               pitch_floor=pp.get("pitch_floor", None), amplitude=pp.get("amplitude", 1.0))
+    d = np.abs(np.asarray(js_results["ar_greedy_motion"], np.float32).reshape(m.shape) - m).max()
+    assert d < 2e-3, f"AR greedy motion (incl. postprocess) differs by {d:.2e}"
 
 
 @pytest.mark.skipif(not AR_OK, reason="no a2m_ar.onnx in web/models")
@@ -406,6 +457,65 @@ def test_top_p_sampler_distribution_matches(js_results):
         noise = np.mean([0.5 * np.abs(np.bincount(rng.choice(len(p), size=len(d), p=p), minlength=len(p)) / len(d) - p).sum() for _ in range(20)])
         print(f"top-p {name}: nucleus size {(p > 0).sum()}, total-variation distance {tv:.3f} (numpy's own draws: {noise:.3f})")
         assert tv < 1.6 * noise + 0.01, f"{name}: total-variation distance {tv:.3f} vs sampling-noise floor {noise:.3f}"
+
+
+@pytest.mark.skipif(not RETRIEVAL_OK, reason="no retrieval index in web/models")
+def test_intent_analysis_matches(js_results):
+    """intent.js == animacy.model.intent.analyse: tag, arousal, valence, amplitude and every hit count."""
+    from animacy.model.intent import TAGS, analyse
+
+    for line in INTENT_LINES:
+        py = analyse(line)
+        js = js_results["intent"][line]
+        assert js["tag"] == py.tag, f"{line!r}: tag js={js['tag']} py={py.tag} (hits js={js['hits']} py={py.hits})"
+        assert js["hits"] == py.hits, f"{line!r}: hits differ js={js['hits']} py={py.hits}"
+        for k in ("arousal", "valence", "amplitude"):
+            assert abs(js[k] - getattr(py, k)) < 1e-9, f"{line!r}: {k} js={js[k]} py={getattr(py, k)}"
+    for tag in ("thinking", "excitement"):
+        py = analyse("", override=tag)
+        js = js_results["intent"]["override:" + tag]
+        assert js["tag"] == py.tag and abs(js["amplitude"] - py.amplitude) < 1e-9
+    assert set(TAGS) == {"greeting", "agreement", "doubt", "excitement", "thinking", "neutral"}
+
+
+@pytest.mark.skipif(not RETRIEVAL_OK, reason="no retrieval index in web/models")
+def test_intent_conditioned_retrieval_and_postprocess_match(js_results):
+    """Same text + same features → same window ids (arousal / thinking bonuses) and the same
+    post-processed motion (amplitude → pitch floor → utterance-final settle), i.e. what
+    `animacy say --source retrieval` produces through infer.retrieve."""
+    from animacy.model.infer import postprocess_motion
+    from animacy.model.intent import analyse
+    from animacy.model.retrieval import RetrievalIndex
+
+    idx = RetrievalIndex.load(os.path.join(MODELS, "retrieval.json"))
+    meta = json.load(open(os.path.join(MODELS, "model.json"), encoding="utf-8"))
+    pp = meta.get("postprocess", {})
+    has_fields = idx.arousal is not None
+    assert js_results["retrieval_has_intent_fields"] == has_fields
+    feats, spk = js_results["feats"], js_results["speaking"].astype(np.float32)
+    checked = 0
+    for line in INTENT_LINES:
+        it = analyse(line)
+        ref, ids = idx.query(feats, spk, target_arousal=it.arousal, intent_tag=it.tag, return_ids=True)
+        js = js_results["intent"][line]
+        same = int((np.asarray(js["ids"]) == ids).sum())
+        assert same >= len(ids) - 1, f"{line!r} ({it.tag}, arousal {it.arousal:.2f}): ids differ at {len(ids) - same}/{len(ids)} hops"
+        if same == len(ids):
+            raw = np.asarray(js["raw"], np.float32).reshape(ref.shape)
+            assert np.abs(raw - ref).max() < 1e-3
+            post_ref = postprocess_motion(raw, js_results["speaking"], feats, settle_s=float(pp.get("settle_s", 0.0)),
+                                          pitch_floor=pp.get("pitch_floor", None), amplitude=it.amplitude)
+            post_js = np.asarray(js["post"], np.float32).reshape(post_ref.shape)
+            d = np.abs(post_js - post_ref).max()
+            assert d < 2e-3, f"{line!r}: post-processed motion differs by {d:.2e}"
+            checked += 1
+    for tag in ("thinking", "excitement"):
+        it = analyse("", override=tag)
+        _, ids = idx.query(feats, spk, target_arousal=it.arousal, intent_tag=it.tag, return_ids=True)
+        js_ids = np.asarray(js_results["intent"]["override:" + tag]["ids"])
+        assert int((js_ids == ids).sum()) >= len(ids) - 1, f"override {tag}: ids differ"
+    print(f"intent-conditioned retrieval: {checked}/{len(INTENT_LINES)} lines bit-identical ids, post-processing < 2e-3; index intent fields: {has_fields}")
+    assert checked >= len(INTENT_LINES) - 2
 
 
 @pytest.mark.skipif(not RETRIEVAL_OK, reason="no retrieval index in web/models")
