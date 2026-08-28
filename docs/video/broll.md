@@ -6,6 +6,9 @@ dataset pages, the real robot's own read-back. Nothing is a mock-up, a
 re-creation or a motion graphic.
 
 - **Format** — 1920x1080, 30 fps, MP4/h264, **silent** (the edit adds narration).
+- **Length** — 6-15 s, except four section-4 clips the editor asked to run long
+  (`s4_ab_vendor_nod`, `s4_ab_lamp_hero_loop`, `s4_lean_in`, `s4_speed_cap`, 16-18.7 s):
+  spare length gives handles at a dissolve and room to pick the moment.
 - **Where** — `data/video/broll/<section>_<slug>.mp4` (gitignored; `data/video/` is in `.gitignore`).
 - **Index** — `data/video/broll/manifest.json`: for every clip, the section it
   serves, what it shows, its duration and the exact command or URL that produced it.

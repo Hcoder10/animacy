@@ -278,6 +278,19 @@ stamped SUPERSEDED, beside the `show_v1.json` they belong to. Re-renders go to a
 If you rebuild the show, the old renders do not become slightly wrong — they
 become a different film. Split them immediately.
 
+Once the edit's master has rendered, get the old generation out of reach:
+
+```bash
+python scripts/video/podcast_archive_v1.py            # dry run, prints the plan
+python scripts/video/podcast_archive_v1.py --apply    # move into _superseded_v1/
+```
+
+It **moves**, never deletes, and leaves a README in the folder saying why. It
+refuses to run if `render_manifest.json` still references a superseded clip or if
+any current clip is missing, and re-checks every current clip afterwards — so the
+worst it can do is decline. Run it only after the master exists: until then the
+editor may still be reading those files.
+
 ### Checking the show still matches its audio
 
 Voice takes get re-rendered. Before trusting a build, compare every wav on disk
