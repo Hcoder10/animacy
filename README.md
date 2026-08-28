@@ -15,7 +15,7 @@ Expressive robots ship with a menu of hand-animated moves — the Autonomous Lam
     <img src="docs/media/viewer_talk_mode.png" alt="The Autonomous Lamp and the Reachy Mini moving to the same speech" width="820">
   </a>
   <br>
-  <em>▶ Demo film (3 min) — the two robots explain the pipeline, moving with motion generated from their own voices</em>
+  <em>▶ Demo film (3½ min) — the two robots explain the pipeline, moving with motion generated from their own voices</em>
 </p>
 
 ---

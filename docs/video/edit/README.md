@@ -10,13 +10,22 @@ than left to chance, and the result is a real MLT project you can open and
 tweak by hand.
 
 ```
-python scripts/video/edit_all.py
+python scripts/video/edit_all.py --suffix _v4      # render beside the published files
+python scripts/video/edit_all.py --no-render       # rebuild the EDL and project only
+python scripts/video/edit_all.py --overwrite       # replace what is published (say so first)
 ```
 
 Re-runnable at any point. Whatever footage exists is cut in; whatever is
 missing becomes a labelled placeholder card in the timeline and is listed in
 the run report, so this can be run the moment the first line of narration
 lands and again after every delivery.
+
+**The bare command refuses to run** once the deliverables exist. The files in
+`docs/media/` are published — committed, linked from the top-level README, and
+attached to a GitHub release — and re-running the obvious command would have
+silently replaced them. Rendering beside them with `--suffix` is what you want
+nearly every time; `--overwrite` is there for when you genuinely mean to
+replace what is public, and it should be a conversation first.
 
 ## Deliverables
 
@@ -189,7 +198,9 @@ the wrong thing.
 
 ## Length
 
-The film must land between 2:30 and 3:30. The full script as recorded runs
+The film must land under 3:40 (`MAX_RUNTIME` in `edit_common.py`, 220 s,
+including the end card; the cut as shipped is 3:37.7). The full script as
+recorded runs
 longer than that, so `DROP_ORDER` in `edit_common.py` lists the lines that may
 be cut, worst-first, and the build drops from that list until the film fits.
 The order deliberately protects the two things that make the film credible —
@@ -358,7 +369,17 @@ scratch on every run. It is safe to delete.
 
 ```
 python scripts/video/edit_all.py --no-render          # EDL + project only
+python scripts/video/edit_all.py --suffix _v4         # render beside the published files
+python scripts/video/edit_all.py --overwrite          # replace the published files
 python scripts/video/edit_all.py --engine ffmpeg      # skip melt
-python scripts/video/edit_all.py --max-runtime 195    # tighter ceiling
+python scripts/video/edit_all.py --max-runtime 220    # length ceiling, seconds
 python scripts/video/edit_all.py --skip-derivatives   # master only
+```
+
+Two more, for checking rather than building:
+
+```
+python scripts/video/edit_summary.py                  # what the current cut is
+python scripts/video/edit_check_sources.py --watch    # wait for footage to settle
+python scripts/video/edit_verify_sync.py --master docs/media/animacy_demo.mp4
 ```

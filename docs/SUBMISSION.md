@@ -9,10 +9,14 @@ Every sentence below is backed by a file in this repo — see the table at the
 end; nothing here goes beyond `docs/RESULTS.md` and the evidence files.
 
 Links: repo https://github.com/Hcoder10/animacy · demo https://hcoder10.github.io/animacy/web/
-· demo video `<VIDEO_URL>` (fill in once `docs/media/animacy_demo.mp4` is
-uploaded — YouTube unlisted or the raw GitHub URL
-`https://github.com/Hcoder10/animacy/raw/main/docs/media/animacy_demo.mp4`;
-replace every `<VIDEO_URL>` below before posting).
+· demo video
+https://github.com/Hcoder10/animacy/releases/download/v0.1.0/animacy_demo.mp4
+— the 1080p master ships as a release asset because
+`docs/media/animacy_demo.mp4` is deliberately gitignored at 39.6 MB, so its
+`raw/main` URL 404s. The 720p cut is tracked and does resolve:
+`https://github.com/Hcoder10/animacy/raw/main/docs/media/animacy_demo_720.mp4`.
+Replace every `<VIDEO_URL>` below with whichever you post (a YouTube unlisted
+link is friendlier on X) before posting.
 
 ---
 
@@ -99,7 +103,9 @@ scores is the most credible thing in the post.
 ## 3. Demo video — shot list
 
 > **As rendered:** `docs/media/animacy_demo.mp4` is 1920×1080 H.264 + AAC,
-> **3 min 22 s**, 15.9 MB. The shot list below is the original 60-second plan
+> **3 min 38 s**, 39.6 MB; the tracked 720p cut is 14.5 MB. The two hosts
+> narrate the pipeline, moving with motion generated from their own speech.
+> The shot list below is the original 60-second plan
 > that cut was built from; the timings are the plan's, not the finished file's.
 
 Target: 1920×1080, 30 fps, six shots, hard cuts, one caption per shot (bottom

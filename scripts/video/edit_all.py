@@ -47,6 +47,9 @@ def main() -> int:
     ap.add_argument("--suffix", default="",
                     help="render to animacy_demo<suffix>.mp4 instead of over the "
                          "current deliverables, e.g. --suffix _v2")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="allow overwriting a deliverable that already exists in "
+                         "docs/media (these are shipped and committed - say so first)")
     args = ap.parse_args()
 
     if args.suffix:
@@ -57,6 +60,22 @@ def main() -> int:
     if not FFMPEG:
         print("ffmpeg is required and was not found on PATH", file=sys.stderr)
         return 2
+
+    # The files in docs/media are published: committed to the repo, linked from
+    # the README, and attached to a GitHub release. Re-running this command is
+    # the obvious thing to do and would silently replace them, so it has to be
+    # asked for. --suffix renders beside them instead, which is what you want
+    # nearly every time.
+    if not args.no_render and not args.overwrite:
+        live = [p for p in (R.MASTER, R.MASTER_720, R.LAMP_LOOP) if p.exists()]
+        if live:
+            print("refusing to overwrite published deliverables:", file=sys.stderr)
+            for p in live:
+                print(f"  {p.relative_to(REPO)}", file=sys.stderr)
+            print("\nrender beside them with --suffix _v4 (or any suffix), or pass\n"
+                  "--overwrite if you really mean to replace what is published.",
+                  file=sys.stderr)
+            return 3
 
     t0 = time.time()
     edl = build_edl(max_runtime=args.max_runtime)
