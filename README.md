@@ -87,7 +87,7 @@ We do not grade ourselves. A separate model watches short clips **blind** (no id
 
 Level with hand-made animation on some movements, below on others. Our own bar was 8/10 everywhere — **not met**. Full tables, the judge's verbatim critiques and every run: [`docs/RESULTS.md`](docs/RESULTS.md), [`docs/evidence/grading/`](docs/evidence/grading/).
 
-Also measured: the browser retargeter equals the Python one to **1e-6**; **0** speed-cap violations on every clip; a physical Reachy Mini tracks commanded head angles within a couple of degrees; **213 tests**.
+Also measured: the browser retargeter equals the Python one to **1e-6**; **0** speed-cap violations on every clip; a physical Reachy Mini tracks commanded head angles within a couple of degrees; **201 tests green in CI** (218 collected; 17 skip where the optional data or venv is absent).
 
 The learned speech→motion model beats its floors on likelihood and motion statistics but **not** on beat alignment, so **retrieval ships as the default** and the model stays selectable. That is in [`docs/RESULTS.md`](docs/RESULTS.md) too.
 
