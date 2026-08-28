@@ -107,7 +107,7 @@ def model_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkpoint
 
 def retrieval_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkpoints/v1", seed: int = 0,
                      listen: bool = False, intent=None, proto_weight: Optional[float] = None,
-                     energy_floor: Optional[float] = None, **kw) -> HumanClip:
+                     energy_floor: Optional[float] = None, gesture_placement: Optional[float] = None, **kw) -> HumanClip:
     """Motion matching against the corpus (``animacy.model.retrieval``), with the
     same post-processing and intent handling as the learned model (arousal- and
     gesture-prototype-biased window choice + amplitude rule + energy floor).
@@ -132,6 +132,8 @@ def retrieval_motion(wav: np.ndarray, sr: int = 16000, checkpoint: str = "checkp
         kw["proto_weight"] = proto_weight
     if energy_floor is not None:
         kw["energy_floor"] = energy_floor
+    if gesture_placement is not None:
+        kw["gesture_placement"] = gesture_placement
     return retrieve(_MODEL_CACHE[key], feats, speaking, model, intent=intent, mode="listen" if listen else "talk", **kw)
 
 

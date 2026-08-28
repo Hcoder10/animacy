@@ -47,8 +47,22 @@ apply). Judge responses are cached per reel, so a re-run into the same
 `scripts/grade_queue.py` can arm a run to fire automatically when a mapping
 commit and a new bundle land (`--dry-run` prints the condition status).
 
+Robustness: a run refuses to start if another live process holds
+`<out>/RUNNING.pid` (two renderers in one run dir once raced and both
+died), and transient stalls are retried with backoff and logged as
+`[retry]`: the viewer page load (4 attempts, fresh page each time), frame
+capture (3), card render (4, 60 s screenshot timeout) and judge calls (3,
+30/120/300 s). A network outage during run 3 killed a run at the card
+render before this existed.
+
 A single clip can be rendered with `python web/dev/render_clip.py --robot lamp
 --native nod --out out/nod.mp4` (also `--csv`, `--table`, `--audio`).
+`python scripts/grade_showcase.py --run data/grading/<run> --robot lamp
+--source retrieval --out data/grading/showcase_lamp` re-renders a run's
+best-scoring clip per movement cleanly (no card, no strip, with the utterance
+audio) and writes `showcase.json` with the scores; winners from the sealed
+held-out set land under `SEALED_heldout/` with a README, because their audio
+is the sealed line and publishing one burns the gate.
 
 ## What is graded
 
@@ -255,8 +269,36 @@ separate sub-run (`<out>_slow`, cards say "slow motion (0.5x)"), compared
 against the normal-speed run; it answers whether under-sampled easing
 depresses scores and is never a gate.
 
+`--variant NAME=SOURCE:KEY=VALUE` (repeatable) adds an A/B column: the base
+source called with a knob, e.g. `retrieval_p0=retrieval:proto_weight=0`. The
+knob is applied only when it is an explicit parameter of the source function
+(a `**kw` catch-all does not count, because a swallowed knob would make the
+A/B a silent no-op); otherwise the run says so in its notes and the column
+equals the base. After the clips are built, every variant clip is compared
+numerically with its base clip (same robot, movement, line set, seed): a
+variant whose clips are all identical is dropped before rendering and the
+report says so, so no judge call is spent on a duplicate column; partial
+identity is counted per clip. A variant can never be the gate source.
+
+Every report also carries **"What the judge keeps saying (verbatim, by
+dimension)"**: for lifelike, timing and appeal, how many candidate clips
+scored <= 5 (by source), the words that recur in the judge's reasons for
+them, and its reasons quoted verbatim, lowest scores first and spread over
+robots and sources. That section is what the model and mapping streams work
+from (in run 2 it read, for the lamp's learned source: "essentially a still
+image behind the dialogue", "a frozen hold under an affirmative line").
+
 **Run 1 (baseline)**: `docs/evidence/grading/20260826_2320.md`, made before
 the fitted mappings (`d73ced7`/`37eca54`) and retarget v1.1, on
 `checkpoints/v1` (arch ff), gate on `model`: lamp FAIL (model 6.5 / 5.5 /
 4.5 / 4.0 / 5.0), Reachy FAIL (5.5 / 5.5 / 6.0 / 5.5 / 6.0); the vendor's
 own clips score 6.6 on both robots; judge noise 0.4-0.8 points.
+
+**Run 2**: `docs/evidence/grading/20260827_0301_run2.md`, mapping v2
+(whole-arm, `eae7853` + settle `6976777`), `checkpoints/v2a` (AR), intent
+v3, gate = shipped default `retrieval` on the sealed held-out lines: lamp
+FAIL (6.0 / 5.0 / 6.0 / 7.0 / 5.0), Reachy FAIL (6.0 / 7.0 / 7.0 / 6.0 /
+7.0, retrieval now at vendor level there); tuning-minus-heldout gap +0.2 /
+0.0 (no contamination); vendor calibration 6.2 / 6.0; held-out tag
+resolution 4/5. The learned source on the lamp went from "too restless"
+(run 1) to "essentially a still image" (run 2).

@@ -40,6 +40,27 @@ DEFAULT_SIZE = 512
 VIEW = "iso"            # 3/4 front (the viewer's 'iso': +38 deg azimuth from the robot's front, slightly above)
 
 
+def retry(fn, attempts: int = 3, backoff: Sequence[float] = (15.0, 60.0, 120.0), what: str = "", log=None,
+          exceptions=(Exception,), sleep=time.sleep):
+    """Call ``fn()`` up to ``attempts`` times, sleeping ``backoff[i]`` after failure ``i``. Transient network or
+    browser stalls (a CDN import that hangs, a screenshot that waits on fonts during an outage, a judge call that
+    times out) must not kill a run that has hours of cached work behind it."""
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except exceptions as e:  # noqa: PERF203
+            last = e
+            if i == attempts - 1:
+                break
+            wait = backoff[min(i, len(backoff) - 1)]
+            if log:
+                log(f"[retry] {what or getattr(fn, '__name__', 'call')}: attempt {i + 1}/{attempts} failed "
+                    f"({type(e).__name__}: {str(e)[:160]}); retrying in {wait:.0f}s")
+            sleep(wait)
+    raise last
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -152,7 +173,8 @@ class ViewerRenderer:
     """
 
     def __init__(self, size: int = DEFAULT_SIZE, zoom: float = 1.15, headless: bool = True, gpu: bool = False,
-                 view: str = VIEW, ready_timeout_ms: int = 180_000):
+                 view: str = VIEW, ready_timeout_ms: int = 180_000, log=print):
+        self.log = log
         self.size = size
         self.zoom = zoom
         self.headless = headless
@@ -194,11 +216,22 @@ class ViewerRenderer:
         self._browser = self._pw.chromium.launch(headless=self.headless, args=args)
         self._ctx = self._browser.new_context(viewport={"width": 2 * self.size + 64, "height": self.size + 64},
                                               device_scale_factor=1)
-        self.page = self._ctx.new_page()
-        self.page.on("console", lambda m: self.console_errors.append(m.text) if m.type == "error" else None)
-        self.page.on("pageerror", lambda e: self.console_errors.append(f"pageerror: {e}"))
-        self.page.goto(f"http://127.0.0.1:{self.port}/web/?autoplay=0&source=native", wait_until="domcontentloaded")
-        self.page.wait_for_function("window.animacy && window.animacy.ready === true", timeout=self.ready_timeout_ms)
+        self.page = None
+
+        def open_viewer():
+            # a fresh page per attempt: the viewer's CDN imports (three, urdf-loader) fail hard during a network blip
+            if self.page is not None:
+                try:
+                    self.page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.page = self._ctx.new_page()
+            self.page.on("console", lambda m: self.console_errors.append(m.text) if m.type == "error" else None)
+            self.page.on("pageerror", lambda e: self.console_errors.append(f"pageerror: {e}"))
+            self.page.goto(f"http://127.0.0.1:{self.port}/web/?autoplay=0&source=native", wait_until="domcontentloaded")
+            self.page.wait_for_function("window.animacy && window.animacy.ready === true", timeout=self.ready_timeout_ms)
+
+        retry(open_viewer, attempts=4, backoff=(20.0, 60.0, 180.0), what="viewer page load", log=self.log)
         self.page.add_style_tag(content=_HIDE_CSS % {"bg": CARD_BG, "size": self.size})
         self.page.wait_for_timeout(400)  # ResizeObserver -> renderer.setSize
         self.info = self.page.evaluate(_SETUP_JS, [self.zoom, self.view])
@@ -232,7 +265,8 @@ class ViewerRenderer:
         out: List[bytes] = []
         for i in range(0, len(frames), batch):
             chunk = frames[i:i + batch]
-            data = self.page.evaluate(_CAPTURE_JS, [robot, chunk])
+            data = retry(lambda: self.page.evaluate(_CAPTURE_JS, [robot, chunk]), attempts=3, backoff=(10.0, 30.0),
+                         what=f"frame capture {robot} {i}", log=self.log)
             out.extend(base64.b64decode(d) for d in data)
         return out
 
@@ -247,8 +281,11 @@ class ViewerRenderer:
         .f {{ position: absolute; bottom: 18px; left: 0; right: 0; font-size: {int(self.size * 0.03)}px; color: #6f7890; }}
         </style></head><body><div class="wrap"><div class="t">{escape(title)}</div>
         <div class="s">{escape(subtitle)}</div></div><div class="f">{escape(footnote)}</div></body></html>"""
-        self.card_page.set_content(html)
-        return self.card_page.screenshot(type="png")
+        def shoot():
+            self.card_page.set_content(html, wait_until="load")
+            return self.card_page.screenshot(type="png", timeout=60_000, animations="disabled", caret="hide")
+
+        return retry(shoot, attempts=4, backoff=(15.0, 60.0, 180.0), what="card render", log=self.log)
 
     def black_png(self) -> bytes:
         return self.card_png("", "")

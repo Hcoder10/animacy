@@ -340,13 +340,17 @@ def judge_reel(reel: Reel, workspace_root: Path, run_dir: str, timeout: int = 18
     if dry_run:
         rec["dry_run"] = True
         return rec
+    backoff = (30.0, 120.0, 300.0)
     for k in range(attempts):
         t0 = time.perf_counter()
         try:
             ans = kimi.ask_json(prompt, ws, timeout=timeout)
         except kimi.KimiError as e:
             rec["attempts"].append({"error": str(e)[:500], "seconds": time.perf_counter() - t0})
-            log(f"[judge] {reel.name}: attempt {k + 1} failed: {str(e)[:200]}")
+            wait = backoff[min(k, len(backoff) - 1)]
+            log(f"[judge] {reel.name}: attempt {k + 1} failed: {str(e)[:200]}; retrying in {wait:.0f}s")
+            if k < attempts - 1:
+                time.sleep(wait)
             continue
         errs = rubric.validate_response(ans, reel.numbers)
         rec["attempts"].append({"seconds": ans.get("_seconds"), "errors": errs, "raw": ans.get("_raw", "")[:20000]})
@@ -799,7 +803,7 @@ def _run_locked(robots, sources, seeds, run_dir, t_start, checkpoint, seed, max_
         log(f"[run] speed {speed}: slow-motion VARIANT (cards say so); never compare its gate with a speed-1 run")
     log(f"[run] {run_name}: robots={list(robots)} sources={list(sources)} seeds={seeds} -> {run_dir}")
 
-    with ViewerRenderer(gpu=gpu, zoom=zoom) as renderer:
+    with ViewerRenderer(gpu=gpu, zoom=zoom, log=log) as renderer:
         # 1. probe: can the judge watch video?
         if no_kimi:
             probe = {"skipped": True, "video_seen": True}
@@ -815,12 +819,26 @@ def _run_locked(robots, sources, seeds, run_dir, t_start, checkpoint, seed, max_
                             seeds_by_source=seeds_by_source, heldout=heldout, variants=variant_objs,
                             log=lambda m: log(m if "@heldout" not in m else m.split(":")[0] + ": (sealed line)"))
         for v in variant_objs:
-            noop = [c.id for c in clips if c.source == v.name and (c.meta.get("variant") or {}).get("no_op")]
+            mine = [c for c in clips if c.source == v.name]
+            if not mine:
+                meta.setdefault("notes", []).append(
+                    f"Variant `{v.name}` ({v.base} with {v.kwargs}) produced joint tables numerically identical to plain "
+                    f"{v.base} for every clip on this bundle, so the column was dropped before rendering: no A/B exists "
+                    f"here (the knob is exposed but the index/post-processing does not react to it yet).")
+                log(f"[variant] {v.name}: identical to {v.base} on every clip; dropped (no judge calls spent)")
+                sources = [s for s in sources if s != v.name]
+                continue
+            noop = [c.id for c in mine if (c.meta.get("variant") or {}).get("no_op")]
             if noop:
                 meta.setdefault("notes", []).append(
                     f"Variant `{v.name}` ({v.base} with {v.kwargs}): the knob is NOT an explicit parameter of the "
                     f"{v.base} source, so its clips are identical to plain {v.base} ({len(noop)} clips). Not an A/B.")
                 log(f"[variant] {v.name}: knob {list(v.kwargs)} not exposed by {v.base}; column will equal {v.base}")
+            same = sum(1 for c in mine if (c.meta.get("variant") or {}).get("identical_to_base"))
+            if same:
+                meta.setdefault("notes", []).append(
+                    f"Variant `{v.name}`: {same}/{len(mine)} clips are numerically identical to plain {v.base}.")
+        meta["sources"] = list(sources)
 
         # 3. blind plan + reels
         plans = plan_reels(clips, seed, max_reel_seconds)

@@ -16,7 +16,7 @@ from animacy.grade.movements import (HELDOUT_PATH, HELDOUT_SET, MOVEMENT_KEYS, M
 from animacy.grade.probe import PROBE_PROMPT
 from animacy.grade.reel import (chunk_reels, number_and_shuffle, plan_reels, sealed_manifest, slow_audio, slow_table,
                                 speech_envelope)
-from animacy.grade.render import resample_table, urdf_frames
+from animacy.grade.render import resample_table, retry, urdf_frames
 from animacy.grade.run import CALIBRATION_MIN, GATE_THRESHOLD, calibration, check_workspace, consistency, gate, \
     acquire_run_lock, contamination_gap, critiques, intent_resolution, judge_workspace_root, pid_alive, release_run_lock, prepare_workspace, redact_lines, resolve_gate_source, summarise, unseal
 from animacy.profile import find_robot
@@ -540,3 +540,30 @@ def test_identical_variant_columns_are_dropped_and_partial_ones_marked():
     assert [c.source for c in out2] == ["retrieval", "retrieval_p0"]
     assert out2[1].meta["variant"]["identical_to_base"] is False
     assert mark_identical_variants([base], {}) == [base]
+
+
+def test_retry_backs_off_then_succeeds_or_raises_the_last_error():
+    calls, slept = [], []
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise TimeoutError("blip")
+        return "ok"
+    assert retry(flaky, attempts=4, backoff=(1, 2, 3), sleep=slept.append) == "ok"
+    assert len(calls) == 3 and slept == [1, 2]
+    def dead():
+        raise ConnectionError("down")
+    with pytest.raises(ConnectionError):
+        retry(dead, attempts=2, backoff=(5,), sleep=slept.append)
+    assert slept == [1, 2, 5], "no sleep after the final attempt"
+
+
+def test_showcase_picks_best_per_movement_and_flags_sealed_clips():
+    from animacy.grade.showcase import pick_best
+
+    recs = _records_sets("lamp", tuning=[(6, 7)] * 5, heldout=[(8, 5)] * 5, source="retrieval")
+    best = pick_best(recs, "lamp", "retrieval")
+    assert all(best[mv][0]["overall"] == 8 and best[mv][0]["line_set"] == HELDOUT_SET for mv in MOVEMENT_KEYS)
+    only_tuning = pick_best(recs, "lamp", "retrieval", line_sets=[TUNING_SET])
+    assert all(x[0]["overall"] == 7 and x[0]["seed"] == 1 for x in only_tuning.values())
+    assert pick_best(recs, "lamp", "model")["greeting"] == []

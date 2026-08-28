@@ -245,6 +245,31 @@ def parse_variant(spec: str) -> Variant:
     return Variant(name, base, kwargs)
 
 
+def mark_identical_variants(clips: List[ClipSpec], variants: Dict[str, Variant], tol: float = 1e-6) -> List[ClipSpec]:
+    """A variant whose joint table equals its base source's table for the same (robot, movement, set, seed) is
+    not an A/B on this bundle. Such clips are marked ``meta.variant.identical_to_base`` and, when EVERY clip of
+    the variant is identical, the variant is dropped from the run so no judge call is spent on duplicates."""
+    if not variants:
+        return clips
+    base_of = {(c.robot, c.movement, c.line_set, c.source, c.seed): c for c in clips if c.source in SOURCES}
+    keep: List[ClipSpec] = []
+    all_identical = {name: True for name in variants}
+    for c in clips:
+        v = variants.get(c.source)
+        if v is None:
+            keep.append(c)
+            continue
+        b = base_of.get((c.robot, c.movement, c.line_set, v.base, c.seed))
+        same = False
+        if b is not None and len(b.table) == len(c.table) and list(b.table.columns) == list(c.table.columns):
+            same = bool(np.allclose(b.table.to_numpy(dtype=np.float64), c.table.to_numpy(dtype=np.float64), atol=tol))
+        c.meta.setdefault("variant", {})["identical_to_base"] = same
+        all_identical[c.source] = all_identical[c.source] and same
+        keep.append(c)
+    dropped = {name for name, ident in all_identical.items() if ident}
+    return [c for c in keep if c.source not in dropped] if dropped else keep
+
+
 def explicit_params(fn) -> set:
     try:
         return {n for n, p in inspect.signature(fn).parameters.items() if p.kind != inspect.Parameter.VAR_KEYWORD}
@@ -352,6 +377,7 @@ def build_clips(robots: Sequence[str], sources: Sequence[str], seeds: int, run_d
                 c = vendor_clip(profile, mv)
                 clips.append(c)
                 log(f"[clips] {c.id}: {len(c.table)} frames, {c.duration:.2f}s (vendor)")
+    clips = mark_identical_variants(clips, variants)
     for c in clips:
         p = os.path.join(clip_dir, c.id.replace("/", "__") + ".json")
         with open(p, "w", encoding="utf-8") as fh:
