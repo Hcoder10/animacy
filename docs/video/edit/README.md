@@ -22,7 +22,7 @@ lands and again after every delivery.
 
 | File | What it is |
 |---|---|
-| `docs/media/animacy_demo.mp4` | the film, 1920x1080 h264/yuv420p, AAC 192k, faststart |
+| `docs/media/animacy_demo.mp4` | the film, 1920x1080 h264/yuv420p, faststart, AAC 48 kHz stereo (192k requested, ~186 kbps as encoded) |
 | `docs/media/animacy_demo_720.mp4` | 1280x720 cut-down for the README and social |
 | `docs/media/animacy_lamp_loop.mp4` | 12 s silent loop of the lamp's retargeted nod, for the README header (see below) |
 | `docs/video/edit/animacy_demo.kdenlive` | the MLT project — open it in Kdenlive or Shotcut |
@@ -122,11 +122,55 @@ moves.
 all. The only card is the end card: `animacy`, the repo URL, the viewer URL,
 held 3 s, then black.
 
+The lead-in — the stillness before the first word — is only as long as the
+opening shot's own clip can supply. A per-section clip begins at its section,
+which *is* the first word, so it has no frames to play underneath a lead-in;
+asking for one anyway clamps the in-point to zero and runs the entire opening
+shot ahead of its own audio. That is a full second of desync on the first thing
+anyone sees, and it is invisible in a still. So the build measures what the
+opening clip actually has in front of the first word and shortens the lead-in to
+match, logging the change.
+
+If the breath is ever wanted back, the fix is a *head* handle on the opening
+section's clip — and head handles are not symmetrical with tails. A tail never
+touches the clip's first frame, so `t_start` is unaffected; a head handle moves
+the first frame earlier, so `t_start` must move with it and the manifest has to
+report the new value. `t_start` is the single number every cut in that section
+is synced against, so getting it wrong reintroduces exactly the desync this
+paragraph exists to prevent. Ask for the handle and the corrected `t_start`
+together, or not at all.
+
 **Audio.** Narration at −16 LUFS integrated, measured across the whole
 performance and corrected with a single static gain so the deadpan delivery is
 not flattened by a compressor. B-roll is silent by design. Under the host
 scenes only, there is generated pink noise at −50 dBFS as room tone, fading in
 and out at each host run. **There is no music.**
+
+## Finding black in a clip
+
+B-roll clips carry black stretches of their own — the grading reel has spacers
+between the judged clips — and cutting into one looks like the film dropped
+out. So in-points are chosen to avoid them, and where no clean window is long
+enough the shot is shortened instead.
+
+**Do not use ffmpeg's `blackdetect` for this.** Every b-roll clip here is
+pillarboxed onto a near-black `#0e1117` background, so the padding alone
+satisfies "most pixels are dark" and a perfectly legible title card is reported
+as black. At the threshold that looked right it was calling
+`s2_channel_bars`, `s4_lean_in`, `s4_speed_cap` and `s8_score_table` black from
+end to end — the build was quietly refusing in-points across a third of the
+library — and it overstated the grading reel's real gap by nearly a second,
+costing shot length for nothing.
+
+The right question is not "are most pixels dark" but "is there a bright pixel
+anywhere", which is peak luma: `signalstats` with `YMAX < 60` sustained for
+0.25 s. Zero false positives on this library.
+
+Better still, the b-roll manifest now publishes a measured `black_windows` per
+clip, computed by whoever rendered it, and those are used in preference to
+anything measured here — including a cached result from before this was
+understood. An empty list means measured and clean, which is a different claim
+from unmeasured, so only clips actually carrying the field are trusted.
 
 ## The lamp loop
 
@@ -240,7 +284,23 @@ cameras B, C and D were left behind. A master had already been rendered with
 them and was thrown away. No frame of it looked wrong — the wide shot was
 simply ahead of its own dialogue, which you only see in motion.
 
-Three defences:
+A duration check alone is **not** enough to catch this, and believing it was
+put five stale clips into a shipped master. The retime changed the gaps
+*between* sections, not the sections themselves, so a per-section clip from the
+old timeline is very nearly the right length and sails through. It then plays
+at the new section's start with content from the old one — four shots up to
+2.5 s adrift from their own dialogue, and all five on the pre-fix lighting,
+next to shots that were not.
+
+The fix that actually holds: **`render_manifest.json` is the authoritative list
+of clips on the current timeline.** When it exists, the build uses only what it
+names, plus any file on disk carrying the same variant marker its own clips use
+(`_v2`), since a freshly rendered clip can precede its manifest entry by a few
+minutes. Unmarked originals are never used. A `(camera, section)` the manifest
+does not cover falls back to another camera — camera A is rendered as one
+continuous file and covers everything — rather than to an unlisted file.
+
+Four defences:
 
 - Any file under `data/video/podcast/` or `data/video/broll/` that exists but
   will not probe is reported as `UNREADABLE (still being written?)` and named.
@@ -250,6 +310,15 @@ Three defences:
   it claims to cover is **rejected**, not used, and named under
   `REJECTED as being from a different timeline`. Where two versions of a clip
   exist, the higher `_vN` wins, since a re-render corrects the one before it.
+  Treat this as a backstop, not the primary defence — see above for why it is
+  not sufficient on its own.
+- Superseded renders are archived rather than deleted, into
+  `data/video/podcast/_superseded_v1/` — which puts thirty wrong-clock clips
+  back inside the footage directory, under per-camera subfolders that look
+  exactly like the live ones. Any path component starting with an underscore is
+  therefore treated as not-live and skipped, by both the build's disk fallback
+  and the source check. Keeping the archive recoverable should not mean keeping
+  it loaded.
 - Before a final render, check the whole set is consistent:
 
   ```

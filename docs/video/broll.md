@@ -67,11 +67,78 @@ video's own frame size to remove the surrounding desktop.
 time, with the pointer moved in steps and the page scrolled a little at a time.
 The pages are live; the only thing the script decides is where the cursor goes.
 
+## `black_windows`: where not to cut
+
+Every manifest entry carries `black_windows` — stretches with nothing on screen,
+as `[{start, end, seconds}]` in clip time. An empty list means the clip is clean
+end to end. Of the 26 clips only one has any: `s8_grading_reel`, at **0.1-0.6 s**
+and **6.3-6.83 s**, the spacers between the judged clips. Keep them (they are
+part of what the judge saw) but do not park a cut inside one.
+
+Measured with per-frame peak luma (`signalstats` YMAX below 60, sustained
+0.25 s), not with ffmpeg's `blackdetect`. `blackdetect` is wrong for this
+footage: these clips are pillarboxed onto a near-black background, so the
+padding alone satisfies "most pixels are dark" and a perfectly legible title
+card is reported as black — it flags whole dark-but-legible terminal and viewer
+clips end to end, and over-reports the reel's second spacer as 6.3-7.83 s when
+the "Clip 10" card is already up at 6.9 s. Peak luma asks the question that
+matters: is there a bright pixel anywhere?
+
+Regenerate after adding clips with `python scripts/video/broll_annotate_black.py`;
+`register()` computes it for new clips automatically.
+
+## Seamless loops
+
+`s4_ab_vendor_nod`, `s4_ab_lamp_hero_loop` and `s4_lean_in` are captured as a
+whole number of clip periods from t=0 (6 x 3.00 s, 6 x 3.00 s, 4 x 4.00 s), so
+the last frame sits one step before the first and they loop with no cut to hide.
+The viewer's camera never moves and there are no cuts inside a take.
+`s4_ab_lamp_hero_loop` hides the Reachy viewport and is the intended source for
+the README header loop (`docs/media/animacy_lamp_loop.mp4`).
+
+## An encoding bug that was on screen
+
+Commit `9031026` wrote `web/js/main.js` back through a cp1252 round-trip, so
+every non-ASCII character in it became mojibake and a BOM was prepended;
+`7c028ba` was the last clean revision. This was **visible in the viewer UI** —
+`Autonomous Â· 5 joints`, the A/B caption, the demo buttons, Talk status
+strings — and it is in footage shot before it was repaired. The file has since
+been repaired in the working tree: 49 lines reversed mechanically, 4 lines
+(the play/pause/record glyphs, where the round-trip destroyed a byte) taken from
+`7c028ba`, BOM removed. Verified three ways: with every run of non-ASCII masked
+the repaired file is byte-identical to the damaged one, so no code changed; no
+mojibake remains; the result is valid UTF-8.
+
+**Resolved.** The repair was committed and deployed as `36d3c60`. The deployed
+file was checked against the working tree by fetching
+`https://hcoder10.github.io/animacy/web/js/main.js`: identical, sha1
+`069187e30ec7`, zero mojibake, 27 middots and 22 arrows intact.
+
+Every clip in the manifest is clean:
+
+- Only one clip was ever shot inside the damage window (21:56:36 to the repair):
+  `s2_channel_bars`, nine seconds after. It is unaffected — the readout's text
+  comes from `web/index.html` and the ASCII channel constants, not from the
+  damaged strings, and the frames were checked.
+- `s4_ab_vendor_nod`, `s4_ab_lamp_hero_loop`, `s4_lean_in` and `s5_talk` were
+  re-shot after the repair.
+- `s9_live_site` was re-shot after the deploy and now renders
+  `Autonomous · 5 joints · urdf/lamp.urdf` correctly.
+
+If you edit `web/js/**`, do not round-trip the files through PowerShell
+`Get-Content`/`Set-Content` — that is what caused it (PS 5.1 reads UTF-8 as
+ANSI and writes it back as UTF-8). Use Python with `encoding='utf-8'`, or the
+editor tool.
+
 ## Notes the edit should know
 
 - **§2 channel bars** — the readout is a wide band (about 5.6:1), so the frame
   is that band scaled to full width and centred on the film's background. Crop
   or overlay it as you prefer.
+- **§4 speed cap** — `scripts/retarget_eval.py` over the whole corpus (96 human
+  clips, 581,923 frames, plus the 31 vendor clips), both robots: speed and limit
+  violations are 0 offline and 0 live. The head line naming the corpus is on
+  screen above the tables, so the "every clip" claim is scoped where you can see it.
 - **§5 Talk** — the line is typed, the button is pressed, and the page's own
   pipeline runs: Kokoro-82M in the browser → speech features → motion
   retrieval → both robots. Kokoro runs on wasm here (Playwright's Chromium

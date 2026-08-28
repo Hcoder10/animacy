@@ -377,11 +377,36 @@ def main(argv=None) -> int:
                     clips = json.load(fh).get("clips", [])
             except Exception:  # noqa: BLE001
                 clips = []
+        # Drop anything from a previous timeline. If the show has been rebuilt,
+        # old clips are not stale-but-usable, they are a different film, and an
+        # edit reading t_start out of a mixed manifest cuts to the wrong frame.
+        # Their files are left on disk; scripts/video/podcast_archive_v1.py
+        # moves them aside once the master is cut.
+        stale = [c for c in clips if c.get("f_end", 0) > show["n_frames"]]
+        if stale:
+            print(f"[manifest] dropping {len(stale)} clip(s) from a previous timeline "
+                  f"(> {show['n_frames']} frames): {sorted({c['path'] for c in stale})[:3]}...")
+            clips = [c for c in clips if c.get("f_end", 0) <= show["n_frames"]]
 
         def save_manifest():
             with open(manifest_path, "w", encoding="utf-8") as fh:
                 json.dump({"schema": "animacy.podcast.render.v1", "fps": FPS,
                            "size": [WIDTH, HEIGHT], "show": "show.json",
+                           # Stamped on every write: a manifest must say which
+                           # timeline its clips belong to. When the show is
+                           # rebuilt, footage from the old one does not become
+                           # slightly wrong, it becomes a different film — and an
+                           # edit reading t_start out of a mixed manifest cuts to
+                           # the wrong frame with no visible symptom in a still.
+                           "timeline": {
+                               "show": "show.json",
+                               "n_frames": show["n_frames"],
+                               "seconds": show["seconds"],
+                               "narration": os.path.basename(narration) if narration else None,
+                               "note": "Every clip below is on THIS timeline. t_start is the "
+                                       "podcast-timeline time of the clip's first frame. A clip whose "
+                                       "duration does not fit this timeline is not from this build.",
+                           },
                            "convention": {
                                "A": "one file per camera covering the whole timeline from t=0 (A/full.mp4)",
                                "B/C/D/E": "one file per section (<cam>/sNN.mp4), NN = 1-based section number",

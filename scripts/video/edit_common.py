@@ -351,11 +351,11 @@ def attach_show(lines: list[Line], log: list[str]) -> bool:
     # Adopt the render's own lead-in. The cold open clip was composed with that
     # much stillness in front of the first word; matching it means the opening
     # shot starts on the clip's first frame instead of part way into a breath.
-    global LEAD_IN
+    global DEFAULT_LEAD_IN
     fps = float(blob.get("fps") or FPS) or FPS
     lead = blob.get("set", {}).get("lead_in_frames")
     if isinstance(lead, (int, float)) and 0 < lead / fps < 4.0:
-        LEAD_IN = round(lead / fps, 3)
+        DEFAULT_LEAD_IN = round(lead / fps, 3)
 
     placeholder = bool(blob.get("placeholder_voice"))
     log.append(
@@ -448,6 +448,18 @@ def _bind_voice(ln: Line, e: dict) -> None:
 
 
 FULL_STEMS = {"full", "all", "master", "whole", "complete", "timeline"}
+
+
+def is_archived(path: Path) -> bool:
+    """Is this clip in an archive directory rather than live footage?
+
+    Superseded renders are moved into `_superseded_v1/` rather than deleted, so
+    they stay recoverable - but that puts thirty wrong-clock clips back inside
+    data/video/podcast/, under per-camera subdirectories that look exactly like
+    the live ones. Any path component starting with an underscore is treated as
+    not-live, so the archive cannot be read back in as footage.
+    """
+    return any(part.startswith("_") for part in path.parts)
 
 # Host clips do not always carry a section number - "open.mp4", "close.mp4".
 # These are the words the script's own section titles give us.
@@ -553,8 +565,26 @@ def load_podcast(log: list[str], sec_t0: dict[int, float], show_seconds: float
             return True
         return abs(probe(p)["dur"] - show_seconds) <= 0.6
 
-    # 1. an explicit manifest wins - it can state the offset outright
-    for e in _entries(_load_json(PODCAST_DIR / "render_manifest.json")):
+    # 1. an explicit manifest wins - it can state the offset outright.
+    #
+    # Sorted by variant, highest first, because the manifest can list two
+    # renders of the same shot (B/s01 has a v2 with a 1.0 s tail and a v3 with
+    # 1.5 s). A later variant is a correction or an extension of the one before
+    # it, so it should win - and it should win by rule, not by whichever
+    # happened to be written into the manifest first.
+    def _variant_rank(e: dict) -> int:
+        raw = str(_pick(e, "file", "path", "clip", "output", "filename", default=""))
+        m = re.search(r"_v(\d+)$", Path(raw).stem)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"(\d+)", str(_pick(e, "variant", default="")))
+        return int(m.group(1)) if m else 0
+
+    manifest_entries = sorted(
+        _entries(_load_json(PODCAST_DIR / "render_manifest.json")),
+        key=_variant_rank, reverse=True,
+    )
+    for e in manifest_entries:
         raw = _pick(e, "file", "path", "clip", "output", "filename")
         if not raw:
             continue
@@ -585,8 +615,45 @@ def load_podcast(log: list[str], sec_t0: dict[int, float], show_seconds: float
             base = float(stated) if isinstance(stated, (int, float)) else sec_t0[secn]
             note(cam, secn, p, base)
 
-    # 2. otherwise read the layout off disk
+    # 2. otherwise read the layout off disk.
+    #
+    # Only if the manifest gave us nothing. When a manifest exists it is the
+    # authoritative list of clips on the current timeline, and anything beside
+    # them on disk is a superseded render. Falling back to those is how five
+    # old-clock clips reached a shipped master: a per-section clip from a
+    # previous timeline has almost the same duration as its replacement, so a
+    # duration check clears it, and it then plays at the new section's start
+    # while its content sits on the old one - up to 2.5 s adrift, and on the
+    # old lighting. A slot the manifest does not cover falls back to another
+    # camera, not to an unlisted file.
     sec_dur = {}
+    for s in (_load_json(SHOW_JSON) or {}).get("sections", []):
+        n = _sec_num(s.get("number", s.get("index")))
+        if n is not None and s.get("t_start") is not None and s.get("t_end") is not None:
+            sec_dur[n] = float(s["t_end"]) - float(s["t_start"])
+
+    if out:
+        # Manifest-only, with no name-based escape hatch.
+        #
+        # An earlier version also trusted any file whose name carried the same
+        # "_v2" marker the manifest's clips use, on the theory that a fresh
+        # render might beat its manifest entry. It cannot: the renderer rewrites
+        # render_manifest.json after every clip, before starting the next. And
+        # the marker guarantees nothing - it is just the string passed to
+        # --suffix, so a clip rendered onto a *different* timeline with the same
+        # flag would arrive wearing the trusted name. That is precisely tonight's
+        # bug in the one costume this guard would not catch, which is the same
+        # shape of mistake as trusting duration: a property that correlates with
+        # correctness right up until it doesn't.
+        log.append("podcast: render_manifest.json is the only source of clips; "
+                   "files on disk that it does not list are ignored")
+        cams = sorted({c for c, _ in out})
+        log.append(f"podcast: {len(out)} (camera, section) slot(s) covered, cameras {cams}"
+                   + (f"; full-timeline: {full_hits}" if full_hits else ""))
+        if stale:
+            log.append(f"podcast: REJECTED as being from a different timeline: {stale}")
+        return out
+
     for s in (_load_json(SHOW_JSON) or {}).get("sections", []):
         n = _sec_num(s.get("number", s.get("index")))
         if n is not None and s.get("t_start") is not None and s.get("t_end") is not None:
@@ -596,6 +663,8 @@ def load_podcast(log: list[str], sec_t0: dict[int, float], show_seconds: float
                   (sorted((PODCAST_DIR / cam).glob("*.mp4"))
                    if (PODCAST_DIR / cam).exists() else [])]
     candidates += sorted(PODCAST_DIR.glob("*.mp4"))
+    candidates = [p for p in candidates
+                  if not is_archived(p.relative_to(PODCAST_DIR))]
     # Order the candidates before claiming slots, because the first clip to
     # claim a (camera, section) keeps it. A full-timeline clip that matches the
     # current show.json comes first; then the highest _vN, since a re-render is
@@ -637,7 +706,8 @@ def load_podcast(log: list[str], sec_t0: dict[int, float], show_seconds: float
     # is still writing. Falling back to another angle without saying so would
     # quietly drop a camera from the whole film, so it is called out loudly.
     broken = [str(p.relative_to(PODCAST_DIR)) for p in
-              sorted(PODCAST_DIR.glob("**/*.mp4")) if probe(p)["dur"] <= 0.3]
+              sorted(PODCAST_DIR.glob("**/*.mp4"))
+              if not is_archived(p.relative_to(PODCAST_DIR)) and probe(p)["dur"] <= 0.3]
     if broken:
         log.append(f"podcast: UNREADABLE (still being written?): {broken} - "
                    f"those angles are NOT in this cut; re-run once they settle")
@@ -691,7 +761,11 @@ BROLL_KEYWORDS: dict[str, list[str]] = {
     "hardware": ["desk", "physical", "hardware", "reachy", "mini", "benchtop"],
     "readback": ["readback", "read_back", "sim2real", "daemon", "measured",
                  "commanded", "axis", "degrees", "evidence"],
-    "csv_validator": ["csv", "autonomous", "validator", "export", "os", "column", "lerobot"],
+    # This one is section 6's line but the footage that proves it is tagged
+    # section 4 (the retarget that writes the file), so the keywords have to be
+    # strong enough to beat the section bonus of a section-6 clip.
+    "csv_validator": ["retargetcsv", "autonomousos", "csv", "autonomous", "validator",
+                      "header", "rowcount", "columns", "column", "export"],
     "mapping": ["mapping", "gains", "fitted", "baseyaw", "headyaw", "torsoyaw", "mixed"],
     "dataset": ["huggingface", "hugging", "datasetpage", "dataset", "card", "licence",
                 "license"],
@@ -717,6 +791,7 @@ BROLL_NEGATIVE: dict[str, list[str]] = {
     # section 5 is "what we are doing right now" - replaying the section 2
     # capture footage under it reads as a repeat. Better to stay on the hosts.
     "waveform": ["capture", "tracker", "preview", "landmark"],
+    "csv_validator": ["daemon", "poll", "livepoll", "readback"],
     # s4_ab_lamp_hero_loop is a header asset, cut to loop for the README, not a
     # shot for the film - it must not win an in-film slot from the clip that was
     # made for one
@@ -732,6 +807,31 @@ BROLL_NEGATIVE: dict[str, list[str]] = {
 
 _black_cache: dict[str, list[tuple[float, float]]] = {}
 _BLACK_DISK = EDIT_DATA / "black_spans.json"
+
+
+_manifest_black: dict[str, list[tuple[float, float]]] | None = None
+
+
+def _manifest_black_windows() -> dict[str, list[tuple[float, float]]]:
+    """`black_windows` from the b-roll manifest: {filename: [(start, end), ...]}.
+
+    An empty list means the clip was measured and is clean end to end, which is
+    a different statement from "not measured" - so only files actually carrying
+    the field appear here.
+    """
+    global _manifest_black
+    if _manifest_black is None:
+        _manifest_black = {}
+        for e in _entries(_load_json(BROLL_DIR / "manifest.json")):
+            raw = _pick(e, "file", "path", "clip", "output", "filename")
+            win = e.get("black_windows")
+            if raw and isinstance(win, list):
+                _manifest_black[Path(str(raw)).name] = [
+                    (float(w["start"]), float(w["end"]))
+                    for w in win
+                    if isinstance(w, dict) and "start" in w and "end" in w
+                ]
+    return _manifest_black
 
 
 def _black_disk_load() -> dict:
@@ -753,6 +853,15 @@ def black_spans(path: Path | str) -> list[tuple[float, float]]:
         return _black_cache[key]
 
     p = Path(path)
+
+    # Measured values from whoever made the clip beat anything we cached from
+    # our own detector - including a cache entry written before we learned the
+    # detector was wrong for this footage.
+    published = _manifest_black_windows().get(p.name)
+    if published is not None:
+        _black_cache[key] = published
+        return published
+
     stamp = ""
     disk = _black_disk_load()
     if p.exists():
@@ -766,17 +875,37 @@ def black_spans(path: Path | str) -> list[tuple[float, float]]:
 
     spans: list[tuple[float, float]] = []
     if FFMPEG and Path(path).exists():
-        p = run([FFMPEG, "-hide_banner", "-nostdin", "-i", key, "-vf",
-                 "blackdetect=d=0.25:pic_th=0.97:pix_th=0.10", "-an", "-f", "null", "-"],
-                check=False, quiet=True)
-        for line in (p.stderr or "").splitlines():
-            if "black_start" in line:
+        # NOT ffmpeg's blackdetect. Every b-roll clip here is pillarboxed onto a
+        # near-black #0e1117 background, so the padding alone satisfies "most
+        # pixels are dark" and blackdetect reports perfectly legible title cards
+        # as black - it called a third of the library black end to end, and
+        # overstated the one real gap by about a second. Peak luma asks the
+        # right question instead: is there a bright pixel anywhere in the frame.
+        p2 = run([FFMPEG, "-hide_banner", "-nostdin", "-i", key, "-vf",
+                  "signalstats,metadata=print:key=lavfi.signalstats.YMAX",
+                  "-an", "-f", "null", "-"], check=False, quiet=True)
+        dark_from: float | None = None
+        t = 0.0
+        for line in (p2.stderr or "").splitlines():
+            if "pts_time:" in line:
                 try:
-                    a = float(line.split("black_start:")[1].split()[0])
-                    b = float(line.split("black_end:")[1].split()[0])
-                    spans.append((a, b))
+                    t = float(line.split("pts_time:")[1].split()[0])
                 except Exception:
                     pass
+            elif "YMAX=" in line:
+                try:
+                    ymax = float(line.split("YMAX=")[1].split()[0])
+                except Exception:
+                    continue
+                if ymax < 60.0:
+                    if dark_from is None:
+                        dark_from = t
+                elif dark_from is not None:
+                    if t - dark_from >= 0.25:
+                        spans.append((dark_from, t))
+                    dark_from = None
+        if dark_from is not None and t - dark_from >= 0.25:
+            spans.append((dark_from, t))
     _black_cache[key] = spans
     if stamp:
         try:
@@ -983,9 +1112,16 @@ CUTPLAN: dict[int, list[list[str]]] = {
     1: [["E"], ["C"], ["B"], ["A"], ["B"]],
     2: [["b:tracker_overlay"], ["b:channels", "B"], ["b:channels"], ["A"]],
     3: [["C"], ["b:robot_md"], ["D"], ["b:check_pass", "A"]],
-    4: [["b:mapping", "b:vendor_nod"], ["b:viewer_ab"], ["b:speed_cap", "A"]],
+    # Section 4 used to run 23 s without cutting back to the hosts. The lean-in
+    # shot belongs under "forward kinematics keeps his gaze on you while he
+    # leans in"; the wide picks up "springs give the overshoot that makes
+    # motion look alive", which breaks the b-roll run in half.
+    4: [["b:mapping", "b:vendor_nod"], ["b:viewer_ab", "A"], ["b:speed_cap", "A"]],
     5: [["A"], ["B"], ["C"], ["b:waveform"], ["C"], ["A"]],
-    6: [["b:hardware", "b:readback"], ["b:csv_validator"], ["A"], ["B"]],
+    # s6.1 is the Autonomous OS line, the one the judges care most about: show
+    # the CSV it writes, then come back to the lamp himself for "checked
+    # against the vendor's own validator".
+    6: [["b:hardware", "b:readback"], ["b:csv_validator", "B"], ["A"], ["B"]],
     7: [["b:dataset"], ["b:data_report", "b:harvest"], ["A"]],
     # The reel has black spacers between the judged clips at 0.1-1.6 s and
     # 6.3-7.8 s, so no nine-second window of it is clean. One shorter cut into
@@ -1024,9 +1160,10 @@ GAP_WITHIN = 0.14       # between lines inside a section
 GAP_SECTION = 0.46      # the breath at a section boundary
 SECTION_GAP_CAP = 0.55  # the most we let a rendered section gap run to
 GAP_AFTER_PUNCH = 0.30  # extra beat after a deadpan one-liner
-LEAD_IN = 1.20          # picture before the first word; overridden below by the
-                        # lead-in the podcast render actually composed, so the
-                        # opening shot starts on that clip's own first frame
+DEFAULT_LEAD_IN = 1.20  # picture before the first word; raised to the lead-in
+                        # the podcast render composed, then lowered again to
+                        # whatever the opening shot's own clip can supply
+LEAD_IN = DEFAULT_LEAD_IN
 END_BEAT = 0.70         # stillness after the last word, before the end card
 ENDCARD_HOLD = 3.0
 TAIL_BLACK = 0.5
@@ -1037,13 +1174,18 @@ TAIL_BLACK = 0.5
 # SO-101 proof point, and the admission that the learned model loses on beat
 # alignment. Those go last, and the learned-model pair goes together.
 DROP_ORDER: list[tuple[int, int]] = [
-    (2, 2),           # "that is the canonical space" - restates the line before it
+    (7, 2),           # "anyone can add to it from a browser tab"
     (1, 2),           # "and when the menu runs out, we repeat ourselves"
-    (6, 1),           # the Autonomous OS CSV line - the b-roll already shows it
+    (2, 2),           # "that is the canonical space" - restates the line before it
     (8, 1),           # "it is blind, the test lines are sealed"
     (5, 4), (5, 5),   # the learned-model admission, last resort and as a pair
 ]
-MAX_RUNTIME = 210.0   # 3:30 ceiling for narration+picture, before the end card
+# NOT droppable at any length, on the lead's instruction: section 6's "it writes
+# the exact CSV that Autonomous OS already accepts - same columns, same limits,
+# checked against the vendor's own validator". This film is submitted for a
+# prize whose judges wrote that HAL; it is the single most load-bearing sentence
+# in it for that audience.
+MAX_RUNTIME = 220.0   # 3:40 ceiling for the whole film including the end card
 
 
 # --------------------------------------------------------------------------
@@ -1134,6 +1276,28 @@ def build_edl(*, max_runtime: float = MAX_RUNTIME) -> EDL:
               if n is not None and isinstance(t, (int, float))}
     podcast = load_podcast(log, sec_t0, float(show_blob.get("seconds") or 0.0))
     broll = BrollPool(log)
+
+    # --- the film's lead-in can only be as long as the opening shot's -------
+    # A per-section clip starts at its section, which is the moment of the
+    # first word, so it has no frames to play under a lead-in. Asking for one
+    # anyway would clamp the in-point to zero and run the whole opening shot
+    # ahead of its own audio - which is exactly what happened the first time
+    # the cold open moved off the clip that included the lead-in.
+    global LEAD_IN
+    LEAD_IN = DEFAULT_LEAD_IN
+    first = min(lines, key=lambda l: (l.section, l.sec_pos))
+    plan0 = CUTPLAN.get(first.section, [["A"]])
+    want0 = plan0[0][0] if plan0 and plan0[0] else "A"
+    avail = None
+    for cam in ([want0] if want0 in CAMERAS else []) + [c for c in CAMERAS if c != want0]:
+        hit = podcast.get((cam, first.section))
+        if hit is not None:
+            avail = max(0.0, first.src_t - hit[1]) if first.src_t >= 0 else LEAD_IN
+            break
+    if avail is not None and avail < LEAD_IN:
+        log.append(f"lead-in: {LEAD_IN:.2f}s -> {avail:.2f}s, the most the opening "
+                   f"shot has before its first word")
+        LEAD_IN = round(avail, 3)
 
     # --- length discipline: drop the marked lines until we fit -------------
     dropped: list[str] = []

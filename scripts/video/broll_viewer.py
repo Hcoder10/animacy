@@ -149,10 +149,14 @@ def shot_lean_in(p, seconds: float = 12.0) -> dict:
         v.page.wait_for_function(f"window.animacy.sourceInfo().clip === {json.dumps(clip)}")
         v.ev("window.animacy.seek(0); window.animacy.play()")
         v.page.wait_for_timeout(300)
+        info = v.ev("window.animacy.sourceInfo()")
+        n, reps = loop_frames(float(info["duration"]), seconds)
+        log(f"  clip {info['clip']} {info['duration']:.2f} s -> {reps} whole loops, "
+            f"{n} frames ({n / FPS:.2f} s)")
         box = v.box("#viewports")
         cap = Capture(v.page, os.path.join(workdir("lean_in"), "frames"))
         gaze = []
-        for _ in range(int(seconds * FPS)):
+        for _ in range(n):
             v.ev("window.animacy.stepFrame(%r)" % (1.0 / FPS))
             cap.grab(clip=box)
             g = v.ev("window.animacy.linkForward('lamp', 'head')")
@@ -167,7 +171,9 @@ def shot_lean_in(p, seconds: float = 12.0) -> dict:
                       shows="The `lean in` calibration clip through both ROBOT.md files: the lamp "
                             "translates toward the viewer while forward kinematics keeps its beam "
                             "pointed at the person, and the springs give the settle.",
-                      source=f"web/ Canonical clip tab, clip {clip} (viewports region)")
+                      source=f"web/ Canonical clip tab, clip {clip} (viewports region)",
+                      notes=f"{reps} whole loops of the {info['duration']:.2f} s clip from t=0, so "
+                            f"it loops seamlessly. Fixed framing, no camera move, no cuts.")
     finally:
         v.close()
 

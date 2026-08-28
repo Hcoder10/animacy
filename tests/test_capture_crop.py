@@ -22,6 +22,9 @@ MODELS = [os.path.join(ROOT, "data", "models", f) for f in ("face_landmarker.tas
 pytestmark = pytest.mark.skipif(not (os.path.exists(VIDEO) and all(os.path.exists(m) for m in MODELS)),
                                 reason="needs the reference video in data/raw and the .task/.onnx models")
 
+pytest.importorskip("mediapipe")
+pytest.importorskip("cv2")
+
 
 def _frames(times):
     import cv2

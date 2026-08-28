@@ -44,7 +44,15 @@ def main() -> int:
     ap.add_argument("--max-runtime", type=float, default=MAX_RUNTIME)
     ap.add_argument("--skip-derivatives", action="store_true")
     ap.add_argument("--qc", type=int, default=15)
+    ap.add_argument("--suffix", default="",
+                    help="render to animacy_demo<suffix>.mp4 instead of over the "
+                         "current deliverables, e.g. --suffix _v2")
     args = ap.parse_args()
+
+    if args.suffix:
+        R.MASTER = MEDIA / f"animacy_demo{args.suffix}.mp4"
+        R.MASTER_720 = MEDIA / f"animacy_demo_720{args.suffix}.mp4"
+        R.LAMP_LOOP = MEDIA / f"animacy_lamp_loop{args.suffix}.mp4"
 
     if not FFMPEG:
         print("ffmpeg is required and was not found on PATH", file=sys.stderr)

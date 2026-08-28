@@ -23,8 +23,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from edit_common import (  # noqa: E402
-    PODCAST_DIR, SHOW_JSON, CAMERAS, CUTPLAN, probe, _cam_from_path, _sec_num,
-    _infer_section_and_base, _probe_cache,
+    PODCAST_DIR, SHOW_JSON, CAMERAS, CUTPLAN, probe, is_archived,
+    _cam_from_path, _sec_num, _infer_section_and_base, _probe_cache,
 )
 
 # The (camera, section) pairs the cut plan actually asks for. A stale clip for
@@ -58,7 +58,15 @@ def check() -> tuple[bool, list[str]]:
     notes.append(f"show.json: {show:.3f}s, {len(sec_t0)} sections, "
                  f"placeholder_voice={blob.get('placeholder_voice')}")
 
-    clips = sorted(PODCAST_DIR.glob("**/*.mp4"))
+    # Superseded renders live on in _superseded_v1/ under per-camera folders
+    # that look just like the live ones. Reporting on them would both add noise
+    # and let an archived clip count as covering a slot the live set is missing.
+    clips = [p for p in sorted(PODCAST_DIR.glob("**/*.mp4"))
+             if not is_archived(p.relative_to(PODCAST_DIR))]
+    archived = sum(1 for p in PODCAST_DIR.glob("**/*.mp4")
+                   if is_archived(p.relative_to(PODCAST_DIR)))
+    if archived:
+        notes.append(f"ignoring {archived} archived clip(s) under an _ directory")
     if not clips:
         return False, notes + ["no camera clips at all"]
 

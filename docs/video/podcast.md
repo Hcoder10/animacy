@@ -192,6 +192,17 @@ runs past its section has nothing to dissolve out of.
 an editor is already reading. Every manifest entry carries a `variant`, and the
 manifest's `convention` block states all of the above rather than implying it.
 
+**Known gap: there is no `--head-frames`.** A per-section take starts exactly at
+its section's `t_start`, which is the first spoken word, so it has no frames in
+front of that word. That is invisible for sections 2-9, where the preceding beat
+belongs to the previous section — but the *opening* clip has no breath before the
+film's first line, and the show's own 1.2 s `lead_in_frames` is not inside it.
+`E/open.mp4` covered this by including the lead-in; a per-section `E/s01` does
+not. Either open on the wide, or add a head handle: the change is symmetrical to
+`--tail-frames`, moving `f0` back and leaving `f1` alone — but note it *does*
+move the clip's first frame, so `t_start` shifts with it and the manifest must
+report the new value, which is exactly the number an edit syncs on.
+
 No orbiting, no bobbing, no handheld. E's push is the only camera move: it loses
 `push` degrees of field of view linearly across the frames of *that take*, which
 is why the renderer passes `f0`/`f1` when it sets the camera.
@@ -278,6 +289,26 @@ stamped SUPERSEDED, beside the `show_v1.json` they belong to. Re-renders go to a
 If you rebuild the show, the old renders do not become slightly wrong — they
 become a different film. Split them immediately.
 
+### Duration is not identity
+
+This cost a published master. A rebuild moved the gaps *between* sections but not
+the sections themselves, so a per-section clip from the old generation is within
+a few hundredths of a second of its replacement. Any check based on length passes
+it, while its content sits on the old clock — up to 2.5 s out of step with its own
+dialogue, and invisible in a still frame.
+
+Nothing cheap about a file identifies which timeline it belongs to. Not its
+duration, not its name. A `_v2` suffix means "rendered with that flag", not "on
+the current clock"; a filename convention survives a rebuild and starts lying.
+The manifest is the only thing that knows, so it has to be the only list, and
+superseded files have to be physically out of reach rather than merely labelled —
+`podcast_archive_v1.py` exists because documenting a footgun is not unloading it.
+
+The same mistake appeared three times in one evening, each time as a property
+that correlated with correctness until it didn't: an edit trusting clip duration,
+this file's archive step trusting a `_v2` filename, and the renderer trusting that
+a hand-patched manifest field would survive the next write.
+
 Once the edit's master has rendered, get the old generation out of reach:
 
 ```bash
@@ -290,6 +321,14 @@ refuses to run if `render_manifest.json` still references a superseded clip or i
 any current clip is missing, and re-checks every current clip afterwards — so the
 worst it can do is decline. Run it only after the master exists: until then the
 editor may still be reading those files.
+
+**"Out of reach" is only true if the reader agrees where reach ends.**
+`_superseded_v1/` keeps the per-camera subfolders, so `_superseded_v1/C/s06.mp4`
+looks exactly like a live camera-C clip to anything that walks the tree. The
+convention is that a path component starting with `_` is not live — this script
+honours it (`cam.startswith("_")`), and so must any other reader. Moving files
+does not protect a consumer that globs `**/*.mp4`; it only protects one that
+knows the rule, or better, one that reads the manifest and never scans at all.
 
 ### Checking the show still matches its audio
 

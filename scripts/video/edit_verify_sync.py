@@ -42,10 +42,13 @@ def main() -> int:
     ap.add_argument("--shots", type=int, default=0, help="sample only N shots")
     ap.add_argument("--into", type=float, default=0.5,
                     help="seconds into each shot to sample")
+    ap.add_argument("--master", default=str(MASTER),
+                    help="the rendered file to check (default: the main master)")
     args = ap.parse_args()
 
-    if not MASTER.exists():
-        print(f"no master at {MASTER} - render first")
+    master = Path(args.master)
+    if not master.exists():
+        print(f"no master at {master} - render first")
         return 1
     edl = load_edl()
     shots = [s for s in sorted(edl.shots, key=lambda s: s.start)
@@ -66,7 +69,7 @@ def main() -> int:
         skip = dis.get(round(s.start, 3), 0.0) + 0.15
         into = max(skip, args.into)
         into = min(into, max(0.05, s.dur - 0.2))
-        a = grab(MASTER, s.start + into, tmp / f"m{i}.png")
+        a = grab(master, s.start + into, tmp / f"m{i}.png")
         b = grab(Path(s.src), s.src_in + into, tmp / f"s{i}.png")
         if not a or not b:
             continue

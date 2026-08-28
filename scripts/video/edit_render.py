@@ -473,26 +473,35 @@ def black_frame_check(master: Path, edl: EDL, log: list[str]) -> None:
         return out
 
     def from_source(t: float, vf: str, key: str) -> bool:
-        """Does the clip on screen at time t have the same defect itself?
+        """Does the footage on screen around time t have the same defect itself?
 
         Terminal recordings hold still while their output is readable, and
         reels of judged clips have black between them. Those are properties of
         the footage, not of the cut, and reporting them as edit faults buries
         the ones that are.
+
+        Two details matter. A detected run often *starts* a few frames before
+        the cut that reveals it, so the shot after t is checked as well as the
+        shot containing it. And the master is re-encoded at a lower bitrate,
+        which quantises a nearly-still source into a bit-identical one and
+        stretches the run; the source is therefore scanned with a shorter
+        minimum duration than the master was.
         """
-        s = next((s for s in edl.shots if s.start <= t < s.end and s.src), None)
-        if s is None or not Path(s.src).exists():
-            return False
-        want = s.src_in + (t - s.start)
-        p = ff(["-i", str(s.src), "-vf", vf, "-an", "-f", "null", "-"],
-               check=False, quiet=True)
-        for line in (p.stderr or "").splitlines():
-            if key in line:
-                try:
-                    if abs(float(line.split(key)[1].split()[0]) - want) < 0.6:
-                        return True
-                except Exception:
-                    pass
+        loose = vf.replace("d=1.4", "d=0.8").replace("d=0.5", "d=0.25")
+        near = [s for s in edl.shots
+                if s.src and Path(s.src).exists()
+                and (s.start - 0.75) <= t < (s.end + 0.05)]
+        for s in near:
+            want = s.src_in + max(0.0, t - s.start)
+            p = ff(["-i", str(s.src), "-vf", loose, "-an", "-f", "null", "-"],
+                   check=False, quiet=True)
+            for line in (p.stderr or "").splitlines():
+                if key in line:
+                    try:
+                        if abs(float(line.split(key)[1].split()[0]) - want) < 1.2:
+                            return True
+                    except Exception:
+                        pass
         return False
 
     for label, vf, key in (

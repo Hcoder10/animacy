@@ -188,6 +188,54 @@ def probe(path: str) -> dict:
         return {"has_audio": has_audio, "bytes": os.path.getsize(path)}
 
 
+def black_windows(path: str, min_seconds: float = 0.25, ymax_th: int = 60) -> list[dict]:
+    """Stretches with nothing on screen, as [{start, end, seconds}] in clip time.
+
+    A cut that lands inside one of these goes black mid-sentence. The grading
+    reels legitimately contain them — they are the spacers between judged clips —
+    so the answer is to publish where they are, not to remove them.
+
+    ffmpeg's `blackdetect` is useless here: these clips are pillarboxed onto a
+    near-black background, so the padding alone satisfies "most pixels are dark"
+    and a perfectly legible title card counts as black. Peak luma per frame
+    (signalstats YMAX) asks the question that actually matters — is there a
+    bright pixel anywhere? — and separates a real spacer from a dark card.
+    """
+    out = subprocess.run(
+        [ffmpeg_bin(), "-hide_banner", "-i", path, "-an",
+         "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YMAX:file=-",
+         "-f", "null", "-"], capture_output=True, text=True)
+    times: list[tuple[float, float]] = []
+    t = None
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("frame:"):
+            for part in line.split():
+                if part.startswith("pts_time:"):
+                    t = float(part.split(":", 1)[1])
+        elif "signalstats.YMAX=" in line and t is not None:
+            times.append((t, float(line.split("=", 1)[1])))
+    if not times:
+        return []
+    step = (times[-1][0] - times[0][0]) / max(1, len(times) - 1)
+    wins, start = [], None
+    for i, (ts, ymax) in enumerate(times):
+        dark = ymax < ymax_th
+        if dark and start is None:
+            start = ts
+        elif not dark and start is not None:
+            if ts - start >= min_seconds:
+                wins.append({"start": round(start, 2), "end": round(ts, 2),
+                             "seconds": round(ts - start, 2)})
+            start = None
+    if start is not None:
+        end = times[-1][0] + step
+        if end - start >= min_seconds:
+            wins.append({"start": round(start, 2), "end": round(end, 2),
+                         "seconds": round(end - start, 2)})
+    return wins
+
+
 def register(filename: str, *, section: str, shows: str, source: str,
              notes: str | None = None, extra: dict | None = None,
              supplied: bool = False) -> dict:
@@ -200,6 +248,11 @@ def register(filename: str, *, section: str, shows: str, source: str,
     entry = {"file": filename, "section": section, "shows": shows, "source": source,
              "supplied": supplied}
     entry.update(probe(path))
+    # where a cut would land on black; the edit needs this to pick an in-point
+    entry["black_windows"] = black_windows(path)
+    if entry["black_windows"]:
+        log(f"  note: {len(entry['black_windows'])} black window(s): "
+            + ", ".join(f"{w['start']}-{w['end']}s" for w in entry["black_windows"]))
     if notes:
         entry["notes"] = notes
     if extra:
