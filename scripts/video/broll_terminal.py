@@ -129,6 +129,32 @@ def shot_sim2real_log() -> dict:
                              "on 2026-08-26; no robot motion is re-issued.")
 
 
+def shot_daemon_live() -> dict:
+    """Poll the physical robot's daemon while the ambient loop is driving it."""
+    poll = os.path.join(HERE, "broll_daemon_poll.py")
+    cmd = "python scripts/video/broll_daemon_poll.py --url http://192.168.1.60:8000"
+    b = run_capture(f'"{PY}" "{poll}" --url http://192.168.1.60:8000 --collect 45 --seconds 4.5 --hz 6',
+                    display=cmd, pause_after=1.3, timeout=180)
+    if b.exit_code != 0 or "present_" not in b.output:
+        log("  the Reachy daemon did not answer — skipping rather than faking it")
+        log(f"  output was: {b.output[:250]}")
+        return {}
+    b.output_delay = 1.1
+    b.output_cps = 520.0            # the rows appear at roughly the rate they were sampled
+    shot = TermShot(title="animacy — the robot's own read-back, live (192.168.1.60)")
+    shot.type_cps = 26.0
+    shot.blocks = [b]
+    return record_term(shot, "s6_daemon_live_poll.mp4", section="6",
+                       shows="A live read of the physical Reachy Mini's daemon while the ambient "
+                             "loop drives it: head yaw/pitch/roll, both antennas, body yaw and head "
+                             "translation, in degrees, changing sample to sample. Read-only — the "
+                             "poll commands nothing.",
+                       source=cmd,
+                       notes="The ambient loop rests between clips, so the script polls for 45 s and "
+                             "prints the busiest 4.5 s of that read-out; every row is a real sample "
+                             "at its real timestamp, and the header says so on screen.")
+
+
 def shot_sim2real_evidence() -> dict:
     path = os.path.join(ROOT, "docs", "evidence", "reachy_sim2real_20260826.md")
     with open(path, encoding="utf-8") as fh:
@@ -223,6 +249,7 @@ SHOTS = {
     "mapping": shot_robotmd_mapping,
     "retarget": shot_retarget,
     "sim2real": shot_sim2real_log,
+    "daemon": shot_daemon_live,
     "evidence": shot_sim2real_evidence,
     "data": shot_data_report,
     "harvest": shot_harvest,

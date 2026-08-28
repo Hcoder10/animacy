@@ -13,9 +13,15 @@ the edit.
 
     python scripts/video/tts_render.py --script docs/video/script.md --out data/video/voice
 
-Deterministic: Kokoro's decoder does not sample, the seed is pinned, and the
-voice style vectors are fixed files, so a re-run reproduces the same audio
-bit-for-bit on the same Kokoro version.
+Reproducible: Kokoro's decoder does not sample, the seed is pinned and the voice
+style vectors are fixed files, so on the default ``--device cpu`` a re-run
+reproduces every WAV byte-for-byte (verified: two full runs, 34/34 identical).
+``--device cuda`` is ~2x faster but its LSTM kernels are not bit-identical
+between runs, so it is opt-in.
+
+``index`` in the manifest is 0-based, matching ``scripts/video/show_build.py``.
+The ``NN_`` filename prefix is 1-based and is only there to sort the takes in
+script order.
 """
 from __future__ import annotations
 
@@ -297,6 +303,10 @@ ENGINES = {"kokoro": KokoroEngine, "sapi": SapiEngine}
 # main
 # ---------------------------------------------------------------------------
 
+def man_path_of(out_dir: str) -> str:
+    return os.path.join(out_dir, "manifest.json")
+
+
 def main() -> int:
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.path.abspath(os.path.join(here, "..", ".."))
@@ -312,9 +322,10 @@ def main() -> int:
     ap.add_argument("--sr", type=int, default=NATIVE_SR, help="master sample rate")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
-                    help="cpu is bit-reproducible; cuda is ~3x faster but its "
+                    help="cpu is bit-reproducible; cuda is ~2x faster but its "
                          "LSTM kernels are not bit-identical between runs")
-    ap.add_argument("--only", type=int, default=None, help="render just this 1-based index")
+    ap.add_argument("--only", type=int, default=None,
+                    help="render just this 0-based line index")
     ap.add_argument("--no-loudnorm", action="store_true")
     args = ap.parse_args()
 
@@ -344,12 +355,14 @@ def main() -> int:
     records: list[Line] = []
     t_start = time.time()
 
-    for i, (host, section, text) in enumerate(lines, start=1):
+    # ``index`` is 0-based so it lines up with show_build.py's own line numbering;
+    # the filename prefix stays 1-based so the takes sort in script order.
+    for i, (host, section, text) in enumerate(lines):
         if args.only is not None and i != args.only:
             continue
         cfg = voices[host]
         spoken = normalise(text)
-        name = f"{i:02d}_{host}_{slug(text)}"
+        name = f"{i + 1:02d}_{host}_{slug(text)}"
         raw_path = os.path.join(raw_dir, name + ".wav")
         final_path = os.path.join(out_dir, name + ".wav")
         d16_path = os.path.join(d16_dir, name + ".wav")
@@ -374,10 +387,23 @@ def main() -> int:
                             wav16k=f"16k/{os.path.basename(d16_path)}",
                             seconds=round(seconds, 3), voice=cfg["voice"],
                             speed=cfg["speed"], peak_dbfs=round(peak_db, 2)))
-        print(f"[{i:02d}/{len(lines)}] {host:6s} {seconds:5.2f}s "
+        print(f"[{i + 1:02d}/{len(lines)}] {host:6s} {seconds:5.2f}s "
               f"peak={peak_db:6.2f} dBFS  {name}", flush=True)
 
-    total = sum(r.seconds for r in records)
+    # --only re-renders a single take; merge it into whatever the manifest
+    # already holds so a one-line fix never truncates the other entries.
+    man_path = man_path_of(out_dir)
+    if args.only is not None and os.path.exists(man_path):
+        with open(man_path, encoding="utf-8") as fh:
+            prev = json.load(fh).get("lines", [])
+        merged = {int(e["index"]): e for e in prev}
+        for r in records:
+            merged[r.index] = asdict(r)
+        kept = [merged[k] for k in sorted(merged)]
+    else:
+        kept = [asdict(r) for r in records]
+
+    total = sum(float(e["seconds"]) for e in kept)
     manifest = {
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "script": os.path.relpath(os.path.abspath(args.script), root).replace("\\", "/"),
@@ -389,16 +415,16 @@ def main() -> int:
                   "true_peak_ceiling_dbfs": TARGET_TP_DBFS if not args.no_loudnorm else None},
         "seed": args.seed,
         "device": args.device,
-        "line_count": len(records),
+        "index_base": 0,
+        "line_count": len(kept),
         "total_seconds": round(total, 3),
-        "lines": [asdict(r) for r in records],
+        "lines": kept,
     }
-    man_path = os.path.join(out_dir, "manifest.json")
     with open(man_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
 
-    print(f"\n{len(records)} lines, {total:.1f} s "
+    print(f"\n{len(kept)} lines, {total:.1f} s "
           f"({total/60:.1f} min) in {time.time()-t_start:.0f} s wall")
     print(f"manifest: {man_path}")
     return 0

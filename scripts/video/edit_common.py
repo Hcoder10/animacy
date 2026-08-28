@@ -348,6 +348,15 @@ def attach_show(lines: list[Line], log: list[str]) -> bool:
     for a, b in zip(order, order[1:]):
         a.gap_after = round(max(0.0, b.src_t - (a.src_t + a.dur)), 3)
 
+    # Adopt the render's own lead-in. The cold open clip was composed with that
+    # much stillness in front of the first word; matching it means the opening
+    # shot starts on the clip's first frame instead of part way into a breath.
+    global LEAD_IN
+    fps = float(blob.get("fps") or FPS) or FPS
+    lead = blob.get("set", {}).get("lead_in_frames")
+    if isinstance(lead, (int, float)) and 0 < lead / fps < 4.0:
+        LEAD_IN = round(lead / fps, 3)
+
     placeholder = bool(blob.get("placeholder_voice"))
     log.append(
         f"show.json: adopted the podcast timeline for {matched}/{len(lines)} lines "
@@ -509,6 +518,7 @@ def load_podcast(log: list[str], sec_t0: dict[int, float], show_seconds: float
     full_hits: list[str] = []
     inferred: list[str] = []
     unplaced: list[str] = []
+    stale: list[str] = []
 
     def note(cam: str, sec: int, p: Path, base: float) -> bool:
         if (cam, sec) not in out and p.exists() and probe(p)["dur"] > 0.3:
@@ -524,10 +534,24 @@ def load_podcast(log: list[str], sec_t0: dict[int, float], show_seconds: float
             full_hits.append(f"{cam}:{p.name}")
 
     def is_full(p: Path) -> bool:
-        if p.stem.lower() in FULL_STEMS:
-            return True
         d = probe(p)["dur"]
+        if re.match(r"^(full|all|master|whole|complete|timeline)(_v\d+)?$", p.stem.lower()):
+            return True
         return bool(show_seconds and d >= 0.85 * show_seconds)
+
+    def on_this_timeline(p: Path) -> bool:
+        """A full-timeline clip must be as long as the show it claims to cover.
+
+        The host renders and show.json are produced by another agent and can be
+        regenerated independently; a camera rendered against a previous version
+        of the timeline is exactly as long as that old timeline and drifts
+        against the narration by the difference. That is invisible in a still
+        frame and glaring in motion, so a mismatch disqualifies the clip
+        instead of being used.
+        """
+        if not show_seconds:
+            return True
+        return abs(probe(p)["dur"] - show_seconds) <= 0.6
 
     # 1. an explicit manifest wins - it can state the offset outright
     for e in _entries(_load_json(PODCAST_DIR / "render_manifest.json")):
@@ -550,6 +574,10 @@ def load_podcast(log: list[str], sec_t0: dict[int, float], show_seconds: float
         stated = _pick(e, "t_start", "clip_start", "start", "offset")
         sec_raw = _pick(e, "section", "sec", "scene", "part")
         if str(sec_raw).strip().lower() in ("all", "*", "full") or is_full(p):
+            if not on_this_timeline(p):
+                stale.append(f"{cam}/{p.name} is {probe(p)['dur']:.1f}s but the show "
+                             f"is {show_seconds:.1f}s (render_manifest.json entry)")
+                continue
             add_full(cam, p, float(stated) if isinstance(stated, (int, float)) else 0.0)
             continue
         secn = _sec_num(sec_raw if sec_raw is not None else p.stem)
@@ -568,20 +596,44 @@ def load_podcast(log: list[str], sec_t0: dict[int, float], show_seconds: float
                   (sorted((PODCAST_DIR / cam).glob("*.mp4"))
                    if (PODCAST_DIR / cam).exists() else [])]
     candidates += sorted(PODCAST_DIR.glob("*.mp4"))
+    # A full-timeline clip that matches the current show.json wins over one
+    # that does not, whatever it is called and whatever order the glob returns.
+    candidates.sort(key=lambda p: (not (is_full(p) and on_this_timeline(p)),))
     for p in candidates:
         cam = _cam_from_path(p)
         if cam not in CAMERAS:
             continue
         if is_full(p):
+            if not on_this_timeline(p):
+                stale.append(f"{cam}/{p.name} is {probe(p)['dur']:.1f}s but the show "
+                             f"is {show_seconds:.1f}s")
+                continue
             add_full(cam, p)
             continue
         got = _infer_section_and_base(p, sec_t0, sec_dur)
         if got:
             secn, base = got
+            # a per-section clip should be its section long, give or take a
+            # lead-in or tail handle; much longer or shorter and it belongs to
+            # a different version of the timeline
+            slack = probe(p)["dur"] - sec_dur.get(secn, probe(p)["dur"])
+            if slack < -0.6 or slack > 2.5:
+                stale.append(f"{cam}/{p.name} is {probe(p)['dur']:.1f}s but section "
+                             f"{secn} is {sec_dur.get(secn, 0):.1f}s")
+                continue
             if note(cam, secn, p, base):
                 inferred.append(f"{cam}/{p.name}->s{secn}@{base:.2f}s")
         elif probe(p)["dur"] > 0.3:
             unplaced.append(f"{cam}/{p.name}")
+
+    # A clip that is on disk but will not probe is almost always one an agent
+    # is still writing. Falling back to another angle without saying so would
+    # quietly drop a camera from the whole film, so it is called out loudly.
+    broken = [str(p.relative_to(PODCAST_DIR)) for p in
+              sorted(PODCAST_DIR.glob("**/*.mp4")) if probe(p)["dur"] <= 0.3]
+    if broken:
+        log.append(f"podcast: UNREADABLE (still being written?): {broken} - "
+                   f"those angles are NOT in this cut; re-run once they settle")
 
     cams = sorted({c for c, _ in out})
     log.append(f"podcast: {len(out)} (camera, section) slot(s) covered, cameras {cams or 'none'}"
@@ -592,6 +644,8 @@ def load_podcast(log: list[str], sec_t0: dict[int, float], show_seconds: float
     if unplaced:
         log.append(f"podcast: WARNING could not place {unplaced} - "
                    f"no section number, no title word, no duration match")
+    if stale:
+        log.append(f"podcast: REJECTED as being from a different timeline: {stale}")
     return out
 
 
@@ -635,7 +689,9 @@ BROLL_KEYWORDS: dict[str, list[str]] = {
     "dataset": ["huggingface", "hugging", "datasetpage", "dataset", "card", "licence",
                 "license"],
     "data_report": ["datareport", "report", "speakers", "minutes", "kept", "totals",
-                    "harvest", "counter", "breakdown"],
+                    "breakdown", "licences", "licenses"],
+    "harvest": ["harveststatus", "harvest", "counter", "crawl", "hours", "queue",
+                "workers", "allnight"],
     "grading_reel": ["reel", "blind", "clip9", "numbered", "watched", "judge"],
     "score_table": ["scoretable", "score", "table", "published", "rank", "overall"],
 }
@@ -657,10 +713,61 @@ BROLL_NEGATIVE: dict[str, list[str]] = {
     "mapping": ["ab", "vendornod", "csv", "leanin"],
     "vendor_nod": ["mapping", "gains"],
     "dataset": ["datareport", "speakers", "kept"],
-    "data_report": ["huggingface", "hugging"],
+    "data_report": ["huggingface", "hugging", "harveststatus"],
+    "harvest": ["huggingface", "hugging", "datareport", "speakers"],
     "grading_reel": ["scoretable", "published", "overall"],
     "score_table": ["reel", "blind", "clip9"],
 }
+
+
+_black_cache: dict[str, list[tuple[float, float]]] = {}
+
+
+def black_spans(path: Path | str) -> list[tuple[float, float]]:
+    """Where a clip is black. Reels of judged clips have black between them,
+    and cutting to one of those gaps looks like the film dropped out."""
+    key = str(path)
+    if key in _black_cache:
+        return _black_cache[key]
+    spans: list[tuple[float, float]] = []
+    if FFMPEG and Path(path).exists():
+        p = run([FFMPEG, "-hide_banner", "-nostdin", "-i", key, "-vf",
+                 "blackdetect=d=0.25:pic_th=0.97:pix_th=0.10", "-an", "-f", "null", "-"],
+                check=False, quiet=True)
+        for line in (p.stderr or "").splitlines():
+            if "black_start" in line:
+                try:
+                    a = float(line.split("black_start:")[1].split()[0])
+                    b = float(line.split("black_end:")[1].split()[0])
+                    spans.append((a, b))
+                except Exception:
+                    pass
+    _black_cache[key] = spans
+    return spans
+
+
+def choose_in_point(path: Path, clip_dur: float, need: float, prefer: float = 0.0) -> float:
+    """The earliest in-point at or after `prefer` whose `need` seconds hold no
+    black. Falls back to whatever overlaps least."""
+    spans = black_spans(path)
+    if not spans:
+        return round(max(0.0, min(prefer, max(0.0, clip_dur - need))), 3)
+
+    def overlap(start: float) -> float:
+        end = start + need
+        return sum(max(0.0, min(end, b) - max(start, a)) for a, b in spans)
+
+    cands = {prefer, 0.0}
+    cands.update(b + 0.05 for _a, b in spans)
+    best, best_ov = None, None
+    for c in sorted(cands):
+        c = max(0.0, min(c, max(0.0, clip_dur - need)))
+        ov = overlap(c)
+        if ov <= 0.02:
+            return round(c, 3)
+        if best_ov is None or ov < best_ov:
+            best, best_ov = c, ov
+    return round(best or 0.0, 3)
 
 
 @dataclass
@@ -705,9 +812,11 @@ class BrollPool:
             if sec:
                 sections[stem] = sec
 
+        unreadable: list[str] = []
         for p in sorted(BROLL_DIR.glob("**/*.mp4")):
             info = probe(p)
             if info["dur"] < 0.4:
+                unreadable.append(p.name)
                 continue
             hay = _norm(p.stem + " " + p.parent.name + " " + meta.get(p.stem, ""))
             sec = sections.get(p.stem) or _sec_num(re.match(r"^s(\d+)", p.stem).group(1)
@@ -719,6 +828,8 @@ class BrollPool:
         tagged = sum(1 for c in self.clips if c.section)
         log.append(f"broll: found {len(self.clips)} clips in {BROLL_DIR} "
                    f"({tagged} tagged with a section)")
+        if unreadable:
+            log.append(f"broll: UNREADABLE (still being written?): {unreadable}")
 
     def _score(self, slot: str, section: int | None, need: float, c: BrollClip) -> float:
         words = BROLL_KEYWORDS.get(slot, [slot])
@@ -733,6 +844,13 @@ class BrollPool:
             score += 0.5
         if c.portrait:
             score -= 2.5              # would pillarbox into a 16:9 frame
+        # Tie-break toward the tighter clip. When the b-roll agent has cut a
+        # 12 s version of a 34 s phone take "at its busiest stretch", that
+        # curated cut is the shot; picking the raw take instead and choosing an
+        # in-point ourselves throws their judgement away. Small enough that it
+        # never outweighs a real keyword or section match.
+        if c.dur > 0:
+            score += 0.8 * min(1.0, need / c.dur)
         return score
 
     MIN_SCORE = 1.5   # below this we would rather stay on the hosts
@@ -799,8 +917,9 @@ class BrollPool:
             start = 0.0 if need >= clip.dur else max(0.0, min(start, clip.dur - need))
             if clip.used > 0 and clip.dur - need > 0.05:
                 start = 0.0
+        start = choose_in_point(clip.path, clip.dur, need, prefer=start)
         clip.used = min(clip.dur, start + need)
-        return clip.path, round(start, 3)
+        return clip.path, start
 
 
 # --------------------------------------------------------------------------
@@ -825,8 +944,12 @@ CUTPLAN: dict[int, list[list[str]]] = {
     4: [["b:mapping", "b:vendor_nod"], ["b:viewer_ab"], ["b:speed_cap", "A"]],
     5: [["A"], ["B"], ["C"], ["b:waveform"], ["C"], ["A"]],
     6: [["b:hardware", "b:readback"], ["b:csv_validator"], ["A"], ["B"]],
-    7: [["b:dataset"], ["b:data_report"], ["A"]],
-    8: [["B", "b:grading_reel"], ["b:grading_reel"], ["b:score_table", "A"]],
+    7: [["b:dataset"], ["b:data_report", "b:harvest"], ["A"]],
+    # The reel has black spacers between the judged clips at 0.1-1.6 s and
+    # 6.3-7.8 s, so no nine-second window of it is clean. One shorter cut into
+    # its first clean stretch, and REACHY says the blind-and-sealed line on
+    # camera rather than over black.
+    8: [["B", "b:grading_reel"], ["C"], ["b:score_table", "A"]],
     9: [["A"], ["E"]],
 }
 
@@ -859,7 +982,9 @@ GAP_WITHIN = 0.14       # between lines inside a section
 GAP_SECTION = 0.46      # the breath at a section boundary
 SECTION_GAP_CAP = 0.55  # the most we let a rendered section gap run to
 GAP_AFTER_PUNCH = 0.30  # extra beat after a deadpan one-liner
-LEAD_IN = 0.35          # picture before the first word
+LEAD_IN = 1.20          # picture before the first word; overridden below by the
+                        # lead-in the podcast render actually composed, so the
+                        # opening shot starts on that clip's own first frame
 END_BEAT = 0.70         # stillness after the last word, before the end card
 ENDCARD_HOLD = 3.0
 TAIL_BLACK = 0.5

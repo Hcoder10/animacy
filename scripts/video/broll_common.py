@@ -173,22 +173,32 @@ def probe(path: str) -> dict:
     out = subprocess.run([ffprobe_bin(), "-v", "error", "-select_streams", "v:0",
                           "-show_entries", "format=duration:stream=width,height,codec_name,avg_frame_rate",
                           "-of", "json", path], capture_output=True, text=True)
+    aud = subprocess.run([ffprobe_bin(), "-v", "error", "-select_streams", "a",
+                          "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
+                         capture_output=True, text=True)
+    has_audio = bool(aud.stdout.strip())
     try:
         j = json.loads(out.stdout)
         st = (j.get("streams") or [{}])[0]
         return {"duration_s": round(float(j["format"]["duration"]), 2),
                 "width": st.get("width"), "height": st.get("height"),
                 "codec": st.get("codec_name"), "fps": st.get("avg_frame_rate"),
-                "bytes": os.path.getsize(path)}
+                "has_audio": has_audio, "bytes": os.path.getsize(path)}
     except Exception:  # noqa: BLE001
-        return {"bytes": os.path.getsize(path)}
+        return {"has_audio": has_audio, "bytes": os.path.getsize(path)}
 
 
 def register(filename: str, *, section: str, shows: str, source: str,
-             notes: str | None = None, extra: dict | None = None) -> dict:
-    """Add/replace this clip's manifest entry (keyed by filename), keeping order."""
+             notes: str | None = None, extra: dict | None = None,
+             supplied: bool = False) -> dict:
+    """Add/replace this clip's manifest entry (keyed by filename), keeping order.
+
+    `supplied=True` marks footage handed to the edit rather than produced here:
+    it is kept untouched and is not held to the 6-15 s / silent format rules.
+    """
     path = os.path.join(OUT_DIR, filename)
-    entry = {"file": filename, "section": section, "shows": shows, "source": source}
+    entry = {"file": filename, "section": section, "shows": shows, "source": source,
+             "supplied": supplied}
     entry.update(probe(path))
     if notes:
         entry["notes"] = notes
@@ -197,8 +207,11 @@ def register(filename: str, *, section: str, shows: str, source: str,
     entry["recorded_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     data = {"format": {"width": W, "height": H, "fps": FPS, "codec": "h264", "audio": "none"},
-            "note": "Every clip is real output: real stdout, the real viewer, the real dataset, "
-                    "the real robot read-back. Silent by design; the edit adds narration.",
+            "note": "Every clip is real: real stdout, the real viewer, the real dataset pages, the "
+                    "real robot's read-back. Clips with supplied=false were produced by "
+                    "scripts/video/broll_*.py at 1920x1080 / 30 fps / h264 / silent, 6-15 s. Clips "
+                    "with supplied=true are footage handed to the edit, kept untouched. "
+                    "See docs/video/broll.md.",
             "clips": []}
     if os.path.exists(MANIFEST):
         try:

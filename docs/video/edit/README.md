@@ -71,8 +71,9 @@ agent actually delivered by keyword and by the `section` tag in
 in-point advances instead of replaying the same frames. Portrait clips are
 penalised so they do not get pillarboxed into a 16:9 frame.
 
-**Transitions.** 31 hard cuts and 3 dissolves, at roughly 16 s, 72 s and
-140 s.
+**Transitions.** Hard cuts throughout, and three dissolves, at roughly 16 s,
+72 s and 140 s. (Exact counts for any given run are in `report.json`; they move
+as footage lands.)
 
 A dissolve spans `[T, T+d]` — the *incoming* picture starts on time at its
 natural in-point and the *outgoing* clip is what stretches across and fades
@@ -159,6 +160,12 @@ always be opened and adjusted by hand.
 
 `report.json` records which engine produced the file.
 
+Clip paths in the project are absolute. That is deliberate — it is what was
+tested, and both melt and Kdenlive resolve it without argument. The cost is
+that moving the repo will make Kdenlive ask you to relocate the clips on open;
+re-running `edit_all.py` regenerates the project with correct paths and is the
+faster fix.
+
 MLT is not on PATH by default on Windows. The build finds `melt.exe` under
 `C:/Users/sarta/mlt-portable/Shotcut/` (the Shotcut portable zip, which needs
 no installer — the Kdenlive installer wants elevation) or anywhere else on
@@ -177,6 +184,43 @@ frames back out of the finished file and checks them:
   froze shows up as a warning instead of being shipped.
 - Both file size ceilings are enforced by re-encoding at a computed bitrate if
   the quality-targeted pass overshoots.
+
+And separately, `scripts/video/edit_verify_sync.py` checks the thing stills
+cannot show. For every shot it pulls one frame from the rendered master and the
+frame that shot is supposed to have come from, and compares them:
+
+```
+python scripts/video/edit_verify_sync.py
+```
+
+A wrong source offset is invisible in a screenshot and glaring the moment
+anyone watches — the robot's mouth stops matching the words. This catches it
+numerically. It skips past dissolve windows (where the picture is legitimately
+a blend of two sources) and ignores the bottom fifth of frame (where the
+lower-thirds are in the master but not in the source), and reports mean
+absolute pixel difference per shot; matching frames land in the low single
+digits, since the master has been through one more h264 encode than the source.
+
+`scripts/video/edit_summary.py` prints the cut itself — shot list, the split
+between host and b-roll screen time, per-camera usage, the longest unbroken
+b-roll stretch, what was dropped for length, and anything still a placeholder.
+
+## Rendering while other agents are still writing
+
+The footage was produced by other agents at the same time as the edit was being
+cut, which introduces a hazard worth knowing about: a `.mp4` that is still
+being written exists on disk, has a plausible size, and cannot be decoded — an
+mp4's `moov` atom is only finalised when the encoder closes the file. Camera A
+was re-rendered mid-pass at one point and the master had to be thrown away.
+
+Two defences:
+
+- Any file under `data/video/podcast/` or `data/video/broll/` that exists but
+  will not probe is reported as `UNREADABLE (still being written?)` and named.
+  Without this the build would quietly fall back to another camera and drop an
+  angle from the whole film with nothing in the log to say so.
+- Before a final render, wait until every source file both probes cleanly and
+  has stopped changing size.
 
 ## Where the material comes from
 

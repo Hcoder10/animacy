@@ -1,1 +1,0 @@
-Reference-only GPL-3.0 sources (LeLamp simulation, by Human Computer Lab). Used to read joint axes/offsets while authoring robots/lamp/urdf from Autonomous's Apache-2.0 parts. Not imported by animacy code and not redistributed as part of the Apache-2.0 package.

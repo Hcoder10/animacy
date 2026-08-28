@@ -117,7 +117,7 @@ def shot_channels(p, clip: str, start_s: float, seconds: float) -> dict:
         log(f"  clip {info['clip']}: {info['duration']:.1f} s; seeking to {start_s:g} s")
         v.ev(f"window.animacy.seek({start_s}); window.animacy.play()")
         v.page.wait_for_timeout(300)
-        box = v.box("#channels-panel", pad=8)
+        box = v.box("#channels-panel")   # no padding: the joints panel starts right of it
         log(f"  channel panel {box['width']:.0f}x{box['height']:.0f} at "
             f"({box['x']:.0f},{box['y']:.0f})")
         cap = Capture(v.page, os.path.join(workdir("channels"), "frames"))
@@ -172,24 +172,54 @@ def shot_lean_in(p, seconds: float = 12.0) -> dict:
         v.close()
 
 
-def shot_ab(p, seconds: float = 12.0) -> dict:
+def loop_frames(duration_s: float, target_s: float) -> tuple[int, int]:
+    """Whole clip periods covering `target_s`, so the result loops seamlessly.
+
+    Both sources are looping the same clip, so capturing an exact whole number
+    of periods from t=0 puts the last frame one step before the first — no cut
+    to hide at the loop point.
+    """
+    period = max(1, int(round(duration_s * FPS)))
+    reps = max(1, -(-int(round(target_s * FPS)) // period))
+    return period * reps, reps
+
+
+def shot_ab(p, seconds: float = 16.0, hero: bool = False) -> dict:
+    """The vendor nod beside the retargeted human nod.
+
+    `hero=True` drops the Reachy viewport for the lamp-only pair the README
+    header loop wants. Framing is fixed for the whole take: the viewer's camera
+    never moves and there are no cuts inside the clip, so it loops cleanly.
+    """
     v = Viewer(p, "autoplay=0&source=native&clip=lamp/idle")
     try:
+        if hero:
+            v.ev("document.getElementById('vp-reachy_mini').hidden = true")
         v.ev("window.animacy.demo('ab')")
         v.page.wait_for_function("window.animacy.ab.on && window.animacy.ab.source "
                                  "&& window.animacy.sourceInfo().clip === 'synth/cal_nod'")
         v.ev("window.animacy.seek(0); window.animacy.ab.source.seek(0); window.animacy.play()")
-        v.page.wait_for_timeout(500)          # ResizeObserver settles the A/B columns
+        v.page.wait_for_timeout(600)          # ResizeObserver settles the A/B columns
+        info = v.ev("window.animacy.sourceInfo()")
+        n, reps = loop_frames(float(info["duration"]), seconds)
         box = v.box("#viewports")
-        log(f"  A/B viewports {box['width']:.0f}x{box['height']:.0f}")
-        cap = Capture(v.page, os.path.join(workdir("ab"), "frames"))
-        cap.step(int(seconds * FPS), js="window.animacy.stepFrame($DT)", clip=box)
-        return finish(cap, v, "s4_ab_vendor_nod.mp4", section="4",
-                      shows="A/B on one screen: a human nod retargeted through the lamp's ROBOT.md "
-                            "beside the vendor's own hand-authored `nod` clip played raw, plus the "
-                            "same human nod on the Reachy Mini.",
-                      source="web/ A/B mode (animacy.demo('ab')): synth/cal_nod vs the lamp's "
-                             "native nod.csv (viewports region)")
+        log(f"  A/B viewports {box['width']:.0f}x{box['height']:.0f}; clip {info['clip']} "
+            f"{info['duration']:.2f} s -> {reps} whole loops, {n} frames ({n / FPS:.2f} s)")
+        cap = Capture(v.page, os.path.join(workdir("ab_hero" if hero else "ab"), "frames"))
+        cap.step(n, js="window.animacy.stepFrame($DT)", clip=box)
+        name = "s4_ab_lamp_hero_loop.mp4" if hero else "s4_ab_vendor_nod.mp4"
+        extra = "The lamp alone: A the retargeted human nod, B the vendor's own." if hero else \
+            "Plus the same human nod on the Reachy Mini in the third panel."
+        return finish(cap, v, name, section="4",
+                      shows=f"A/B on one screen: a human nod retargeted through the lamp's "
+                            f"ROBOT.md beside the vendor's own hand-authored `nod` clip played "
+                            f"raw. {extra}",
+                      source=f"web/ A/B mode (animacy.demo('ab')): synth/cal_nod vs the lamp's "
+                             f"native nod.csv (viewports region)",
+                      notes=f"{reps} whole loops of the {info['duration']:.2f} s clip captured from "
+                            f"t=0, so it loops seamlessly. Fixed framing, no camera move, no cuts "
+                            f"inside the take."
+                            + (" Intended as the source for the README header loop." if hero else ""))
     finally:
         v.close()
 
@@ -271,8 +301,10 @@ def shot_talk(p, line: str = LINE_EXCITED, voice: str = "af_heart") -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--shots", nargs="*", default=["channels", "lean_in", "ab", "talk"],
-                    choices=["channels", "lean_in", "ab", "talk"])
+    ap.add_argument("--shots", nargs="*", default=["channels", "lean_in", "ab", "ab_hero", "talk"],
+                    choices=["channels", "lean_in", "ab", "ab_hero", "talk"])
+    ap.add_argument("--ab-seconds", type=float, default=16.0,
+                    help="minimum length of the A/B takes (rounded up to whole clip loops)")
     ap.add_argument("--channels-clip", default="clip/zachary_levi_about_working_on_broadway_at_nerdhq")
     ap.add_argument("--channels-start", type=float, default=28.0)
     ap.add_argument("--seconds", type=float, default=12.0)
@@ -291,7 +323,9 @@ def main() -> int:
                 elif name == "lean_in":
                     shot_lean_in(p, a.seconds)
                 elif name == "ab":
-                    shot_ab(p, a.seconds)
+                    shot_ab(p, a.ab_seconds)
+                elif name == "ab_hero":
+                    shot_ab(p, a.ab_seconds, hero=True)
                 elif name == "talk":
                     shot_talk(p)
             except Exception as e:  # noqa: BLE001

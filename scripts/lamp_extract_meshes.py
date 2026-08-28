@@ -20,6 +20,14 @@ URDF world axes at the CAD ("bind") pose, so mesh origins in the URDF are
 identity and all pose information lives in the joints.
 
 Run:  python scripts/lamp_extract_meshes.py     (writes robots/lamp/meshes/*.stl)
+
+NOTE: robots/lamp/cad_src/ is NOT in the repository (24 MB of vendor CAD).
+Fetch it before running this script:
+    git clone --depth 1 https://github.com/autonomous-ai/autonomous-os third_party/autonomous-os
+    git -C third_party/autonomous-os lfs pull
+then copy robots/lamp/hardware/cad/{glb,stl} into robots/lamp/cad_src/.
+The built meshes (robots/lamp/meshes/) ARE committed, so this is only needed
+to regenerate them.
 """
 from __future__ import annotations
 

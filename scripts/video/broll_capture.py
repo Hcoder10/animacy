@@ -145,9 +145,10 @@ def main() -> int:
                     "-r", str(FPS), "-an", "-movflags", "+faststart", out_path], check=True)
     os.remove(raw)
     register(a.out, section="2",
-             shows="The real `animacy capture --preview` window tracking a licensed talking-head clip: "
-                   "the face mesh, head axes and pose overlay following an actual person, with the "
-                   "tracker's own clock in the corner.",
+             shows="The real `animacy capture --preview` window tracking a licensed talking-head "
+                   "clip: the tracker's landmark dots on an actual person's eyes, brows and nose, "
+                   "with its live readout above them — clock, head yaw/pitch/roll and translation, "
+                   "gaze, brow, eye-open, mouth, smile and torso lean, updating every frame.",
              source=f"animacy capture --source data/raw/{os.path.basename(a.source)} --preview "
                     f"(screen-recorded with ffmpeg gdigrab)",
              notes="Source: 2015-02-07 President Obama's Weekly Address, Public Domain "

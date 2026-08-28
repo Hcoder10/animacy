@@ -219,24 +219,37 @@ def encode_take(page: PodcastPage, cam: str, f0: int, f1: int, out_mp4: str, nar
 
 
 # --------------------------------------------------------------------- plan
-def take_plan(show: Dict, cams: Sequence[str]) -> List[Dict]:
+def take_plan(show: Dict, cams: Sequence[str], tail: int = 0, sections: Optional[Sequence[int]] = None) -> List[Dict]:
     """What to render: the whole show wide, the open/close on the push-in, and
-    every section on each single/over-the-shoulder angle."""
+    every section on each single / over-the-shoulder / push-in angle.
+
+    ``tail`` extends each per-section take past its section end (clamped to the
+    show), so a cut can run into the following gap instead of freezing on the
+    last frame. It never moves a clip's FIRST frame, so ``t_start`` — the thing
+    the edit syncs on — is unaffected."""
     n = show["n_frames"]
     secs = show["sections"]
+    want = set(sections) if sections else None
     plan: List[Dict] = []
     if "A" in cams:
-        plan.append({"camera": "A", "section": "full", "f0": 0, "f1": n})
-    if "E" in cams and secs:
-        plan.append({"camera": "E", "section": "open", "f0": 0, "f1": secs[0]["f_end"]})
-        plan.append({"camera": "E", "section": "close", "f0": secs[-1]["f_start"], "f1": n})
-    for cam in ("B", "C", "D"):
+        plan.append({"camera": "A", "section": "full", "f0": 0, "f1": n, "covers": "whole timeline from t=0"})
+    if "E" in cams and secs and want is None:
+        plan.append({"camera": "E", "section": "open", "f0": 0, "f1": secs[0]["f_end"],
+                     "covers": "lead-in + section 1"})
+        plan.append({"camera": "E", "section": "close", "f0": secs[-1]["f_start"], "f1": n,
+                     "covers": "section 9 + tail"})
+    for cam in ("B", "C", "D", "E"):
         if cam not in cams:
             continue
         for s in secs:
-            plan.append({"camera": cam, "section": f"s{int(s['index']) + 1:02d}",
-                         "f0": s["f_start"], "f1": s["f_end"], "title": s["title"],
-                         "line_indices": s["line_indices"]})
+            num = int(s["index"]) + 1
+            if want is not None and num not in want:
+                continue
+            plan.append({"camera": cam, "section": f"s{num:02d}",
+                         "f0": s["f_start"], "f1": min(n, s["f_end"] + tail),
+                         "title": s["title"], "line_indices": s["line_indices"],
+                         "tail_frames": min(n, s["f_end"] + tail) - s["f_end"],
+                         "covers": f"section {num}"})
     return plan
 
 
@@ -290,6 +303,12 @@ def main(argv=None) -> int:
     ap.add_argument("--cam", action="append", choices=list(CAMERAS), help="render only these cameras (repeatable)")
     ap.add_argument("--all", action="store_true", help="every camera (the default when --cam is not given)")
     ap.add_argument("--section", type=int, action="append", help="1-based section numbers only")
+    ap.add_argument("--tail-frames", type=int, default=0,
+                    help="extend each per-section take this many frames past its section end, so a cut "
+                         "can run into the following gap (30 = 1.0 s). Never moves a clip's first frame.")
+    ap.add_argument("--suffix", default="",
+                    help="write <section><suffix>.mp4 instead of <section>.mp4, e.g. --suffix _v2, so a "
+                         "re-render never overwrites files an editor is already reading")
     ap.add_argument("--probe", action="store_true", help="print the set measurements and exit")
     ap.add_argument("--stills", action="store_true", help="write data/video/podcast/stills/*.png and exit")
     ap.add_argument("--bench", type=int, default=0, help="grab N frames and report the rate, then exit")
@@ -343,15 +362,10 @@ def main(argv=None) -> int:
             write_stills(page, show, os.path.join(out_dir, "stills"), cams)
             return 0
 
-        plan = take_plan(show, cams)
-        if args.section:
-            # only the per-section takes; the whole-show wide and the open/close
-            # are not sections, so asking for one section never re-renders them
-            keep = {f"s{n:02d}" for n in args.section}
-            plan = [p for p in plan if p["section"] in keep]
-            if not plan:
-                print(f"no takes for section(s) {args.section} on camera(s) {list(cams)}")
-                return 2
+        plan = take_plan(show, cams, tail=args.tail_frames, sections=args.section)
+        if not plan:
+            print(f"nothing to render for camera(s) {list(cams)} section(s) {args.section}")
+            return 2
         total = sum(p["f1"] - p["f0"] for p in plan)
         print(f"[plan] {len(plan)} takes, {total} frames ({total / FPS / 60:.1f} min of footage)")
 
@@ -368,6 +382,15 @@ def main(argv=None) -> int:
             with open(manifest_path, "w", encoding="utf-8") as fh:
                 json.dump({"schema": "animacy.podcast.render.v1", "fps": FPS,
                            "size": [WIDTH, HEIGHT], "show": "show.json",
+                           "convention": {
+                               "A": "one file per camera covering the whole timeline from t=0 (A/full.mp4)",
+                               "B/C/D/E": "one file per section (<cam>/sNN.mp4), NN = 1-based section number",
+                               "E extra": "E/open.mp4 and E/close.mp4 also exist: lead-in+section 1, and section 9+tail",
+                               "t_start": "the podcast-timeline time of the clip's FIRST frame — sync on this",
+                               "tail_frames": "frames past the section end; does not move the first frame",
+                               "variant": "'v1' = original set/timeline; 'v2' = smoothed normals, fill light, "
+                                          "levelled eyeline, 0.533 s section gaps, final voice",
+                           },
                            "narration": os.path.basename(narration) if narration else None,
                            "placeholder_voice": bool(show.get("placeholder_voice")),
                            "gl": page.gl,
@@ -381,15 +404,20 @@ def main(argv=None) -> int:
             f0, f1 = p["f0"], p["f1"]
             if args.limit_frames:
                 f1 = min(f1, f0 + args.limit_frames)
-            out_mp4 = os.path.join(out_dir, p["camera"], f"{p['section']}.mp4")
+            out_mp4 = os.path.join(out_dir, p["camera"], f"{p['section']}{args.suffix}.mp4")
             print(f"[{k}/{len(plan)}] cam {p['camera']} · {p['section']} · frames {f0}..{f1} "
                   f"({(f1 - f0) / FPS:.1f}s) -> {os.path.relpath(out_mp4, ROOT)}", flush=True)
             rec = encode_take(page, p["camera"], f0, f1, out_mp4, narration, batch=args.batch,
                               crf=args.crf, mime=mime, quality=quality)
             rec["section"] = p["section"]
             rec["title"] = p.get("title", "")
+            rec["covers"] = p.get("covers", "")
+            rec["tail_frames"] = p.get("tail_frames", 0)
+            rec["variant"] = args.suffix.lstrip("_") or "v1"
             rec["line_indices"] = line_indices_for(show, f0, f1)
-            clips = [c for c in clips if not (c["camera"] == rec["camera"] and c["section"] == rec["section"])]
+            clips = [c for c in clips
+                     if not (c["camera"] == rec["camera"] and c["section"] == rec["section"]
+                             and c.get("variant", "v1") == rec["variant"])]
             clips.append(rec)
             save_manifest()
             print(f"      {rec['frames']} frames, {rec['bytes'] / 1e6:.1f} MB, "

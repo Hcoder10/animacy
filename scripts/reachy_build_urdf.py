@@ -1,3 +1,9 @@
+# NOTE: robots/reachy_mini/vendor/ is NOT in the repository (20 MB of Pollen assets).
+# Fetch it from the vendor package before running this script:
+#     pip install reachy_mini
+#     python -c "import reachy_mini, os, shutil; src=os.path.join(os.path.dirname(reachy_mini.__file__), 'descriptions', 'reachy_mini'); shutil.copytree(src, 'robots/reachy_mini/vendor', dirs_exist_ok=True)"
+# The built URDF and meshes ARE committed, so this is only needed to regenerate them.
+
 #!/usr/bin/env python
 """Build ``robots/reachy_mini/urdf/reachy_mini.urdf`` from Pollen's vendor URDF.
 
@@ -36,7 +42,7 @@ Frames and numbers, with their sources:
   daemon-served URDF is byte-identical to the vendored one). The two hinges are
   mirror images: +right swings the right antenna outward (toward -y), +left
   swings the left antenna inward (also toward -y), so a symmetric "ears out"
-  gesture is ``left = -right`` — which is what Pollen's whole library does
+  gesture is ``left = -right`` â€” which is what Pollen's whole library does
   (``SLEEP = [-3.05, 3.05]``). The SDK's MuJoCo backend negates and reorders
   the antennas for its own sim; that is not applied here.
 * Static Stewart parts: motor angles from the SDK's analytical IK at the

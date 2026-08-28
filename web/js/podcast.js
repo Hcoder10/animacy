@@ -14,6 +14,7 @@
 // one robot per scene, both are re-parented into one studio (podcast_set.js).
 
 import * as THREE from 'three';
+import { mergeVertices, toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RobotViewer } from './viewer.js';
 import { toUrdfValues } from './retarget.js';
 import { EYELINE, REACHY_DROP, PLACE, PLINTH_R, buildSet, buildPlinth, cameraRigs, applyRig } from './podcast_set.js';
@@ -22,6 +23,8 @@ const params = new URLSearchParams(location.search);
 const SHOW_URL = params.get('show') || '../data/video/podcast/show.json';
 const CAM = (params.get('cam') || 'A').toUpperCase();
 const HOSTS = { lamp: 'lamp', reachy: 'reachy_mini' };   // show.json key -> robots/<name>
+// Faces meeting at less than this angle shade smoothly; sharper joins stay hard.
+const CREASE_ANGLE = THREE.MathUtils.degToRad(42);
 
 const state = {
   show: null, hosts: {}, rigs: null, cam: CAM,
@@ -39,7 +42,7 @@ const renderer = new THREE.WebGLRenderer({
 renderer.setPixelRatio(1);                       // 1 canvas pixel per CSS pixel: the viewport is the frame size
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.0;
+renderer.toneMappingExposure = 0.95;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 canvasHost.appendChild(renderer.domElement);
@@ -96,11 +99,28 @@ async function loadHost(key, name) {
     if (!o.isMesh) return;
     o.castShadow = true;
     o.receiveShadow = true;
-    // Keep the viewer's material, calm its specular response. Both shells are
-    // faceted STL with rebuilt smooth normals, and a tight highlight under a
-    // hard key turns every facet seam into a visible crease.
-    o.material.roughness = 0.62;
-    o.material.metalness = 0.04;
+    // Smooth the shading. An STL stores three unshared vertices per triangle, so
+    // the viewer's computeVertexNormals() can only ever produce flat shading —
+    // which reads as hard facets across the lamp's shade and Reachy's shell at
+    // 1080p, and as white shards on the lamp's base. mergeVertices() welds the
+    // duplicates, then toCreasedNormals() smooths only where two faces meet
+    // below CREASE_ANGLE, so curved surfaces go smooth and real edges stay hard.
+    try {
+      const merged = mergeVertices(o.geometry, 1e-5);
+      const creased = toCreasedNormals(merged, CREASE_ANGLE);
+      o.geometry.dispose();
+      o.geometry = creased;
+    } catch (e) {
+      console.warn('[podcast] could not re-normal a mesh; keeping the viewer normals:', e && e.message);
+    }
+    o.material.roughness = 0.52;
+    o.material.metalness = 0.0;
+    // The viewer renders these shells DoubleSide (exported STLs mix windings).
+    // That is fine until they cast shadows: with DoubleSide, back faces are also
+    // written into the shadow map, and a piece with interior geometry — the
+    // lamp's base — self-shadows into hard white shards. Casting from the front
+    // faces only, with a normal-offset bias, is the standard fix.
+    o.material.shadowSide = THREE.FrontSide;
     o.material.needsUpdate = true;
   });
 

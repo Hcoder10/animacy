@@ -52,7 +52,11 @@ SR = 16000
 # Gaps are integer frames so the audio clock and the motion clock are the same
 # clock: 350 ms of settle is 11 frames at 30 fps (366.7 ms).
 LINE_GAP_FRAMES = 11        # settle between two lines of the same section
-SECTION_GAP_FRAMES = 33     # beat between sections: ease to rest, hold, ease out
+# Beat between sections: ease to rest, hold, ease out. 16 frames = 0.533 s, under
+# the 0.55 s the edit caps section gaps at — so the cut never has to trim one.
+# In-section gaps are deliberately NOT shortened: both robots are mid-behaviour
+# there, and trimming would slide the picture against the motion generated for it.
+SECTION_GAP_FRAMES = 16
 LEAD_IN_FRAMES = 36         # both hosts at rest before the first line
 TAIL_FRAMES = 45            # ... and after the last one
 # Listen-mode gaze: the raw target handed to the overlay, in canonical degrees.

@@ -13,7 +13,10 @@ import * as THREE from 'three';
 
 // --- the set ---------------------------------------------------------------
 export const EYELINE = 0.56;          // m: where both heads sit
-export const REACHY_DROP = 0.015;     // the smaller host sits a touch lower, so the plinths differ
+// Reachy's head link sits low in a tall shell, so matching head-link heights put
+// its face visibly above the lamp's in the wide. Dropping it a further 2 cm
+// levels what the eye actually reads as the two eyelines.
+export const REACHY_DROP = 0.035;
 // Hosts sit on a line oblique to the camera, not side by side: the lamp is
 // nearer and camera-left, the reachy further and camera-right. That is what
 // makes an over-the-shoulder possible at all, and it gives the wide some depth.
@@ -65,21 +68,25 @@ export function buildSet(scene) {
   cyc.receiveShadow = true;
   scene.add(cyc);
 
-  // fill: just enough that the shadow side is readable, not lit
-  scene.add(new THREE.HemisphereLight(0x9fb2d8, 0x0a0b0f, 0.16));
-  scene.add(new THREE.AmbientLight(0xffffff, 0.04));
+  // ambient floor: enough that the shadow sides read as shadow rather than
+  // crushed black, not enough to flatten the key
+  scene.add(new THREE.HemisphereLight(0x9fb2d8, 0x0a0b0f, 0.24));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.085));
 
   // key: warm, camera-left (+z), in front (+x) and above. The only shadow caster.
   // Kept low: both shells are near-white and clip to paper at anything brighter.
-  const key = new THREE.SpotLight(COL.key, 12.5, 0, THREE.MathUtils.degToRad(36), 0.9, 1.6);
+  // 10.5, not more: the lamp's base carries a fan grille and vent slots whose
+  // upward faces sit straight under the key. Any brighter and they clip to flat
+  // white and read as shattered geometry instead of as detail.
+  const key = new THREE.SpotLight(COL.key, 10.5, 0, THREE.MathUtils.degToRad(36), 0.9, 1.6);
   key.position.set(1.02, 1.30, 1.00);
   key.target.position.set(0, EYELINE - 0.08, 0.02);
   key.castShadow = true;
   key.shadow.mapSize.set(2048, 2048);
   key.shadow.camera.near = 0.4;
   key.shadow.camera.far = 5.0;
-  key.shadow.bias = -0.0009;
-  key.shadow.normalBias = 0.010;
+  key.shadow.bias = -0.0004;
+  key.shadow.normalBias = 0.025;
   key.shadow.radius = 4.0;
   scene.add(key, key.target);
 
@@ -89,8 +96,16 @@ export function buildSet(scene) {
   rim.target.position.set(0.05, EYELINE - 0.02, 0);
   scene.add(rim, rim.target);
 
+  // fill: a low, soft, neutral source from camera-right — the side the key does
+  // not reach — so the shadow half of each robot keeps its shape. No shadows of
+  // its own; a second shadow caster on a two-hander reads as a mistake.
+  const fill = new THREE.SpotLight(0xdfe6f5, 3.6, 0, THREE.MathUtils.degToRad(52), 1.0, 1.4);
+  fill.position.set(0.95, 0.72, -0.90);
+  fill.target.position.set(0, EYELINE - 0.05, 0);
+  scene.add(fill, fill.target);
+
   // bounce: a soft warm lift from low camera-left, so the plinths are not holes
-  const bounce = new THREE.PointLight(COL.bounce, 0.9, 2.6, 2.0);
+  const bounce = new THREE.PointLight(COL.bounce, 1.15, 2.8, 2.0);
   bounce.position.set(0.80, 0.20, 0.60);
   scene.add(bounce);
 
@@ -101,7 +116,7 @@ export function buildSet(scene) {
   wash.target.position.set(-2.35, 0.35, -0.15);
   scene.add(wash, wash.target);
 
-  return { floor, cyc, key, rim, bounce, wash };
+  return { floor, cyc, key, rim, fill, bounce, wash };
 }
 
 /** A plinth from the floor to `height`, at (x, z). Slight taper reads as a stool. */

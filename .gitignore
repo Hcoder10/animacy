@@ -47,3 +47,10 @@ data/grading/
 third_party/autonomous-os/
 third_party/hal-state/
 data/video/
+
+# heavy vendor sources and dev artifacts (regenerable; see docs)
+third_party/
+robots/*/vendor/
+robots/lamp/cad_src/
+web/dev/shots/
+docs/media/animacy_demo.mp4

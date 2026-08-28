@@ -18,8 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from edit_common import (  # noqa: E402
-    EDL, EDIT_DATA, MEDIA, SHOTS, QC, W, H, FPS, FFMPEG, FFPROBE,
-    ff, run, probe, find_melt, frames, mmss, REPO, BROLL_DIR, PODCAST_DIR,
+    EDL, EDIT_DATA, MEDIA, SHOTS, QC, W, H, FPS,
+    ff, run, probe, find_melt, BROLL_DIR,
 )
 
 MASTER = MEDIA / "animacy_demo.mp4"
@@ -382,10 +382,14 @@ def make_lamp_loop(edl: EDL, out: Path, log: list[str], length: float = 12.0) ->
     if not head.exists() or probe(head)["dur"] < length - 0.2:
         ff(["-i", str(body), "-t", f"{length:.3f}", "-an",
             "-c:v", "libx264", "-crf", "18", "-preset", "veryfast", str(head)])
+    # scale=out_range=tv + an explicit format keeps this out of the deprecated
+    # full-range yuvj420p that browsers render inconsistently
     ff(["-i", str(head), "-an",
-        "-vf", f"fade=t=in:st=0:d=0.35,fade=t=out:st={length - 0.35:.3f}:d=0.35",
+        "-vf", f"fade=t=in:st=0:d=0.35,fade=t=out:st={length - 0.35:.3f}:d=0.35,"
+               f"scale=out_range=tv,format=yuv420p",
         "-c:v", "libx264", "-crf", "23", "-preset", "medium", "-g", "60",
-        "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)])
+        "-pix_fmt", "yuv420p", "-color_range", "tv",
+        "-movflags", "+faststart", str(out)])
     for j in (body, head):
         j.unlink(missing_ok=True)
     log.append(f"loop: {out.name} {probe(out)['dur']:.2f}s, {mb(out):.1f} MB, from {src.name}")
@@ -468,10 +472,38 @@ def black_frame_check(master: Path, edl: EDL, log: list[str]) -> None:
                     pass
         return out
 
-    blacks = [t for t in starts("blackdetect=d=0.5:pic_th=0.98:pix_th=0.10", "black_start:")
-              if not explained(t)]
-    log.append(f"qc: black stretches (unexplained): {blacks or 'none'}")
+    def from_source(t: float, vf: str, key: str) -> bool:
+        """Does the clip on screen at time t have the same defect itself?
 
-    frozen = [t for t in starts("freezedetect=n=-58dB:d=1.4", "freeze_start:")
-              if not explained(t)]
-    log.append(f"qc: frozen picture (unexplained): {frozen or 'none'}")
+        Terminal recordings hold still while their output is readable, and
+        reels of judged clips have black between them. Those are properties of
+        the footage, not of the cut, and reporting them as edit faults buries
+        the ones that are.
+        """
+        s = next((s for s in edl.shots if s.start <= t < s.end and s.src), None)
+        if s is None or not Path(s.src).exists():
+            return False
+        want = s.src_in + (t - s.start)
+        p = ff(["-i", str(s.src), "-vf", vf, "-an", "-f", "null", "-"],
+               check=False, quiet=True)
+        for line in (p.stderr or "").splitlines():
+            if key in line:
+                try:
+                    if abs(float(line.split(key)[1].split()[0]) - want) < 0.6:
+                        return True
+                except Exception:
+                    pass
+        return False
+
+    for label, vf, key in (
+        ("black stretches", "blackdetect=d=0.5:pic_th=0.98:pix_th=0.10", "black_start:"),
+        ("frozen picture", "freezedetect=n=-58dB:d=1.4", "freeze_start:"),
+    ):
+        hits = [t for t in starts(vf, key) if not explained(t)]
+        inherited = [t for t in hits if from_source(t, vf, key)]
+        introduced = [t for t in hits if t not in inherited]
+        log.append(
+            f"qc: {label} - {len(introduced) or 'no'} introduced by the edit"
+            + (f" at {introduced}" if introduced else "")
+            + (f"; {len(inherited)} inherited from the source footage" if inherited else "")
+        )
