@@ -61,12 +61,21 @@ body {
 .vp-loading[hidden] { display: none; }
 .vp-loading.err { color: var(--bad); }
 .viewport.ab { outline: 1px dashed var(--accent-2); outline-offset: -1px; }
+/* hero layout (default): the lamp's column is wider (set inline by js/main.js layoutViewports) and its label larger */
+body.hero #vp-lamp .vp-title { font-size: 17px; }
+body.hero #vp-lamp .vp-sub { font-size: 12.5px; }
 .vp-close { position: absolute; top: 8px; right: 10px; z-index: 2; font-family: var(--mono); font-size: 12px; padding: 2px 7px; background: rgba(18, 23, 34, 0.8); }
 .add-robot { max-width: 180px; font-size: 12px; padding: 3px 6px; }
 
 /* ---------- controls ---------- */
 .controls { border-top: 1px solid var(--line); background: var(--panel); padding: 8px 14px; display: flex; flex-direction: column; gap: 6px; }
 .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.row.quickstart { gap: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.qs-label { font-weight: 700; color: var(--accent); letter-spacing: 0.06em; text-transform: uppercase; font-size: 11.5px; padding-right: 2px; }
+.qs-buttons { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.qs-buttons button.active { border-color: var(--accent); color: var(--accent); }
+.qs-hint { font-size: 11.5px; margin-left: auto; }
+.qs-hint code { font-family: var(--mono); font-size: 11px; color: var(--text); }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { background: transparent; color: var(--muted); border: 0; padding: 6px 12px; cursor: pointer; font: inherit; }
 .seg button + button { border-left: 1px solid var(--line); }

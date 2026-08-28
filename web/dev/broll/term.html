@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>animacy — terminal (b-roll)</title>
+<style>
+  /* A plain dark terminal. No neon, no glow, no gradients. */
+  :root {
+    --bg:        #14161b;
+    --chrome:    #1c1f26;
+    --chrome-br: #2a2e37;
+    --fg:        #d6dae1;
+    --dim:       #8b93a1;
+    --path:      #7aa2d8;
+    --sigil:     #7fb069;
+    --cmd:       #f0f2f5;
+    --ok:        #7fb069;
+    --err:       #d97c72;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 1920px; height: 1080px; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font-family: "Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", "Courier New", monospace;
+    -webkit-font-smoothing: antialiased;
+  }
+  #chrome {
+    height: 52px; background: var(--chrome); border-bottom: 1px solid var(--chrome-br);
+    display: flex; align-items: center; padding: 0 22px; gap: 14px;
+  }
+  #chrome .dots { display: flex; gap: 9px; }
+  #chrome .dots i { width: 13px; height: 13px; border-radius: 50%; background: #3a3f4a; display: block; }
+  #chrome .title {
+    flex: 1; text-align: center; font-size: 19px; color: var(--dim);
+    letter-spacing: .01em; margin-right: 66px; /* balance the dots */
+  }
+  #view {
+    height: calc(1080px - 52px); overflow: hidden; position: relative;
+    padding: 26px 40px 30px 40px;
+  }
+  #inner { will-change: transform; }
+  .block { margin: 0 0 4px 0; }
+  .block + .block { margin-top: 22px; }
+  .pline { font-size: 24px; line-height: 36px; white-space: pre-wrap; word-break: break-word; }
+  .pline .sigil { color: var(--sigil); }
+  .pline .path  { color: var(--path); }
+  .pline .cmd   { color: var(--cmd); }
+  pre.out {
+    margin: 6px 0 0 0; font-size: 24px; line-height: 34px; white-space: pre-wrap;
+    word-break: break-word; font-family: inherit; color: var(--fg);
+  }
+  pre.out.err { color: var(--err); }
+  .cursor {
+    display: inline-block; width: 12px; height: 25px; vertical-align: -4px;
+    background: var(--fg); margin-left: 1px;
+  }
+  .cursor.off { visibility: hidden; }
+</style>
+</head>
+<body>
+  <div id="chrome">
+    <span class="dots"><i></i><i></i><i></i></span>
+    <span class="title" id="chrome-title">animacy</span>
+  </div>
+  <div id="view"><div id="inner"></div></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const view = $('view'), inner = $('inner');
+
+  const term = {
+    ready: false,
+    done: false,
+    t: 0,          // clip time, advanced only by stepFrame
+    blocks: [],
+    typeCps: 21,
+    total: 0,
+  };
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // Lay out every block once; stepFrame only changes how much text is revealed.
+  term.init = (data) => {
+    term.typeCps = data.typeCps || 21;
+    $('chrome-title').textContent = data.title || 'animacy';
+    inner.innerHTML = '';
+    term.blocks = [];
+    let t = 0.35;                       // a beat before the first keystroke
+    for (const b of (data.blocks || [])) {
+      const el = document.createElement('div');
+      el.className = 'block';
+      const pl = document.createElement('div');
+      pl.className = 'pline';
+      pl.innerHTML = `<span class="path">${esc(b.cwd || '~/animacy')}</span> <span class="sigil">$</span> `
+                   + `<span class="cmd"></span><span class="cursor off"></span>`;
+      const out = document.createElement('pre');
+      out.className = 'out' + (b.exitCode ? ' err' : '');
+      out.hidden = true;
+      el.appendChild(pl); el.appendChild(out);
+      inner.appendChild(el);
+
+      const cmd = String(b.command || '');
+      const txt = String(b.output || '');
+      const typeS   = cmd.length / term.typeCps;
+      const delayS  = b.outputDelay == null ? 0.35 : b.outputDelay;
+      const paintS  = txt.length / (b.outputCps || 900);
+      const pauseS  = b.pauseAfter == null ? 0.9 : b.pauseAfter;
+      term.blocks.push({
+        cmd, txt,
+        cmdEl: pl.querySelector('.cmd'),
+        curEl: pl.querySelector('.cursor'),
+        outEl: out,
+        t0: t, tType: t + typeS, tOut: t + typeS + delayS,
+        tPaint: t + typeS + delayS + paintS, tEnd: t + typeS + delayS + paintS + pauseS,
+      });
+      t += typeS + delayS + paintS + pauseS;
+    }
+    term.total = t;
+    fitFont(data.fontPx);
+    term.t = 0;
+    term.done = false;
+    render();
+  };
+
+  // Short sessions leave most of a 1080p frame empty. Reveal everything, measure,
+  // and pick the largest legible size that still fits: a presentation choice about
+  // type size only — the bytes on screen are unchanged.
+  function fitFont(forced) {
+    document.body.style.fontSize = '';
+    if (forced) { document.body.style.fontSize = forced + 'px'; return; }
+    const save = term.t;
+    term.t = term.total;                       // everything visible
+    render();
+    // 0.95 leaves a little slack so the widest line never wraps at the fitted size
+    const viewH = view.clientHeight - 56, viewW = inner.clientWidth * 0.95;
+    const h = inner.scrollHeight, w = longestLineCols() * advancePx(24);
+    let px = 24 * Math.min(viewH / Math.max(h, 1), viewW / Math.max(w, 1));
+    px = Math.max(22, Math.min(40, px));
+    document.body.style.fontSize = px.toFixed(1) + 'px';
+    document.querySelectorAll('.pline, pre.out').forEach((el) => {
+      el.style.fontSize = px.toFixed(1) + 'px';
+      el.style.lineHeight = (px * 1.45).toFixed(1) + 'px';
+    });
+    document.querySelectorAll('.cursor').forEach((el) => {
+      el.style.width = (px * 0.5).toFixed(1) + 'px';
+      el.style.height = (px * 1.05).toFixed(1) + 'px';
+    });
+    term.fontPx = px;
+    term.t = save;
+  }
+
+  // monospace: one character advance at `px`, measured in the page's own font
+  function advancePx(px) {
+    const probe = document.createElement('span');
+    probe.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font-size:${px}px`;
+    probe.textContent = 'M'.repeat(100);
+    document.body.appendChild(probe);
+    const a = probe.getBoundingClientRect().width / 100;
+    probe.remove();
+    return a;
+  }
+
+  // widest logical line: prompt + command, or any single line of captured output
+  function longestLineCols() {
+    let n = 1;
+    for (const b of term.blocks) {
+      const prompt = b.cmdEl.parentElement.querySelector('.path').textContent.length + 3;
+      n = Math.max(n, prompt + b.cmd.length);
+      for (const l of b.txt.split('\n')) n = Math.max(n, l.length);
+    }
+    return n;
+  }
+
+  function render() {
+    const t = term.t;
+    let cursorOn = null;
+    for (const b of term.blocks) {
+      // command line: typed one character at a time
+      const k = t <= b.t0 ? 0
+              : t >= b.tType ? b.cmd.length
+              : Math.floor((t - b.t0) * term.typeCps);
+      b.cmdEl.textContent = b.cmd.slice(0, k);
+      // output: revealed as the characters the command actually printed
+      if (t < b.tOut) {
+        b.outEl.hidden = true;
+        b.outEl.textContent = '';
+      } else {
+        b.outEl.hidden = false;
+        const frac = b.tPaint > b.tOut ? (t - b.tOut) / (b.tPaint - b.tOut) : 1;
+        const m = frac >= 1 ? b.txt.length : Math.floor(frac * b.txt.length);
+        b.outEl.textContent = b.txt.slice(0, m);
+      }
+      if (t >= b.t0 && t < b.tEnd) cursorOn = b;
+    }
+    // one blinking block cursor, on whichever line is live
+    for (const b of term.blocks) b.curEl.classList.add('off');
+    if (cursorOn && term.t < cursorOn.tOut) {
+      // blink at 1.6 Hz while the command is being typed / waiting to run
+      const on = (Math.floor(term.t * 1.6) % 2) === 0 || term.t < cursorOn.tType;
+      cursorOn.curEl.classList.toggle('off', !on);
+    }
+    // a real terminal keeps the newest line at the bottom of the window
+    const viewH = view.clientHeight - 56;
+    const contentH = inner.scrollHeight;
+    inner.style.transform = `translateY(${-Math.max(0, contentH - viewH)}px)`;
+  }
+
+  term.stepFrame = (dt) => {
+    term.t += dt;
+    render();
+    if (term.t >= term.total) term.done = true;
+    return { t: term.t, done: term.done };
+  };
+
+  window.term = term;
+  term.ready = true;
+})();
+</script>
+</body>
+</html>

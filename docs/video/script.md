@@ -80,7 +80,7 @@ that same audio. Nothing is keyframed.
 
 ## 6 — On real hardware (over: the physical Reachy Mini moving; the daemon read-back numbers)
 
-**REACHY:** This runs on me. Thirty hertz over the daemon, every axis read back within a couple of degrees.
+**REACHY:** This runs on me. Thirty hertz over the daemon, and the head axes read back within a couple of degrees of what was commanded.
 
 **LAMP:** And for me it writes the exact CSV that Autonomous OS already accepts — same columns, same limits, checked against the vendor's own validator.
 

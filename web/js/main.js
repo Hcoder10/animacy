@@ -32,6 +32,23 @@ const CDN = {
 // web/manifest.json (any robots/<name>/ROBOT.md exported to web/robots/<name>.json)
 // is offered by the "+ add robot" picker (or `?robots=lamp,reachy_mini,so101`).
 const HEADLINE_ROBOTS = ['lamp', 'reachy_mini'];
+// Layout: 'hero' (default) opens with the Autonomous Lamp large (~62 % of the width, loaded
+// first, camera on its head) and the Reachy Mini beside it; `?layout=equal` is the plain
+// side-by-side split with every robot framed whole.
+const LAYOUT = new URLSearchParams(location.search).get('layout') === 'equal' ? 'equal' : 'hero';
+const HERO = {
+  robot: 'lamp',
+  weight: 62 / 38,                                          // hero column vs. every other column
+  framing: { link: 'head', fill: 0.45, anchor: 0.58, view: 'iso' },  // 3/4 front, head ≈ 45 % of the viewport height
+};
+// The Lamp quick-start row: one click puts the page in a demo state.
+const DEMOS = {
+  ab: { label: 'Vendor nod vs animacy nod (A/B)', title: 'the vendor\'s hand-authored nod next to a human nod retargeted through ROBOT.md' },
+  human: { label: 'Human clip → lamp (look left / brows / lean-in)', title: 'three calibration clips in a row: look left/right, brows, lean-in — each through the lamp\'s ROBOT.md' },
+  talk: { label: 'Talk: "No way, that is incredible news!"', title: 'Kokoro TTS in the page (af_heart) → speech features → motion retrieval → the lamp, in sync' },
+};
+const DEMO_HUMAN_PLAYLIST = ['synth/cal_look_left_right', 'synth/cal_brows', 'synth/cal_lean_in'];
+const DEMO_TALK_LINE = 'No way, that is incredible news!';
 // GitHub Pages has no directory listing; these are the 31 Autonomous OS recordings.
 const LAMP_NATIVE_FALLBACK = [
   'acknowledge', 'confused', 'curious', 'excited', 'fear', 'goodbye', 'greeting', 'happy_wiggle', 'headshake', 'idle',
@@ -71,6 +88,9 @@ const app = {
   talk: null,            // TalkSource while the Talk tab is active
   recorder: null,        // Recorder while Webcam live is active
   session: null,         // SessionRunner while a guided session runs
+  layout: LAYOUT,        // 'hero' | 'equal'
+  playlist: null,        // {ids, i} while a quick-start playlist runs (clips play once, in order, then wrap)
+  capture: null,         // {dt} while a frame-accurate capture drives the page (stepFrame instead of rAF)
 };
 window.animacy = app; // test / debugging API, extended at the bottom
 
@@ -137,6 +157,11 @@ async function loadRobot(name, container, { forAb = false } = {}) {
   try {
     await viewer.loadRobot({ urdfUrl, packages, meshScale: profile.description.mesh_scale || 1, cameraDistance, anchorLink });
     loadingEl.hidden = true;
+    // hero framing on the headline robot (and its A/B twin, so A and B match); stand-ins keep the whole-robot frame
+    if (app.layout === 'hero' && name === HERO.robot && !standin) {
+      const got = viewer.frameOnLink(HERO.framing.link, HERO.framing);
+      if (got === null) console.warn(`[animacy] hero framing: link '${HERO.framing.link}' not in ${urdfUrl}; whole-robot frame kept`);
+    }
   } catch (e) {
     loadingEl.textContent = `could not load ${urdfUrl}`;
     loadingEl.classList.add('err');
@@ -192,7 +217,17 @@ function createViewport(name, { before = null, removable = false } = {}) {
   const parent = $('viewports');
   if (before) parent.insertBefore(sec, before); else parent.insertBefore(sec, $('webcam-thumb'));
   if (removable) sec.querySelector('.vp-close').addEventListener('click', () => removeRobot(name));
+  layoutViewports();
   return sec;
+}
+
+// Column widths of the visible viewports, in DOM order: in the hero layout the lamp (and its
+// A/B twin) get HERO.weight, everything else 1; `?layout=equal` gives every viewport 1.
+function layoutViewports() {
+  const secs = [...$('viewports').querySelectorAll('section.viewport')].filter((s) => !s.hidden);
+  const w = (s) => (app.layout === 'hero' && (s.dataset.robot === HERO.robot || s.dataset.robot === `${HERO.robot}-ab`) ? HERO.weight : 1);
+  $('viewports').style.gridTemplateColumns = secs.map((s) => `${w(s).toFixed(4)}fr`).join(' ');
+  document.body.classList.toggle('hero', app.layout === 'hero');
 }
 
 function createJointPanel(R) {
@@ -264,6 +299,7 @@ function removeRobot(name) {
   delete app.robots[name];
   app.robotNames = app.robotNames.filter((n) => n !== name);
   layoutReadouts();
+  layoutViewports();
   fillModeSelect();
   fillAddRobotPicker();
 }
@@ -434,6 +470,7 @@ async function setSource(kind) {
   if (kind === 'model') kind = 'talk'; // old name
   if (kind === app.sourceKind && kind !== 'webcam' && kind !== 'listen') { return; }
   const prev = app.sourceKind;
+  app.playlist = null;
   stopSource();
   app.talk = null;
   app.sourceKind = kind;
@@ -458,6 +495,7 @@ async function setSource(kind) {
       await startWebcam();
     } else if (kind === 'talk') {
       const t = new TalkSource({ backends: app.backends, backend: $('talk-backend').value, onStatus: talkStatus, loop: app.loop });
+      t.manualClock = !!app.capture;
       app.source = t;
       app.talk = t;
       const avail = app.backends.available();
@@ -557,18 +595,19 @@ function fillBackendSelects() {
   }
 }
 
-async function setClip(id) {
+async function setClip(id, { fromPlaylist = false } = {}) {
   const kind = app.sourceKind;
   const entry = (app.clips[kind] || []).find((e) => e.id === id);
   if (!entry) throw new Error(`unknown clip ${id}`);
+  if (!fromPlaylist) app.playlist = null;
   app.clipId = id;
   $('clip-select').value = id;
   setStatus(`loading ${entry.label}…`);
   const track = await getTrack(entry);
   stopSource();
   const Src = entry.synthetic ? SyntheticSource : ClipSource;
-  app.source = new Src(track, { loop: app.loop, speed: app.speed });
-  if (params.get('autoplay') === '0') app.source.pause();
+  app.source = new Src(track, { loop: fromPlaylist ? false : app.loop, speed: app.speed });
+  if (params.get('autoplay') === '0' && !fromPlaylist) app.source.pause();
   if (track.kind === 'joint') restAll(track.robot);
   else for (const R of Object.values(app.robots)) for (const rt of Object.values(R.retargeters)) rt.reset();
   $('scrub').max = String(track.duration || 1);
@@ -690,6 +729,7 @@ async function setAb(on) {
   $('ab-select').disabled = !on;
   const vp = $('vp-lamp-ab');
   vp.hidden = !on;
+  layoutViewports();
   if (!on) { if (app.ab.source) app.ab.source.pause(); return; }
   try {
     if (!app.ab.viewer) {
@@ -702,6 +742,64 @@ async function setAb(on) {
   } catch (e) {
     reportError('A/B', e);
     app.ab.on = false; $('ab').checked = false; vp.hidden = true;
+    layoutViewports();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lamp quick-start: one click → a demo state (also `animacy.demo(name)`)
+// ---------------------------------------------------------------------------
+async function runDemo(name, { say = true } = {}) {
+  if (!DEMOS[name]) throw new Error(`unknown demo ${name} (have ${Object.keys(DEMOS).join(', ')})`);
+  for (const b of $('lamp-quickstart').querySelectorAll('button[data-demo]')) b.classList.toggle('active', b.dataset.demo === name);
+  if (name === 'ab') {
+    await setSource('canonical');
+    await setClip('synth/cal_nod');
+    await setAb(true);
+    if (app.clips.native.some((e) => e.id === 'lamp/nod')) await setAbClip('lamp/nod');
+    app.loop = true; $('loop').checked = true; app.source.loop = true;
+    app.source.play();
+    setStatus('A/B: left = a human nod retargeted through the lamp\'s ROBOT.md · middle = the vendor\'s own nod CSV, raw · right = the same human nod on Reachy', 'ok');
+  } else if (name === 'human') {
+    await setSource('canonical');
+    await setAb(false);
+    const ids = DEMO_HUMAN_PLAYLIST.filter((id) => app.clips.canonical.some((e) => e.id === id));
+    if (!ids.length) throw new Error('calibration clips missing');
+    await setClip(ids[0], { fromPlaylist: true });
+    app.playlist = { ids, i: 0 };
+    app.source.play();
+    setStatus(`playlist: ${ids.map((id) => id.replace('synth/cal_', '')).join(' → ')} — human motion through each ROBOT.md`, 'ok');
+  } else if (name === 'talk') {
+    await setSource('talk');
+    await setAb(false);
+    $('talk-text').value = DEMO_TALK_LINE;
+    if (app.backends.available().includes('retrieval')) { $('talk-backend').value = 'retrieval'; app.talk.backend = 'retrieval'; }
+    if ([...$('talk-voice').options].some((o) => o.value === 'af_heart')) $('talk-voice').value = 'af_heart';
+    $('talk-intent').value = '';
+    if (say) return sayText(DEMO_TALK_LINE);
+  }
+  return null;
+}
+
+/** Playlist transport: when the current clip has played once, start the next; after the last, wrap. */
+function advancePlaylist() {
+  const pl = app.playlist;
+  if (!pl || !app.source || !app.source.finished) return;
+  pl.i = (pl.i + 1) % pl.ids.length;
+  const id = pl.ids[pl.i];
+  app.playlist = null;   // setClip must not see a stale entry while it awaits
+  setClip(id, { fromPlaylist: true }).then(() => { app.playlist = pl; if (app.source) app.source.play(); }).catch((e) => reportError('playlist', e));
+}
+
+function wireQuickstart() {
+  const row = $('lamp-quickstart');
+  for (const [name, d] of Object.entries(DEMOS)) {
+    const b = document.createElement('button');
+    b.dataset.demo = name;
+    b.textContent = d.label;
+    b.title = d.title;
+    b.addEventListener('click', () => runDemo(name).catch((e) => reportError(`demo ${name}`, e)));
+    row.appendChild(b);
   }
 }
 
@@ -823,6 +921,26 @@ function loop(now) {
   requestAnimationFrame(loop);
   const dt = Math.min(0.1, Math.max(0, (now - lastNow) / 1000));
   lastNow = now;
+  if (app.capture) return;   // a frame-accurate capture drives the page through stepFrame()
+  tick(dt, now);
+}
+
+// Frame-accurate capture (web/dev/demo_video.py): the page advances only when the
+// capturer calls stepFrame(dt) and screenshots the result, so frame i of the video is
+// exactly i·dt of clip time on every source, however slow the renderer is.
+function setCapture(on, dt = 1 / 30) {
+  app.capture = on ? { dt } : null;
+  $('fps').hidden = !!on;
+  if (app.talk) app.talk.manualClock = !!on;
+}
+
+function stepFrame(dt = null) {
+  const d = dt === null ? (app.capture ? app.capture.dt : 1 / 30) : dt;
+  tick(d, performance.now());
+  return { time: app.source && app.source.time, playing: !!(app.source && app.source.playing), finished: !!(app.source && app.source.finished), kind: app.sourceKind, clip: app.clipId };
+}
+
+function tick(dt, now) {
   try {
     if (app.source) {
       const frame = app.source.update(dt);
@@ -833,6 +951,7 @@ function loop(now) {
         $('time').textContent = `${s.time.toFixed(2)} / ${s.duration.toFixed(2)} s`;
         const glyph = s.playing ? '❚❚' : '▶';
         if ($('play').textContent !== glyph) $('play').textContent = glyph;
+        if (app.playlist && s.finished) advancePlaylist();
       }
       if (app.sourceKind === 'webcam' && app.webcam) {
         const w = app.webcam;
@@ -855,9 +974,9 @@ function loop(now) {
     }
     for (const n of app.robotNames) if (app.robots[n]) app.robots[n].viewer.render();
     readoutAcc += dt;
-    if (readoutAcc >= 0.05) { readoutAcc = 0; updateReadouts(); }
+    if (readoutAcc >= 0.05 || app.capture) { readoutAcc = 0; updateReadouts(); }
     fpsAcc.n++;
-    if (now - fpsAcc.t >= 1000) {
+    if (now - fpsAcc.t >= 1000 && !app.capture) {
       app.fps = (fpsAcc.n * 1000) / (now - fpsAcc.t);
       $('fps').textContent = `${app.fps.toFixed(0)} fps`;
       fpsAcc = { n: 0, t: now };
@@ -920,10 +1039,11 @@ async function boot() {
   manifest = await fetchJsonOrNull('manifest.json');
   if (!manifest) console.warn('[animacy] web/manifest.json missing — probing for files instead (run python web/dev/build_manifest.py)');
   buildReadouts();
-  // headline pair first (lamp left of the A/B slot, reachy right of it), then any ?robots=… extras
+  layoutViewports();
+  // headline pair: the lamp first (left of the A/B slot, hero-framed), then the reachy, then any ?robots=… extras
   const wanted = (params.get('robots') || '').split(',').map((s) => s.trim()).filter(Boolean);
   const headline = HEADLINE_ROBOTS.filter((n) => manifestRobots().includes(n));
-  await Promise.allSettled(headline.map((n) => addRobot(n, { headline: true, before: n === 'lamp' ? $('vp-lamp-ab') : null }).catch(() => null)));
+  for (const n of headline) await addRobot(n, { headline: true, before: n === 'lamp' ? $('vp-lamp-ab') : null }).catch(() => null);
   for (const n of wanted) if (!app.robots[n] && manifestRobots().includes(n)) await addRobot(n).catch(() => null);
   await discoverClips();
   app.backends = new MotionBackends({ baseUrl: 'models/', bundle: (manifest && manifest.bundle) || {}, onStatus: talkStatus });
@@ -931,6 +1051,7 @@ async function boot() {
   fillModeSelect();
   fillAddRobotPicker();
   wireUi();
+  wireQuickstart();
   $('add-robot').addEventListener('change', (e) => { const n = e.target.value; e.target.value = ''; if (n) addRobot(n).catch(() => null); });
   requestAnimationFrame((t) => { lastNow = t; fpsAcc.t = t; loop(t); });
   const kind = params.get('source') || 'native';
@@ -962,6 +1083,16 @@ Object.assign(app, {
   manifestRobots,
   say: sayText,
   sayAudio,
+  demo: runDemo,
+  demos: () => Object.keys(DEMOS),
+  // frame-accurate capture (web/dev/demo_video.py): setCapture(true) parks the rAF loop; stepFrame(dt) advances + renders
+  setCapture, stepFrame,
+  layoutInfo: () => ({
+    layout: app.layout,
+    columns: $('viewports').style.gridTemplateColumns,
+    widths: Object.fromEntries([...$('viewports').querySelectorAll('section.viewport')].filter((s) => !s.hidden).map((s) => [s.dataset.robot, s.getBoundingClientRect().width])),
+    hero: app.robots[HERO.robot] ? app.robots[HERO.robot].viewer.hero || null : null,
+  }),
   record: {
     start: (o) => app.recorder && app.recorder.start(o),
     stop: () => app.recorder && app.recorder.stop(),

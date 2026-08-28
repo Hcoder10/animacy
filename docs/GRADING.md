@@ -1,10 +1,24 @@
 # Blind motion grading (the acceptance gate)
 
 The project's definition of done is not a held-out metric; it is a judge. Kimi
-K3, told nothing about how a clip was made, must rate the learned model's
-motion **>= 8/10 on five distinct movements, on each robot**. This document is
+K3, told nothing about how a clip was made, must rate animacy's motion
+**>= 8/10 on five distinct movements, on each robot**. This document is
 how that judgement is produced, what makes it blind, what the pass rule is,
 and what it cannot see.
+
+**Which source is under test.** Run 1 gated the learned `model` source. From
+run 2 the gate is `--gate-source auto`, which resolves to whatever
+`web/models/model.json` actually ships as `default_backend` — currently
+`retrieval` — on the principle that a project should be judged on what it
+ships, not on its most flattering component. This is not a softer target:
+every source (`model`, `retrieval`, `envelope`, plus any ablation variant) is
+scored in every run and reported side by side, and **in run 3 the learned
+`model` source fails too** (min 5.0 on both robots). Nothing has ever passed.
+
+Related: [`RESULTS.md`](RESULTS.md) for the measured numbers this gate sits on
+top of, [`MODEL.md`](MODEL.md) for the sources being judged,
+[`RETARGET.md`](RETARGET.md) for the mapping the clips are rendered through,
+and [`README.md`](README.md) for the full docs index.
 
 The gate is owned by `animacy/grade/`. The rubric (`rubric.py`) and the pass
 rule (`run.gate`) are not to be edited by the streams they judge (model,
@@ -302,3 +316,44 @@ FAIL (6.0 / 5.0 / 6.0 / 7.0 / 5.0), Reachy FAIL (6.0 / 7.0 / 7.0 / 6.0 /
 0.0 (no contamination); vendor calibration 6.2 / 6.0; held-out tag
 resolution 4/5. The learned source on the lamp went from "too restless"
 (run 1) to "essentially a still image" (run 2).
+
+**Run 3 (latest)**: `docs/evidence/grading/20260827_1501_run3.md`, mapping v2
+final (1.4x envelope) + gesture-prototype / energy-floor retrieval + intent
+v3, `checkpoints/v2a`, gate = shipped default `retrieval` on the sealed
+held-out lines: **lamp FAIL** (6.0 / 5.0 / 6.0 / 7.0 / 6.0, min 5.0),
+**Reachy FAIL** (6.0 / 5.0 / 6.0 / 7.0 / 7.0, min 5.0). Best-of-seeds would
+still fail on both. Tuning-minus-heldout gap +0.0 / +0.2, so still no sign the
+motion was tuned to the known lines. Judge self-consistency on identical
+clips: mean |overall gap| 0.8 over 5 pairs.
+
+**Vendor calibration, run 3: the vendors' own hand-authored clips score lamp
+6.6 (5 clips, calibration OK) and reachy_mini 5.6 (5 clips).** The 8.0 bar is
+therefore above what a shipped, hand-made vendor clip earns from this judge —
+the gate asks for better-than-vendor, not parity, and nothing in this project
+has met it.
+
+Head to head on the lamp's held-out lines, shipped `retrieval` vs the `vendor`
+column: greeting 6.0/6.0, agreement 5.0/6.0, doubt 6.0/7.0, **excitement
+7.0/6.0**, thinking 6.0/8.0 — level or better on 2 of 5, behind on 3, mean 6.0
+vs 6.6. (The tuning-lines table reads thinking 7.0; that is not the gate and
+must not be quoted as if it were.)
+
+**The reachy_mini half of run 3 is not trustworthy and we do not quote it.**
+Its calibration line reads `BROKEN - vendor clips average below the minimum:
+the rendering or the rubric is broken, candidate scores are not trustworthy`
+(vendor mean 5.6 against a 6.0 minimum). Shipped retrieval averaged 6.2 there,
+*above* the vendor clips, but a calibration failure means the reel or the
+rubric misbehaved on that robot, so the comparison is void — it is reported,
+not claimed. Fixing reachy calibration is the first job of run 4. That is the honest reading, and it is why no "passes the gate"
+claim appears anywhere in the repo. Across the three runs the gate has never
+passed; run 3 also added a `retrieval_off` ablation (prototype bias and energy
+floor disabled) which scores below shipped retrieval on both robots
+(min 4.0 lamp / 5.0 reachy), the one signal that those two additions help.
+
+A note on what the gate can and cannot settle: the judge reads video only (it
+reports `has_audio=True` but cannot listen), so `timing` measures rhythm
+plausibility against the transcript card and the burned-in loudness strip, not
+audio sync; the pass rule uses `overall` only. Scores cluster in a narrow band
+because all sources produce smooth, low-amplitude motion — the judge's own
+notes say physicality is uniformly fine and "intent and energy are the main
+differentiators".

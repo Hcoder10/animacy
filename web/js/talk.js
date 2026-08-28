@@ -233,11 +233,18 @@ export class TalkSource extends MotionSource {
     this._startedAt = 0;        // ctx.currentTime when playback (re)started
     this.busy = false;
     this.last = null;           // {text, backend, seconds, ms}
+    this.lastAudio = null;      // {audio: Float32Array, sr} of the last utterance (frame-accurate capture muxes it)
+    // Frame-accurate capture (web/dev/demo_video.py): with `manualClock` the clip time advances
+    // by the dt handed to update() instead of the AudioContext, and nothing is played — the
+    // captured frames and the muxed waveform then share one clock by construction.
+    this.manualClock = false;
+    this._manualTime = 0;
   }
 
   get duration() { return this.track ? this.track.duration : 0; }
   get time() {
     if (!this.track) return 0;
+    if (this.manualClock) return Math.min(this.duration, this._manualTime);
     if (!this.playing) return this._offset;
     return Math.min(this.duration, this._offset + (this.ctx.currentTime - this._startedAt));
   }
@@ -303,6 +310,7 @@ export class TalkSource extends MotionSource {
     this.track = framesToTrack(res.frames, label.slice(0, 40));
     this.buffer = ctx.createBuffer(1, audio.length, sr);
     this.buffer.copyToChannel(Float32Array.from(audio), 0);
+    this.lastAudio = { audio: Float32Array.from(audio), sr };
     this.last = {
       text: label, backend: res.backend, arch: res.arch || null, seconds: audio.length / sr, ttsMs, motionMs: tMotion,
       codes: res.codes ? res.codes.length : 0, frames: res.frames.length, amplitude: res.amplitude ?? null,
@@ -323,6 +331,14 @@ export class TalkSource extends MotionSource {
   }
 
   _startAudio(offset) {
+    if (this.manualClock) {   // capture: no playback, the clock is update()'s dt
+      this._stopAudio();
+      this._manualTime = offset;
+      this._offset = offset;
+      this.playing = true;
+      this.finished = false;
+      return;
+    }
     const ctx = this._ensureCtx();
     this._stopAudio();
     if (!this.buffer) return;
@@ -351,6 +367,7 @@ export class TalkSource extends MotionSource {
     const was = this.playing;
     this._stopAudio();
     this._offset = Math.min(Math.max(t, 0), this.duration);
+    this._manualTime = this._offset;
     this.playing = false;
     this.finished = false;
     if (was) this._startAudio(this._offset);
@@ -359,6 +376,13 @@ export class TalkSource extends MotionSource {
 
   update(_realDt) {
     if (!this.track) return null;
+    if (this.manualClock && this.playing) {
+      this._manualTime += Math.max(0, _realDt);
+      if (this._manualTime >= this.duration) {
+        if (this.loop) this._manualTime = this.duration > 0 ? this._manualTime % this.duration : 0;
+        else { this._manualTime = this.duration; this._offset = this.duration; this.playing = false; this.finished = true; }
+      }
+    }
     const t = this.time;
     const seek = !!this._pendingSeek;
     const dt = Math.max(1e-4, this.playing ? t - (this._lastT ?? t) : 1 / RATE_HZ);

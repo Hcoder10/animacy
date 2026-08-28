@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>animacy — document (b-roll)</title>
+<style>
+  /* Same palette as term.html: a file open in a plain dark editor. */
+  :root {
+    --bg:      #14161b;
+    --chrome:  #1c1f26;
+    --br:      #2a2e37;
+    --fg:      #d6dae1;
+    --dim:     #8b93a1;
+    --gutter:  #4d5462;
+    --head:    #e8ebef;
+    --key:     #7aa2d8;
+    --str:     #b5c98f;
+    --num:     #d9a05b;
+    --rule:    #6f7684;
+    --mark:    #f0c674;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 1920px; height: 1080px; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font-family: "Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", "Courier New", monospace;
+    -webkit-font-smoothing: antialiased;
+  }
+  #chrome {
+    height: 52px; background: var(--chrome); border-bottom: 1px solid var(--br);
+    display: flex; align-items: center; padding: 0 24px; gap: 16px;
+  }
+  #chrome .path { font-size: 20px; color: var(--head); }
+  #chrome .meta { font-size: 18px; color: var(--dim); margin-left: auto; }
+  #view { height: calc(1080px - 52px); overflow: hidden; position: relative; }
+  #inner { padding: 30px 56px 44px 20px; will-change: transform; }
+  .row { display: flex; font-size: 23px; line-height: 36px; white-space: pre-wrap; word-break: break-word; }
+  .row .ln {
+    flex: 0 0 84px; text-align: right; padding-right: 26px; color: var(--gutter);
+    user-select: none; font-size: 20px;
+  }
+  .row .tx { flex: 1; }
+  .t-head  { color: var(--head); font-weight: 600; }
+  .t-key   { color: var(--key); }
+  .t-num   { color: var(--num); }
+  .t-str   { color: var(--str); }
+  .t-rule  { color: var(--rule); }
+  .t-dim   { color: var(--dim); }
+  .t-mark  { color: var(--mark); }
+</style>
+</head>
+<body>
+  <div id="chrome">
+    <span class="path" id="doc-path">robots/lamp/ROBOT.md</span>
+    <span class="meta" id="doc-meta"></span>
+  </div>
+  <div id="view"><div id="inner"></div></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const view = $('view'), inner = $('inner');
+  const doc = { ready: false, done: false, t: 0, total: 0, maxOffset: 0, hold: 0.8, pxPerSec: 46 };
+
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // Light, honest highlighting for markdown + YAML front matter. Never rewrites
+  // the text, only wraps spans around what is already there.
+  function colorize(line) {
+    const t = line;
+    if (/^---\s*$/.test(t)) return `<span class="t-rule">${esc(t)}</span>`;
+    if (/^#{1,6}\s/.test(t)) return `<span class="t-head">${esc(t)}</span>`;
+    if (/^\s*\|/.test(t)) {
+      return esc(t).replace(/(-?\d+(?:\.\d+)?)/g, '<span class="t-num">$1</span>');
+    }
+    const m = t.match(/^(\s*-?\s*)([A-Za-z_][A-Za-z0-9_.]*)(:\s*)(.*)$/);
+    if (m) {
+      let val = esc(m[4]);
+      val = val.replace(/(-?\d+(?:\.\d+)?)/g, '<span class="t-num">$1</span>');
+      val = val.replace(/(&quot;[^&]*&quot;|'[^']*')/g, '<span class="t-str">$1</span>');
+      return `${esc(m[1])}<span class="t-key">${esc(m[2])}</span>${esc(m[3])}${val}`;
+    }
+    if (/^\s*[-*]\s/.test(t)) return esc(t).replace(/(-?\d+(?:\.\d+)?)/g, '<span class="t-num">$1</span>');
+    if (/^\s*$/.test(t)) return '';
+    return `<span class="t-dim">${esc(t)}</span>`;
+  }
+
+  doc.init = (data) => {
+    $('doc-path').textContent = data.path || '';
+    $('doc-meta').textContent = data.meta || '';
+    doc.pxPerSec = data.pxPerSec || 46;
+    doc.hold = data.hold == null ? 0.8 : data.hold;
+    doc.plain = !!data.plain;
+    const lines = String(data.text || '').replace(/\r\n/g, '\n').split('\n');
+    inner.innerHTML = lines.map((l, i) =>
+      `<div class="row"><span class="ln">${data.noGutter ? '' : (i + 1)}</span>`
+      + `<span class="tx">${doc.plain ? esc(l) || '&nbsp;' : (colorize(l) || '&nbsp;')}</span></div>`).join('');
+    const viewH = view.clientHeight;
+    if (data.fit) {
+      // shrink the type until the whole excerpt is on screen at once, then hold
+      // it still: for a table, reading beats travelling.
+      inner.style.paddingBottom = '30px';
+      let px = 23;
+      for (let i = 0; i < 14 && inner.scrollHeight > viewH - 24 && px > 15; i++) {
+        px -= 0.75;
+        setSize(px);
+      }
+      doc.fontPx = px;
+      doc.maxOffset = Math.max(0, inner.scrollHeight - viewH + 24);
+      doc.scrollS = doc.maxOffset / Math.max(doc.pxPerSec, 1);
+      doc.total = (data.seconds || 11) + doc.scrollS;
+    } else {
+      // the scroll runs from the top to the last line, then holds
+      doc.maxOffset = Math.max(0, inner.scrollHeight - viewH);
+      doc.scrollS = doc.maxOffset / doc.pxPerSec;
+      doc.total = 0.6 + doc.scrollS + doc.hold;
+    }
+    doc.t = 0; doc.done = false;
+    render();
+  };
+
+  function setSize(px) {
+    for (const el of document.querySelectorAll('.row')) {
+      el.style.fontSize = px.toFixed(2) + 'px';
+      el.style.lineHeight = (px * 1.52).toFixed(2) + 'px';
+    }
+    for (const el of document.querySelectorAll('.row .ln')) {
+      el.style.flexBasis = (px * 3.6).toFixed(1) + 'px';
+      el.style.fontSize = (px * 0.87).toFixed(2) + 'px';
+    }
+  }
+
+  function render() {
+    const t = doc.t;
+    const u = doc.scrollS > 0 ? Math.max(0, Math.min(1, (t - 0.6) / doc.scrollS)) : 1;
+    // cubic ease-in-out over the whole travel
+    const e = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+    inner.style.transform = `translateY(${-(e * doc.maxOffset).toFixed(2)}px)`;
+  }
+
+  doc.stepFrame = (dt) => {
+    doc.t += dt;
+    render();
+    if (doc.t >= doc.total) doc.done = true;
+    return { t: doc.t, done: doc.done };
+  };
+
+  window.doc = doc;
+  doc.ready = true;
+})();
+</script>
+</body>
+</html>

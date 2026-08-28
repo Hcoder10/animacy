@@ -149,6 +149,16 @@ def test_intent_rule_and_retrieval_bonus(trained):
     assert loud.meta["proto_mean"] is not None and loud.meta["energy"] is not None
     off = retrieve(idx, feats, speaking, model, intent="excitement", proto_weight=0.0, energy_floor=0)
     assert off.meta["proto_weight"] == 0.0 and off.validate() == []
+    # gesture placement: library present, accents found, a gesture lands on each accent, A/B knob disables it
+    assert idx.gestures and set(idx.gestures) == {"agreement", "doubt", "excitement", "thinking", "greeting"}
+    placed = retrieve(idx, feats, speaking, model, intent="agreement", gesture_placement=1)
+    gp = placed.meta["gesture_placement"]
+    assert placed.validate() == [] and gp["accents"]["accents"] and len(gp["placements"]) == len(gp["accents"]["accents"])
+    assert all(p["peak_at"] == a for p, a in zip(gp["placements"], gp["accents"]["accents"]))
+    think = retrieve(idx, feats, speaking, model, intent="thinking", gesture_placement={"enabled": True, "seed": 2})
+    assert think.meta["gesture_placement"]["placements"][0]["kind"] == "tilt-and-hold"
+    plain = retrieve(idx, feats, speaking, model, intent="agreement", gesture_placement=0)
+    assert plain.meta["gesture_placement"] is None
     clip = generate(model, feats, speaking, seed=1, intent="No way, that is incredible news!")
     assert clip.validate() == [] and clip.meta["intent"]["tag"] == "excitement" and clip.meta["amplitude"] > 1.0
     # the audio-only proxy runs end to end too

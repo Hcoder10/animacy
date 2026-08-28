@@ -6,6 +6,12 @@ the industrial version of last night's `data_fetch_more.py` / `data_capture_batc
 license rules, same drop rule, same clip format, plus a queue, chunking, a face prescreen, N capture
 workers, and rolling pushes so the whole thing runs on a machine with 18 GB of free disk.
 
+Context: [`CANONICAL.md`](CANONICAL.md) defines the clip format this produces,
+[`MODEL.md`](MODEL.md) is what consumes it, and [`RESULTS.md`](RESULTS.md)
+records what each corpus size actually bought. Docs index: [`README.md`](README.md).
+The curated corpus that today's shipped numbers come from is **73 clips /
+320.8 valid minutes / 37 speakers**; this pipeline is the path past that.
+
 Hub dataset: **`squaredcuber/animacy-human-motion-large`** (new repo; the curated 73-clip
 `squaredcuber/animacy-human-motion` stays as is). Clips are directories
 `clips/<shard>/<name>/{motion.parquet, audio.opus, meta.json}`; `index.json` is one row per clip;

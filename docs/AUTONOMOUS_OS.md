@@ -9,6 +9,13 @@ request shapes and the CSV checks are taken from the vendor's code, and the
 URDF/sign work is verified in simulation only (`robots/lamp/urdf/README.md`).
 If you own a unit and run this, please open an issue with what you saw.
 
+Background: [`ROBOT_MD_SPEC.md`](ROBOT_MD_SPEC.md) is the profile format,
+[`RETARGET.md`](RETARGET.md) the mapping and the speed-cap rule this relies on,
+[`CANONICAL.md`](CANONICAL.md) the human channels, and [`RESULTS.md`](RESULTS.md)
+what has actually been measured. Docs index: [`README.md`](README.md).
+Paths written as `hal/...` and `SAFETY.md` below are **files in the vendor's
+autonomous-os repository**, not in this one.
+
 ## What the Lamp expects
 
 - Joints, in servo order: `base_yaw, base_pitch, elbow_pitch, wrist_roll, wrist_pitch`

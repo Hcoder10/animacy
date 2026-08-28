@@ -189,6 +189,64 @@ export class RobotViewer {
   }
 
   /**
+   * Hero framing: aim at one link (e.g. the lamp's head) so that its projection
+   * fills `fill` of the viewport height, with the link's centre `anchor` of the
+   * way up the viewport (0.5 = centred, higher = the link sits above centre so
+   * the body below it stays in frame). The camera direction is the named view
+   * ('iso' = 3/4 front). Solved by projecting the link's bounding box and
+   * correcting distance + target twice (perspective is ~linear in 1/distance,
+   * so two passes land within a percent). Returns the measured fill, or null
+   * when the link is not in the URDF (the caller keeps the whole-robot frame).
+   * @param {string} link
+   * @param {{fill?: number, anchor?: number, view?: string}} [o]
+   */
+  frameOnLink(link, { fill = 0.45, anchor = 0.58, view = 'iso' } = {}) {
+    const obj = this.robot && this.robot.links[link];
+    if (!obj) return null;
+    this.scene.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(obj);
+    if (box.isEmpty() || !Number.isFinite(box.min.x)) return null;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    // start from the bounding-sphere estimate, then correct by measurement
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
+    let d = Math.max(0.05, (0.5 * size.length()) / (fill * tanHalf));
+    this.bounds = this.bounds || {};
+    this.controls.target.copy(center);
+    let measured = null;
+    for (let pass = 0; pass < 3; pass++) {
+      this.bounds.distance = d;
+      this.setView(view);
+      this.camera.updateMatrixWorld(true);
+      measured = this._projectBox(box);
+      if (!measured) break;
+      d *= measured.fill / fill;                           // size correction
+      const dy = (measured.cy - (2 * anchor - 1)) * 0.5;   // NDC → fraction of the viewport height
+      this.controls.target.y += dy * (2 * d * tanHalf);     // move the target so the link centre lands on `anchor`
+    }
+    this.bounds.center = this.controls.target.clone();
+    this.bounds.size = size.length();
+    this.bounds.box = box;
+    this.bounds.distance = d;
+    this.hero = { link, fill, anchor, view, measured: measured ? measured.fill : null };
+    this.setView(view);
+    return this.hero.measured;
+  }
+
+  /** Projected extent of a world-space box: fill = height as a fraction of the viewport, cy = centre in NDC y. */
+  _projectBox(box) {
+    let lo = Infinity, hi = -Infinity;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < 8; i++) {
+      v.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
+      v.project(this.camera);
+      if (!Number.isFinite(v.y)) return null;
+      lo = Math.min(lo, v.y); hi = Math.max(hi, v.y);
+    }
+    return { fill: (hi - lo) / 2, cy: (hi + lo) / 2 };
+  }
+
+  /**
    * Named camera positions around the current target. 'front' looks at the
    * robot from where a person would stand (+x): the robot's LEFT is on the
    * viewer's RIGHT — use it to check signs.

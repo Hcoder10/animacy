@@ -82,3 +82,15 @@ A clip is a directory:
 Python: `animacy.schema.HumanClip` reads/writes this; `CHANNELS` is the ordered
 column list and the single source of truth for every consumer (retarget, model,
 web JSON export).
+
+## Where this is used
+
+- [`ROBOT_MD_SPEC.md`](ROBOT_MD_SPEC.md) — the other contract: how a robot
+  declares its mapping *from* these channels. [`ADD_A_ROBOT.md`](ADD_A_ROBOT.md)
+  is the walkthrough.
+- [`RETARGET.md`](RETARGET.md) — how a channel becomes a joint value, and the
+  speed-cap guarantee.
+- [`MODEL.md`](MODEL.md) — what predicts these channels from speech.
+- [`HARVEST.md`](HARVEST.md) — how clips in this format are collected at scale.
+- [`LEROBOT.md`](LEROBOT.md) — how they are exported for imitation learning.
+- Docs index: [`README.md`](README.md).

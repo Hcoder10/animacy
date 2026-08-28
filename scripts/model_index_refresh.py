@@ -78,6 +78,7 @@ def main() -> int:
     ap.add_argument("--ckpt", default="checkpoints/v2a", help="checkpoint used for --eval (tokenizer / stats) and --reexport-json")
     ap.add_argument("--reexport-json", action="store_true", help="rewrite <web-out>/model.json only (fp16, archs ar)")
     ap.add_argument("--proto-weight", type=float, default=0.25, help="gesture-prototype bonus recorded as the bundle default")
+    ap.add_argument("--no-placement", action="store_true", help="record gesture_placement.enabled = false as the bundle default")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
 
@@ -102,7 +103,8 @@ def main() -> int:
         b, j = idx.save(a.server_out, "retrieval")
         mem = RetrievalIndex.memory_estimate(len(idx))
         report["server"] = {"dir": a.server_out, "windows": len(idx), "mb_on_disk": round((os.path.getsize(b) + os.path.getsize(j)) / 1e6, 2),
-                            "ram_mb_fp16_motion": round(mem["total_mb"], 1), "cap": info["weights"] if info else None}
+                            "ram_mb_fp16_motion": round(mem["total_mb"], 1), "cap": info["weights"] if info else None,
+                            "gesture_library": {t: len(v) for t, v in (idx.gestures or {}).items()}}
         print(f"server index -> {a.server_out}: {len(idx)} windows, {report['server']['mb_on_disk']} MB on disk, "
               f"~{report['server']['ram_mb_fp16_motion']} MB RAM; cap weights {report['server']['cap'] or 'none needed'}", flush=True)
     if a.web_out:
@@ -132,7 +134,10 @@ def main() -> int:
             if os.path.exists(info_path):
                 info = json.load(open(info_path, encoding="utf-8"))
                 pp = info.get("postprocess") or {}
-                pp.update({"energy_floor": energy_ref, "proto_weight": a.proto_weight, "settle_s": 0.5, "pitch_floor": -3.0, "amplitude": 1.0})
+                from animacy.model.gesture import PlacementConfig
+
+                pp.update({"energy_floor": energy_ref, "proto_weight": a.proto_weight, "settle_s": 0.5, "pitch_floor": -3.0, "amplitude": 1.0,
+                           "gesture_placement": PlacementConfig(enabled=not a.no_placement).to_dict()})
                 info["postprocess"] = pp
                 json.dump(info, open(info_path, "w", encoding="utf-8"), indent=1)
             print(f"energy floor reference (p60 of standardised RMS over {len(vals)} 3 s windows): {energy_ref:.3f} "
@@ -148,7 +153,9 @@ def main() -> int:
         variants = [("plain", dict(proto_weight=0.0, energy_floor=None)),
                     (f"proto {a.proto_weight} (pseudo-intent from audio arousal)", dict(proto_weight=a.proto_weight, energy_floor=None)),
                     ("energy floor", dict(proto_weight=0.0, energy_floor=energy_ref)),
-                    (f"proto {a.proto_weight} + energy floor", dict(proto_weight=a.proto_weight, energy_floor=energy_ref))]
+                    (f"proto {a.proto_weight} + energy floor", dict(proto_weight=a.proto_weight, energy_floor=energy_ref)),
+                    (f"proto {a.proto_weight} + gesture placement", dict(proto_weight=a.proto_weight, energy_floor=None, gesture_placement=1)),
+                    (f"proto {a.proto_weight} + gesture placement + energy floor", dict(proto_weight=a.proto_weight, energy_floor=energy_ref, gesture_placement=1))]
         rows = {}
         for label, kw in variants:
             if kw.get("energy_floor") is None and "floor" in label:

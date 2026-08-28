@@ -30,10 +30,32 @@ jsDelivr / Google storage:
 | `urdf-loader` (gkjohnson) | 0.13.1 (`src/URDFLoader.js`) | URDF → three.js scene graph, `joint.setJointValue` |
 | `@mediapipe/tasks-vision` | 0.10.21 (`vision_bundle.mjs` + `wasm/`) | `FaceLandmarker`, `PoseLandmarker`, `DrawingUtils` |
 | MediaPipe models | `face_landmarker/float16/1`, `pose_landmarker_lite/float16/1` (storage.googleapis.com) | loaded lazily when Webcam live starts |
-| `onnxruntime-web` | 1.20.1 (`dist/ort.min.mjs`, wasm EP single-threaded, `dist/` for the .wasm) | `web/models/a2m.onnx` + `vq_decoder.onnx` (Talk / Listen) |
+| `onnxruntime-web` | 1.20.1 (`dist/ort.min.mjs`, wasm EP single-threaded, `dist/` for the .wasm) | `web/models/a2m_ar.onnx` + `vq_decoder.onnx` (Talk / Listen) |
 | `kokoro-js` | 1.2.1 (`dist/kokoro.web.js`, self-contained: bundles transformers.js + its own ORT) | Kokoro-82M-v1.0-ONNX, `q8`, WebGPU → wasm fallback; ~90 MB from huggingface.co, cached by the browser |
 
 Webcam live needs a secure context (`localhost` or https) for `getUserMedia`.
+
+### Layout and the Lamp quick-start row
+
+The page opens in the **hero layout**: the Autonomous Lamp loads first and takes
+~62 % of the width (`HERO.weight` in `js/main.js`, applied as the viewports'
+`grid-template-columns`), the Reachy Mini sits beside it, and the lamp's camera
+is aimed at its head — 3/4 front (`iso`), head ≈ 45 % of the viewport height,
+head centre 58 % of the way up (`RobotViewer.frameOnLink`, which projects the
+head link's box and corrects distance and target until the measured fill
+matches; `animacy.layoutInfo().hero.measured` reports it). The A/B lamp gets the
+same framing so A and B match. `?layout=equal` is the plain split (every
+viewport 1fr, every robot framed whole) and what the grader's renderer sets up
+itself. Extra robots from the picker are 1fr columns.
+
+The **Lamp** row above the source tabs holds three one-click demos (`DEMOS` in
+`js/main.js`, also `animacy.demo(name)`):
+
+| button | state it puts the page in |
+|---|---|
+| Vendor nod vs animacy nod (A/B) | canonical `synth/cal_nod` on both robots + the A/B lamp playing the vendor's `nod` CSV raw |
+| Human clip → lamp (look left / brows / lean-in) | a playlist: `cal_look_left_right` → `cal_brows` → `cal_lean_in`, each once, then wraps (`animacy.playlist`) |
+| Talk: "No way, that is incredible news!" | Talk tab, backend `retrieval`, voice `af_heart`, intent from the text (excitement), and says it |
 
 ## How the pieces connect
 
@@ -139,7 +161,7 @@ distributions instead.
   static site never probes for files that would 404. Re-run it after adding
   clips, URDFs or models; on a local `http.server` new files in `web/clips/`
   are picked up anyway. The **Model** tab reads `manifest.models`: with no
-  model present it says "coming soon"; with `a2m.onnx`/`vq_decoder.onnx`
+  model present it says "coming soon"; with `a2m_ar.onnx`/`vq_decoder.onnx`
   present it names them. Nothing is fetched until a runner is wired
   (`ModelSource` in `js/motion_source.js`; the bundle's contract is in
   `web/models/model.json`, written by `animacy/model/export.py`).
@@ -241,3 +263,22 @@ Webcam mode is exercised with Chromium's fake camera (`--use-fake-device-for-med
 to prove it initialises without throwing; the face/pose derivation itself is
 only verifiable with a person in front of a real camera (use the calibration
 clips as the reference for which way each channel should move).
+
+### Demo video (`web/dev/demo_video.py`)
+
+```
+python web/dev/demo_video.py                 # docs/media/animacy_lamp_60s.mp4 (+ lamp_nod_ab_12s.mp4, lamp_nod_ab.gif)
+python web/dev/demo_video.py --headed --gpu  # Kokoro on WebGPU (faster TTS), same output
+python web/dev/demo_video.py --no-tts        # synthetic placeholder voice; the captions say so
+```
+
+Nothing is screen-recorded. The page is parked (`animacy.setCapture(true)`
+stops the rAF loop and hides the fps pill) and advanced one frame at a time
+(`animacy.stepFrame(1/30)` runs one tick: source → retargeters → render →
+readouts), and every frame is a screenshot, so frame *i* is exactly *i*/30 s of
+clip time however slow the renderer is. In capture mode `TalkSource` runs on a
+manual clock (`manualClock`): the real Kokoro voice is synthesised in the page,
+the waveform is pulled out (`talk.lastAudio`) and muxed at the frame the line
+started, so voice and motion share one clock by construction — the same idea as
+the Python runtime and the grader's renderer. Captions and the end card are
+ffmpeg `drawtext`; the shot list is in `docs/SUBMISSION.md`.

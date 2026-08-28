@@ -271,7 +271,8 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
              top_p: float = 0.9, archs: Optional[Sequence[str]] = None, max_runs: Optional[int] = None,
              verbose: bool = True, repeat_penalty: float = 0.0, stay_bias: float = 0.0, stay_energy: float = -0.3,
              settle_s: float = 0.0, pitch_floor: Optional[float] = None, amplitude=1.0,
-             intent_from_audio: bool = False, proto_weight: float = 0.0, energy_floor: Optional[float] = None) -> Dict:
+             intent_from_audio: bool = False, proto_weight: float = 0.0, energy_floor: Optional[float] = None,
+             gesture_placement=None) -> Dict:
     """``intent_from_audio``: the intent layer with no text - retrieval uses the query window's
     own audio arousal for its bonus, and every source's amplitude follows the amplitude rule on
     the run's mean audio arousal (what ``animacy say`` would do without a text intent).
@@ -332,8 +333,17 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
             gen[f"{cn}_shuffled"].append(generate_motion(model, fs, ss, causal=False, arch=arch, amplitude=amp_s, **kw)[0])
             gen[f"{cn}_causal"].append(generate_motion(model, f, s, causal=True, arch=arch, amplitude=amp, **kw)[0])
         if "retrieval" in gen:
-            gen["retrieval"].append(postprocess_motion(index.query(f, s, use_audio_arousal=use_aa, intent_tag=tag_run, proto_weight=proto_weight), s, f, **pp))
-            gen["retrieval_shuffled"].append(postprocess_motion(index.query(fs, ss, use_audio_arousal=use_aa, intent_tag=tag_shuf, proto_weight=proto_weight), ss, fs, **pp_s))
+            r_run = index.query(f, s, use_audio_arousal=use_aa, intent_tag=tag_run, proto_weight=proto_weight)
+            r_shuf = index.query(fs, ss, use_audio_arousal=use_aa, intent_tag=tag_shuf, proto_weight=proto_weight)
+            if gesture_placement not in (None, False, 0) and tag_run is not None:
+                from .gesture import PlacementConfig, place_gestures
+                from .intent import AMPLITUDE_TIERS
+
+                cfg = PlacementConfig.from_any(gesture_placement)
+                r_run, _ = place_gestures(r_run, f, s, index, tag_run, AMPLITUDE_TIERS.get(tag_run, 1.0), cfg)
+                r_shuf, _ = place_gestures(r_shuf, fs, ss, index, tag_shuf, AMPLITUDE_TIERS.get(tag_shuf, 1.0), cfg)
+            gen["retrieval"].append(postprocess_motion(r_run, s, f, **pp))
+            gen["retrieval_shuffled"].append(postprocess_motion(r_shuf, ss, fs, **pp_s))
         gts.append(gt)
         spk.append(s)
 
@@ -387,6 +397,7 @@ def evaluate(model: MotionModel, index: Optional[RetrievalIndex], val_clips: Seq
         "postprocess": {"settle_s": settle_s, "pitch_floor": pitch_floor,
                         "amplitude": (float(amplitude) if np.isscalar(amplitude) else [float(x) for x in amplitude]),
                         "intent_from_audio": intent_from_audio, "proto_weight": proto_weight, "energy_floor": energy_floor,
+                        "gesture_placement": (None if gesture_placement in (None, False, 0) else True),
                         "audio_arousal_mean": (float(np.mean(audio_arousal_runs)) if audio_arousal_runs else None)},
         "codes": codes_out,
     }

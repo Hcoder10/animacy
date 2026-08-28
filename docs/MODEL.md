@@ -93,7 +93,8 @@ measured without them.
   `data/raw/sources.json`; the HF dataset card repeats them.
 - Your own webcam (`animacy capture --source 0`): the most valuable data for a
   desk robot is a person at a desk talking to a camera.
-- Reachy's 85 Pollen emotions and the Lamp's 31 clips are *not* training data
+- Pollen's Reachy emotion library (16 moves converted into `robots/reachy_mini/
+  clips/native/`) and the Lamp's 31 vendor recordings are *not* training data
   for the model (they are robot-space, hand-authored); they are the envelope the
   retarget is tuned to and the A/B in the viewer.
 
@@ -102,8 +103,9 @@ measured without them.
 ```
 animacy/features.py          audio features (numpy)      ↔ web/js/features.js
 animacy/model/vq.py          tokenizer                   → web: vq_decoder.onnx
-animacy/model/a2m.py         audio→codes                 → web: a2m.onnx
-animacy/model/retrieval.py   motion matching             ↔ web/js/retrieval.js
+animacy/model/a2m.py         audio→codes (feed-forward)  checkpoints only, not shipped
+animacy/model/a2m_ar.py      audio→codes (autoregressive) → web: a2m_ar.onnx
+animacy/model/retrieval.py   motion matching             ↔ web/js/model.js (retrieval path)
 animacy/model/data.py        clips → training tensors
 animacy/model/train.py       train vq, then a2m; writes checkpoints + metrics
 animacy/model/export.py      ONNX + retrieval index for the web

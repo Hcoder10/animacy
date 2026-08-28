@@ -286,6 +286,25 @@ def _amplitude_tiers() -> Dict:
     return dict(AMPLITUDE_TIERS)
 
 
+def _placement_block(model: MotionModel) -> Dict:
+    from .gesture import PlacementConfig
+
+    cfg = PlacementConfig.from_any((model.info.get("postprocess") or {}).get("gesture_placement"))
+    return {
+        **cfg.to_dict(),
+        "accents": "smoothed (9-frame Hann) feature[64] over the voiced span (speaking=1, else feature[64] > -0.3); peaks >= min_gap_s "
+                   "apart with prominence >= 0.15; N = 1 (< 2.5 s of speech), 2 (2.5-5 s), 3 (> 5 s); the first peak after onset and "
+                   "the last peak are always kept, the rest by height",
+        "library": "retrieval.json: gestures[intent] = top-k windows by proto score with peak_t (frame of max head speed) and dur",
+        "rule": "out = base * gain + sum(gestures): gain = base_gain_idle, base_gain_active under a gesture, hold_gain during a hold; "
+                "each gesture = (segment - segment[0]) * tier * amplitude_boost, added with raised-cosine edges of blend_ms so its peak_t "
+                "lands on the accent; a gesture is picked by a seeded draw among library entries whose dur fits the gap to the next "
+                "accent (else the shortest third); thinking = one tilt-and-hold from the onset held until the last accent then released "
+                "over 2 * blend; excitement = the rise on the first accent, held until the last accent, then dropped; then energy floor "
+                "-> pitch floor -> settle -> clamp. enabled=false or 0 disables (A/B knob).",
+    }
+
+
 def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: str, metrics: Optional[Dict] = None,
                   tol: float = 1e-4, fp16: bool = False, archs: Optional[List[str]] = None, json_only: bool = False) -> Dict:
     """Write ``a2m.onnx``, ``a2m_ar.onnx``, ``vq_decoder.onnx``, ``bigram.bin``, ``model.json`` (+ retrieval
@@ -409,13 +428,15 @@ def export_bundle(model: MotionModel, index: Optional[RetrievalIndex], out_dir: 
             "settle_rule": "end = last frame with speaking=1 (else last frame with feature[64] > -0.3, else clip end); only if end < T: "
                            "w ramps linearly 0->1 over settle_s seconds starting AT end and stays 1 after; motion *= (1 - w); never mid-utterance",
             "proto_rule": "proto_weight * retrieval.proto[intent][window] is added to every window's score; 0 disables (A/B knob)",
+            "gesture_placement": _placement_block(model),
         },
         "detrend": {"channels": list(POSE_CHANNELS), "cutoff_hz": DETREND_HZ,
                     "meaning": "pose channels are the residual above cutoff_hz: output motion is centred on neutral; add the gaze overlay for where to look"},
         "neutral": {"eye_open_l": 0.6, "eye_open_r": 0.6, "gaze_yaw": 0.0, "gaze_pitch": 0.0},
         "retrieval": {"file": "retrieval.json", "bin": "retrieval.bin",
                       "intent_fields": index.arousal is not None,
-                      "proto_fields": index.proto is not None} if index is not None else None,
+                      "proto_fields": index.proto is not None,
+                      "gesture_library": bool(getattr(index, "gestures", None))} if index is not None else None,
         "intent": _intent_block(),
         "default_backend": verdict.get("default_backend", "retrieval"),
         "verdict": verdict,

@@ -288,7 +288,7 @@ def generate(model: MotionModel, features: np.ndarray, speaking: np.ndarray, cau
 def retrieve(index, features: np.ndarray, speaking: np.ndarray, model: Optional[MotionModel] = None,
              intent=None, settle_s: Optional[float] = None, pitch_floor: Optional[float] = None,
              amplitude=None, use_audio_arousal: bool = False, proto_weight: Optional[float] = None,
-             energy_floor: Optional[float] = None, **meta) -> HumanClip:
+             energy_floor: Optional[float] = None, gesture_placement=None, **meta) -> HumanClip:
     """The retrieval source with the same post-processing and intent handling as ``generate``:
     text intent -> arousal bonus + gesture-prototype bonus (``proto_weight``) in the index query,
     amplitude tier, energy floor. Without text the query is plain: the audio-only arousal proxy
@@ -304,6 +304,8 @@ def retrieve(index, features: np.ndarray, speaking: np.ndarray, model: Optional[
         proto_weight = float(pp.get("proto_weight", 0.25))
     if energy_floor is None:
         energy_floor = pp.get("energy_floor", None)
+    if gesture_placement is None:
+        gesture_placement = pp.get("gesture_placement", None)
     intent_obj, target, tag = None, None, None
     if intent is not None:
         from .intent import TAGS, Intent, analyse
@@ -319,6 +321,15 @@ def retrieve(index, features: np.ndarray, speaking: np.ndarray, model: Optional[
     m, ids = index.query(f, s, target_arousal=target, intent_tag=tag, use_audio_arousal=(target is None and use_audio_arousal),
                          proto_weight=proto_weight, return_ids=True)
     stats = model.vq.stats if model is not None else None
+    placement_info = None
+    if tag is not None and gesture_placement not in (None, False, 0):
+        from .gesture import PlacementConfig, place_gestures
+
+        cfg = PlacementConfig.from_any(gesture_placement)
+        if cfg.enabled:
+            # the gesture layer gets the tier x boost itself; the base keeps the plain tier via `amplitude` below
+            m, placement_info = place_gestures(m, f, s, index, tag, float(np.mean(amplitude)) if not np.isscalar(amplitude) else float(amplitude), cfg)
+            amplitude = 1.0
     m = postprocess_motion(m, s, f, settle_s=settle_s, pitch_floor=pitch_floor, amplitude=amplitude,
                            energy_floor=energy_floor, energy_stats=stats)
     proto_mean = None
@@ -328,7 +339,8 @@ def retrieve(index, features: np.ndarray, speaking: np.ndarray, model: Optional[
                           pitch_floor=(None if pitch_floor is None else float(pitch_floor)),
                           amplitude=(float(amplitude) if np.isscalar(amplitude) else [float(x) for x in amplitude]),
                           proto_weight=float(proto_weight), proto_mean=proto_mean,
-                          energy_floor=(None if not energy_floor else float(energy_floor)), energy=motion_energy(m, stats), **meta)
+                          energy_floor=(None if not energy_floor else float(energy_floor)), energy=motion_energy(m, stats),
+                          gesture_placement=placement_info, **meta)
     if intent_obj is not None:
         clip.meta["intent"] = {k: v for k, v in intent_obj.to_dict().items() if k != "hits"}
     return clip

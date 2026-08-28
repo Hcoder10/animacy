@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
 .venv/
 build/
 dist/
@@ -24,8 +25,12 @@ web/dist/
 
 # scratch
 *.log
+*.log.err
 .DS_Store
 Thumbs.db
+
+# generated joint tables / reports (`animacy retarget -o out/...`, scripts/*_report.py)
+out/
 
 # capture artifacts
 data/models/
@@ -42,4 +47,3 @@ data/grading/
 third_party/autonomous-os/
 third_party/hal-state/
 data/video/
-third_party/autonomous-os/

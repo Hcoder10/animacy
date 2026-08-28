@@ -4,6 +4,12 @@ Goal: after this, `animacy retarget --robot <name>` turns any canonical human
 clip into your robot's motion, the browser viewer shows it on your URDF, and
 the shared motion model drives it live — **without retraining anything**.
 
+The two contracts this page applies: [`CANONICAL.md`](CANONICAL.md) (the human
+channels you are mapping *from*) and [`ROBOT_MD_SPEC.md`](ROBOT_MD_SPEC.md)
+(the file you are writing, field by field, with the rules `animacy check`
+enforces). Read the spec when a step below is ambiguous — it is normative,
+this page is the walkthrough. Index of all docs: [`README.md`](README.md).
+
 You produce exactly one folder:
 
 ```
@@ -25,7 +31,9 @@ robots/<name>/
    control names so exports are 1:1), units, limits, rest pose, `max_speed`
    from the vendor's *safety* file if there is one. If the vendor ships
    recorded moves, take `rest` = median of their idle clip and keep limits
-   inside the p1..p99 envelope of their library (`scripts/clip_envelope.py`).
+   inside the excursion envelope of their library — `scripts/retarget_fit.py
+   --robot <name>` measures that envelope (p5/p50/p95 and velocity p95 per
+   joint) against your mapping and prints a before/after table.
 4. **Write the `default` mapping by function, not anatomy.** Ask, for each
    canonical channel in `docs/CANONICAL.md`: *what on this body does the job?*
    - gaze (`head_yaw`, `head_pitch`) → whatever points the face.
@@ -40,8 +48,8 @@ robots/<name>/
    of the rest pose and of each canonical calibration pose (look left, look up,
    roll, brows, lean in, puppet wave) *through your mapping*, and prints what
    +10 units on each joint does to the head/tip position. Read the PNGs (a
-   coding agent can) before touching the browser. Until that command lands,
-   `robots/so101/dev/render_previews.py` is the worked example.
+   coding agent can) before touching the browser. It renders through
+   matplotlib's Agg backend, so it needs no display and works over SSH.
 7. **Preview in the browser.** `animacy profile export robots/<name>` then open
    `web/` and play a captured clip. Fix directions with `gain: -1`. Play the
    vendor's native clips (if any) first — if *those* look wrong, the URDF axes

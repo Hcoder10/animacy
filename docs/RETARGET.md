@@ -260,6 +260,45 @@ design), 0 violations, stillness 0.43 → 0.41. What still limits the lamp is
 the mapping bounds and `rest`'s position inside them (base_pitch 29° above
 its `min`, wrist_pitch 22.6° from its up-bound), not the gains.
 
+**Round 4 — lamp headroom pass (2026-08-28).** Two data-only changes to
+`retarget.default`, both checked with `scripts/retarget_lamp_clearance.py`
+(URDF FK + sampled link meshes, KD-tree surface distance; the decimated
+vendor meshes are not watertight, so unsigned distance calibrated against
+the vendor library is the signal — the vendor's own clips come within 3.7 mm
+of the lower arm and 122.8 mm of the desk):
+
+1. *Performance pose as mapping `offset`s* (no schema change; `joint = rest +
+   offset + …`, `settle` blends to `rest + offset`, native clips play absolute
+   values and are untouched; the joints table's `rest` stays the vendor's
+   idle median and is where the sinks' `neutral()` returns to). The planar
+   pitch chain gives `elevation = e_rest − Δbase + Δelbow − Δwrist`, so any
+   `Δbase = Δelbow − Δwrist` keeps the gaze: chosen `wrist_pitch +17.4`
+   (−62.4 → −45, up-range 22.6° → 45°), `elbow_pitch +15` (27.6 → 42.6),
+   `base_pitch −2.4` (28.9 → 26.5). FK: elevation −7.91° in both poses; the
+   head moves 28 mm back and 13 mm up (x −23 → −51 mm, z 320 → 333 mm);
+   clearance at the pose 111 mm to the arm, 265 mm above the desk. (A naive
+   "wrist −45 / elbow 30 / base 25" would look 19° down, at the desk.)
+2. *Bounds*: up-side widened to the servo limits where the sweep showed no new
+   contact family — `wrist_pitch min −85 → −90`, `base_pitch min 0 → −10`,
+   `elbow_pitch max 62 → 70`, `wrist_roll ±60/70 → ±75`; down-side
+   **tightened** because that is where contact lives (elbow ≤ 0 with
+   wrist_pitch ≥ +25 puts the head on the lower arm / swivel; base_pitch ≥ 70
+   with elbow ≤ 0 puts it 2 cm above the desk): `elbow_pitch min −5 → 0`,
+   `wrist_pitch max 30 → 25`. Uniform sweep inside the bounds: poses within
+   5 mm of base/swivel/lower arm 50 → 16 per 1000, head min z 17.9 → 28.6 mm,
+   the 32 bound corners unchanged in character (the elbow-flat/head-down
+   corner is the only tight one). `wrist_pitch soft_limit 0.08 → 0.1` (the
+   up-side now has room).
+
+The lamp was then re-fitted alone with the round-3 caps (`--target 1.4
+--vel-cap 2.0 --headroom 1.0`): a trial at `--vel-cap 1.5` (default headroom
+0.9) shrank the yaw/base gains back below round 3 (base_yaw ratio 1.40 →
+1.07, wrist_roll 0.98 → 0.80) because the velocity cap, not the bounds, binds
+those joints, and halved the elbow terms because the +15 performance offset
+had consumed its up-room under a 0.9 headroom. Gaze error under lean is
+0.00° on every case with the wider bounds (the soft limit no longer bites).
+Numbers in §3 once run 4 is graded.
+
 ### 2.2 Gaze preservation (lamp) — URDF FK
 
 Elevation/azimuth of the head's look axis (`[0.70, 0, −0.71]` in the `head`

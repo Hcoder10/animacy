@@ -20,7 +20,11 @@ dependencies = [
 
 [project.optional-dependencies]
 capture = ["mediapipe>=0.10", "opencv-python>=4.9", "soundfile>=0.12", "sounddevice>=0.4"]
-urdf = ["yourdfpy>=0.0.56", "trimesh>=4"]
+# yourdfpy/trimesh: `animacy check`'s URDF limit test. matplotlib: `animacy preview`
+# renders the calibration poses through Agg, so it works headless and in CI.
+urdf = ["yourdfpy>=0.0.56", "trimesh>=4", "matplotlib>=3.7"]
+# talking to a real robot: `animacy say --url`, `animacy mirror --sink`
+robot = ["requests>=2.31"]
 train = ["torch>=2.2", "onnx", "onnxruntime"]
 dev = ["pytest>=8"]
 
@@ -29,3 +33,10 @@ animacy = "animacy.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["animacy*"]
+
+[tool.pytest.ini_options]
+# animacy's own suite only. `third_party/autonomous-os/` is a scratch clone of the
+# vendor repo (gitignored, cloned for evidence runs); collecting it errors out on
+# its own missing deps and has nothing to do with this project.
+testpaths = ["tests"]
+norecursedirs = ["third_party", "data", "checkpoints", "web", ".venv*", "build", "dist"]

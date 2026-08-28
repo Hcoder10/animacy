@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>animacy — podcast set</title>
+  <!-- Inline icon (same as index.html): without one the browser asks the repo root
+       for /favicon.ico, which 404s and makes the renderer report a console error
+       on every run. Nothing here is ever drawn into a frame. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23ffb86b'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%230e1117'/%3E%3C/svg%3E" />
+  <!-- Same CDN pins as web/index.html: urdf-loader reaches for
+       'three/examples/jsm/loaders/STLLoader.js', so both three prefixes are mapped. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+      "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+      "urdf-loader": "https://cdn.jsdelivr.net/npm/urdf-loader@0.13.1/src/URDFLoader.js"
+    }
+  }
+  </script>
+  <style>
+    /* This page is a camera, not an interface: no chrome, no text, nothing that
+       could end up in a frame. #fail only ever shows when the show fails to load. */
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #05060a; overflow: hidden; }
+    #stage { position: fixed; inset: 0; }
+    #stage canvas { display: block; width: 100%; height: 100%; }
+    /* the offscreen viewports the URDFs are parsed in; never drawn, never visible */
+    .oven { position: fixed; left: -32px; top: -32px; width: 8px; height: 8px; visibility: hidden; pointer-events: none; }
+    #fail { position: fixed; inset: auto 0 0 0; padding: 10px 14px; background: #2a0f14; color: #ffd7dd;
+            font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+  <div id="fail" hidden></div>
+  <script type="module" src="js/podcast.js"></script>
+</body>
+</html>

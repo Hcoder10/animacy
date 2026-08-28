@@ -123,6 +123,20 @@
   "amplitude": 1.0,
   "proto_weight": 0.25,
   "energy_floor": 0.6920997007988529,
+  "gesture_placement": {
+   "enabled": true,
+   "k": 25,
+   "blend_ms": 150.0,
+   "base_gain_active": 0.6,
+   "base_gain_idle": 0.8,
+   "hold_gain": 0.4,
+   "amplitude_boost": 1.2,
+   "min_gap_s": 0.8,
+   "seed": 0,
+   "accents": "smoothed (9-frame Hann) feature[64] over the voiced span (speaking=1, else feature[64] > -0.3); peaks >= min_gap_s apart with prominence >= 0.15; N = 1 (< 2.5 s of speech), 2 (2.5-5 s), 3 (> 5 s); the first peak after onset and the last peak are always kept, the rest by height",
+   "library": "retrieval.json: gestures[intent] = top-k windows by proto score with peak_t (frame of max head speed) and dur",
+   "rule": "out = base * gain + sum(gestures): gain = base_gain_idle, base_gain_active under a gesture, hold_gain during a hold; each gesture = (segment - segment[0]) * tier * amplitude_boost, added with raised-cosine edges of blend_ms so its peak_t lands on the accent; a gesture is picked by a seeded draw among library entries whose dur fits the gap to the next accent (else the shortest third); thinking = one tilt-and-hold from the onset held until the last accent then released over 2 * blend; excitement = the rise on the first accent, held until the last accent, then dropped; then energy floor -> pitch floor -> settle -> clamp. enabled=false or 0 disables (A/B knob)."
+  },
   "order": "retrieve (cosine + continuity + speaking + arousal bonus + proto_weight * proto[intent]) or decode+smooth -> amplitude tier by intent -> energy floor (one scalar for the whole utterance, 1.0..2.0) -> pitch floor -> settle (after speech ends) -> clamp to channel bounds",
   "amplitude_tiers": {
    "excitement": 1.45,
@@ -173,7 +187,8 @@
   "file": "retrieval.json",
   "bin": "retrieval.bin",
   "intent_fields": true,
-  "proto_fields": true
+  "proto_fields": true,
+  "gesture_library": true
  },
  "intent": {
   "lexicon_version": "intent.v3",

@@ -9,10 +9,18 @@ python scripts/export_lerobot.py --robot lamp        --clips data/clips --out da
 python scripts/export_lerobot.py --robot reachy_mini --clips data/clips --out data/lerobot/animacy_reachy_mini --validate --push squaredcuber/animacy-reachy-mini-lerobot
 ```
 
-Published datasets (public):
+Published datasets (public), **as pushed from the 6-clip v1 corpus**:
 
 - https://huggingface.co/datasets/squaredcuber/animacy-lamp-lerobot — 53 episodes, 26 774 frames (14.9 min), 5 joints
 - https://huggingface.co/datasets/squaredcuber/animacy-reachy-mini-lerobot — 53 episodes, 26 812 frames (14.9 min), 9 joints
+
+> **These two datasets are behind the corpus.** They were exported from the six
+> clips the v1 model trained on; the human corpus has since grown to 73 clips /
+> 320.8 valid minutes / 37 speakers (`docs/RESULTS.md`, and `docs/HARVEST.md`
+> for the ongoing crawl). Re-running the two commands above against the current
+> `data/clips` re-exports and re-pushes both. Every episode count, frame count
+> and task-string count in this document describes the pushed v1 export unless
+> it says otherwise.
 
 ```python
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -98,7 +106,7 @@ antenna_left, antenna_right`) for Reachy Mini. `lerobot`'s
   joint limits. Because time can stretch, the human-side columns are re-aligned
   onto the robot grid by picking, for every robot frame, the source frame
   nearest in stretched time (`animacy/src_frame_start/end` per episode). On the
-  six current clips the stretch is <= 1.01x everywhere except one 4 s run of
+  six v1 clips the stretch is <= 1.01x everywhere except one 4 s run of
   the low-quality `sd_rapper_interview`, which `--max-stretch 1.1` (default)
   drops — audio that no longer plays at real time would mislead a speech-driven
   policy.
@@ -106,10 +114,11 @@ antenna_left, antenna_right`) for Reachy Mini. `lerobot`'s
   of the episode (`speaking` / `listening`); `what` from `meta.prompt` /
   `meta.task`, else the cleaned `meta.title` (extension and date prefix
   stripped, lower-cased, <= 64 chars). Both Obama clips therefore share
-  `speaking: president obama's weekly address`; the current corpora have 5
+  `speaking: president obama's weekly address`; the pushed v1 export has 5
   distinct task strings.
 
-Current corpora (both robots, `--max-stretch 1.1`):
+The pushed v1 export (both robots, `--max-stretch 1.1`) — six clips; see the
+note at the top of this page:
 
 | clip | license | episodes | frames (lamp / reachy) |
 |---|---|---|---|

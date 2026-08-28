@@ -139,6 +139,32 @@ def main() -> int:
                     failures.append(f"{n} did not load")
             shot("01_initial")
 
+            # ---- hero layout: lamp column ≈ 62 % of the headline pair, its head ≈ 45 % of the viewport height --
+            lay = ev("window.animacy.layoutInfo()")
+            print("layout:", json.dumps(lay))
+            if lay["layout"] == "hero" and info["lamp"] and info["reachy"]:
+                wl, wr = lay["widths"].get("lamp", 0), lay["widths"].get("reachy_mini", 0)
+                ratio = wl / max(wl + wr, 1)
+                if abs(ratio - 0.62) > 0.03:
+                    failures.append(f"hero layout: lamp column is {ratio:.2f} of the pair, expected 0.62")
+                hero = lay["hero"] or {}
+                if not hero or hero.get("measured") is None or abs(hero["measured"] - hero["fill"]) > 0.06:
+                    failures.append(f"hero framing: lamp head fills {hero.get('measured')} of the viewport height, expected {hero.get('fill')}")
+                if ev("document.querySelectorAll('#lamp-quickstart button[data-demo]').length") != len(ev("window.animacy.demos()")):
+                    failures.append("Lamp quick-start row is missing buttons")
+                shot("14_lamp_hero")
+                # ?layout=equal keeps the plain split (every viewport 1fr, whole-robot framing)
+                page2 = ctx.new_page()
+                page2.goto(url + "&layout=equal", wait_until="domcontentloaded")
+                page2.wait_for_function("window.animacy && window.animacy.ready === true", timeout=120_000)
+                page2.wait_for_timeout(300)
+                lay2 = page2.evaluate("window.animacy.layoutInfo()")
+                page2.close()
+                w2 = lay2["widths"]
+                if lay2["layout"] != "equal" or abs(w2.get("lamp", 0) - w2.get("reachy_mini", 1)) > 4 or lay2["hero"]:
+                    failures.append(f"?layout=equal did not give the plain split: {lay2}")
+                print(f"layout=equal: widths {w2}")
+
             # ---- native clips on the lamp -------------------------------------
             if info["lamp"]:
                 for clip, seek_frac in (("nod", 0.35), ("headshake", 0.55)):
@@ -277,6 +303,33 @@ def main() -> int:
                 ev("window.animacy.setMode('default')")
             if not extras:
                 print("no extra robots in the manifest (add-robot picker hidden)")
+
+            # ---- Lamp quick-start row: each button puts the page in its demo state ----------
+            ev("window.__demoErr = null; window.animacy.demo('ab').catch(e => { window.__demoErr = String(e && e.message || e); })")
+            page.wait_for_function("window.__demoErr || (window.animacy.ab.on && window.animacy.ab.source && window.animacy.sourceInfo().clip === 'synth/cal_nod' && window.animacy.sourceInfo().playing)", timeout=60_000)
+            d_ab = ev("({err: window.__demoErr, src: window.animacy.sourceInfo(), abClip: window.animacy.ab.clipId, widths: window.animacy.layoutInfo().widths})")
+            print("demo ab:", json.dumps(d_ab))
+            if d_ab["err"] or d_ab["abClip"] != "lamp/nod":
+                failures.append(f"demo ab: {d_ab}")
+            ev("window.__demoErr = null; window.animacy.demo('human').catch(e => { window.__demoErr = String(e && e.message || e); })")
+            page.wait_for_function("window.__demoErr || (window.animacy.playlist && window.animacy.sourceInfo().clip === 'synth/cal_look_left_right' && window.animacy.sourceInfo().playing)", timeout=60_000)
+            # the playlist advances once a clip has played through: jump to its end and expect the second clip
+            ev("window.animacy.seek(window.animacy.sourceInfo().duration - 0.05); window.animacy.play()")
+            page.wait_for_function("window.__demoErr || (window.animacy.playlist && window.animacy.playlist.i === 1 && window.animacy.sourceInfo().clip === 'synth/cal_brows')", timeout=15_000)
+            d_h = ev("({err: window.__demoErr, src: window.animacy.sourceInfo(), ab: window.animacy.ab.on, pl: window.animacy.playlist})")
+            print("demo human:", json.dumps(d_h))
+            if d_h["err"] or d_h["ab"] or not d_h["src"]["playing"]:
+                failures.append(f"demo human: {d_h}")
+            say_js = "true" if a.with_tts else "false"   # the real button also says the line (Kokoro download)
+            ev(f"window.__demoErr = null; window.__demoTalk = null; window.animacy.demo('talk', {{say: {say_js}}}).then(r => {{ window.__demoTalk = r || {{}}; }}).catch(e => {{ window.__demoErr = String(e && e.message || e); }})")
+            page.wait_for_function("window.__demoErr || window.__demoTalk", timeout=900_000 if a.with_tts else 60_000)
+            d_t = ev("({err: window.__demoErr, said: window.__demoTalk, kind: window.animacy.sourceInfo().kind, text: document.getElementById('talk-text').value, backend: document.getElementById('talk-backend').value, voice: document.getElementById('talk-voice').value, playlist: window.animacy.playlist, available: window.animacy.backends.available()})")
+            print("demo talk:", json.dumps(d_t))
+            if d_t["err"] or d_t["kind"] != "talk" or d_t["playlist"] or not d_t["text"].startswith("No way") or d_t["voice"] != "af_heart" \
+                    or ("retrieval" in d_t["available"] and d_t["backend"] != "retrieval") or (a.with_tts and not (d_t["said"] and d_t["said"].get("frames"))):
+                failures.append(f"demo talk: {d_t}")
+            ev("window.animacy.setSource('canonical')")
+            page.wait_for_function("window.animacy.sourceInfo().kind === 'canonical'", timeout=20_000)
 
             # ---- A/B viewport --------------------------------------------------
             ev("(async () => { await window.animacy.setClip('synth/cal_nod'); await window.animacy.setAb(true); await window.animacy.setAbClip('lamp/nod'); })()")
