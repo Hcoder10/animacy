@@ -37,3 +37,9 @@ data/hf_stage/
 
 # blind grading runs: videos, sealed manifests and held-out lines never enter git; only docs/evidence/grading/*.md does
 data/grading/
+
+# scratch clone of Autonomous OS (run for evidence, never vendored: hal/ is GPL-3.0)
+third_party/autonomous-os/
+third_party/hal-state/
+data/video/
+third_party/autonomous-os/
