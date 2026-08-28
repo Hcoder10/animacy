@@ -181,6 +181,21 @@ class RetrievalIndex:
             assert len(self.arousal) == n and len(self.still_then_move) == n
         # gesture prototype scores per window, {tag: [N] 0..1}; None on older indexes
         self.proto = None if proto is None else {k: np.asarray(v, np.float32) for k, v in proto.items()}
+        # gesture library {tag: [{id, peak_t, dur, score}]} (gesture.library_from_index); None on older indexes
+        self.gestures: Optional[Dict[str, List[Dict]]] = None
+
+    def gesture_segment(self, i: int) -> np.ndarray:
+        """Window ``i`` followed by its continuation window when it exists: [30 or 60, 14] float32."""
+        seg = self.motion[i].astype(np.float32)
+        j = int(self.next_id[i])
+        if j >= 0:
+            seg = np.concatenate([seg, self.motion[j].astype(np.float32)], axis=0)
+        return seg
+
+    def build_gestures(self, k: int = 25) -> None:
+        from .gesture import library_from_index
+
+        self.gestures = library_from_index(self, k=k)
 
     def compute_prototypes(self) -> None:
         """Score every window on the five gesture prototypes using the window plus its
@@ -265,6 +280,7 @@ class RetrievalIndex:
         meta = {"win": win, "hop": hop, "n_source_windows": int(n), "n_clips": len(clips)}
         idx = cls(keys, motion, nxt, spk, meta, arousal=arousal, still_then_move=stm, energy_var_breakpoints=bp)
         idx.compute_prototypes()
+        idx.build_gestures()
         return idx
 
     # ---- query --------------------------------------------------------------
@@ -376,6 +392,11 @@ class RetrievalIndex:
             header["proto"] = {t: [round(float(x), 3) for x in self.proto[t]] for t in PROTO_TAGS}
             header["proto_weight"] = PROTO_WEIGHT
             header["proto_doc"] = PROTO_DOC
+        if self.gestures:
+            header["gestures"] = self.gestures
+            header["gestures_doc"] = ("per intent: the top-K windows by prototype score; id indexes this file's windows; the gesture "
+                                      "segment = window id followed by next_id[id] when >= 0 (30 or 60 frames); peak_t = frame of maximal "
+                                      "head angular speed within the segment; dur = segment frames")
         json_path = os.path.join(out_dir, f"{stem}.json")
         with open(json_path, "w", encoding="utf-8") as fh:
             json.dump(header, fh)
@@ -410,4 +431,7 @@ class RetrievalIndex:
                      "energy_var_breakpoints": np.asarray(header["energy_var_breakpoints"], np.float64)}
         if "proto" in header:
             extra["proto"] = {t: np.asarray(v, np.float32) for t, v in header["proto"].items()}
-        return cls(keys, motion, np.asarray(header["next_id"], np.int32), np.asarray(header["speaking"], np.float32), meta, **extra)
+        idx = cls(keys, motion, np.asarray(header["next_id"], np.int32), np.asarray(header["speaking"], np.float32), meta, **extra)
+        if "gestures" in header:
+            idx.gestures = header["gestures"]
+        return idx

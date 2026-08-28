@@ -37,7 +37,7 @@ BLOCK = re.compile(S.TITLE_BLOCK, re.I)
 def ytdlp_flat(url: str, n: int, timeout: int = 900) -> tuple[dict, List[dict]]:
     """(playlist-level info, flat entries). Channel listings carry channel_id only at the playlist
     level; search results carry it per entry."""
-    cmd = [PY, "-m", "yt_dlp", "--flat-playlist", "-J", "--no-warnings", "--ignore-errors",
+    cmd = [PY, "-m", "yt_dlp", *C.YTDLP_COMMON, "--flat-playlist", "-J", "--no-warnings", "--ignore-errors",
            "--playlist-end", str(n), "--sleep-requests", "0.6", url]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=C.child_env(), encoding="utf-8",
                        errors="replace")
@@ -90,14 +90,14 @@ def add_candidate(con, cand: Dict, ids: Set[str], fps: Set[str], urls: Set[str],
     con.execute(
         "INSERT INTO items(id, backend, source_kind, url, page_url, title, title_fp, duration_s, channel_key, "
         "channel_name, expected_channel_id, speaker_key, series, language, lang_evidence, query, license, "
-        "license_evidence, license_ok, state, priority, queued_at, updated_at, artist) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "license_evidence, license_ok, state, priority, queued_at, updated_at, artist, part) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (cid, cand["backend"], cand["source_kind"], cand["url"], cand.get("page_url"), cand.get("title", ""), fp, d,
          cand.get("channel_key"), cand.get("channel_name"), cand.get("expected_channel_id"),
          cand.get("speaker_key"), cand.get("series"), cand.get("language"), cand.get("lang_evidence"),
          cand.get("query"), cand.get("license"), json.dumps(cand.get("license_evidence") or {}, ensure_ascii=False),
          None if cand.get("license_ok") is None else int(bool(cand["license_ok"])), state,
-         float(cand.get("priority", 0.0)) + random.random(), now, now, cand.get("artist")))
+         float(cand.get("priority", 0.0)) + random.random(), now, now, cand.get("artist"), C.item_part(cid)))
     ids.add(cid)
     if fp:
         fps.add(fp)
@@ -211,8 +211,22 @@ def crawl_commons(con, limit_per_cat: int, excluded: Set[str]) -> Dict[str, int]
 
     ids, fps, urls = existing_keys(con)
     stats: Dict[str, int] = {}
-    rows = dfm.plan_commons(S.COMMONS_CATEGORIES, allow_sa=False, min_s=C.MIN_ITEM_S, max_s=C.MAX_ITEM_S,
-                            limit_per_cat=limit_per_cat)
+
+    def batched_videoinfo_small(titles, _orig=dfm.batched_videoinfo):
+        """50 Commons titles per GET overflowed the URI (HTTP 414) on long interview titles; 12 is safe."""
+        out = {}
+        for i in range(0, len(titles), 12):
+            out.update(_orig(titles[i:i + 12]))
+        return out
+
+    dfm.batched_videoinfo = batched_videoinfo_small
+    rows = []
+    for cat in S.COMMONS_CATEGORIES:  # one category failing must not lose the others
+        try:
+            rows += dfm.plan_commons([cat], allow_sa=False, min_s=C.MIN_ITEM_S, max_s=C.MAX_ITEM_S, limit_per_cat=limit_per_cat)
+        except Exception as exc:
+            C.log(f"  commons {cat['cat']!r} failed: {type(exc).__name__}: {exc}")
+            C.event(con, "crawl_error", f"commons {cat['cat']}: {exc}")
     with C.tx(con):
         for r in rows:
             if not r.get("license_ok"):

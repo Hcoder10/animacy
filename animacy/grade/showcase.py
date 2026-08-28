@@ -40,8 +40,9 @@ def pick_best(records: Sequence[Dict], robot: str, source: str, movements: Seque
     for mv in movements:
         mine = [r for r in records if r["robot"] == robot and r["source"] == source and r["movement"] == mv
                 and r.get("overall") is not None and (line_sets is None or _set(r) in line_sets)]
+        # ties go to publishable (tuning) clips: a sealed clip is useless for a demo
         mine.sort(key=lambda r: (-r["overall"], -r["scores"].get("lifelike", 0), -r["scores"].get("appeal", 0),
-                                 r.get("seed") if r.get("seed") is not None else 0))
+                                 1 if _set(r) == HELDOUT_SET else 0, r.get("seed") if r.get("seed") is not None else 0))
         out[mv] = mine
     return out
 
@@ -82,7 +83,13 @@ def export_showcase(run_dir: str, robot: str, out_dir: str, source: str = "retri
     with ViewerRenderer(gpu=gpu, zoom=zoom, log=log) as renderer:
         for mv, ranked in best.items():
             entries = []
-            for rank, r in enumerate(ranked[:per_movement]):
+            chosen = list(ranked[:per_movement])
+            # a sealed winner always gets the best publishable clip exported next to it
+            if any(_set(r) == HELDOUT_SET for r in chosen) and not any(_set(r) != HELDOUT_SET for r in chosen):
+                pub = next((r for r in ranked if _set(r) != HELDOUT_SET), None)
+                if pub is not None:
+                    chosen.append(pub)
+            for rank, r in enumerate(chosen):
                 is_sealed = _set(r) == HELDOUT_SET
                 if is_sealed and not include_sealed:
                     continue
@@ -104,7 +111,7 @@ def export_showcase(run_dir: str, robot: str, out_dir: str, source: str = "retri
                                 "utterance": None if is_sealed else r.get("card_line"),
                                 "file": os.path.relpath(path, out_dir).replace("\\", "/"), "seconds": info["seconds"]})
                 log(f"[showcase] {mv}: {r['id']} overall {r['overall']:g} -> {os.path.relpath(path, out_dir)}")
-            runners = [{"id": x["id"], "overall": x["overall"], "line_set": _set(x)} for x in ranked[per_movement:per_movement + 3]]
+            runners = [{"id": x["id"], "overall": x["overall"], "line_set": _set(x)} for x in ranked if x not in chosen][:3]
             manifest["movements"][mv] = {"exported": entries, "runners_up": runners,
                                          "vendor_reference": next(({"id": x["id"], "overall": x["overall"]} for x in records
                                                                    if x["robot"] == robot and x["source"] == VENDOR

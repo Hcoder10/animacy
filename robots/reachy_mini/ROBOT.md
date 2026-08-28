@@ -37,8 +37,10 @@ retarget:
   # its owner's most legible affect channel), not geometry.
   # Head/body gains were FITTED to Pollen's emotion library by
   # scripts/retarget_fit.py: per joint, the |.|p95 excursion of the retargeted
-  # human corpus is matched to the |.|p95 of the 16 native clips, capped by
-  # headroom and by 1.25x the library's velocity p95 (docs/RETARGET.md has the
+  # human corpus is matched to 1.4x the |.|p95 of the 16 native clips (the
+  # blind grader called the 1.15x fit "small"), capped by the joint bounds
+  # (headroom 1.0; every head joint sits on its bound, the soft limit absorbs
+  # the top) and by 2x the library's velocity p95 (docs/RETARGET.md has the
   # before/after tables). Trackers are `spring`s (docs/RETARGET.md §spring):
   # head zeta 0.7, translations and body critically damped, antennas zeta 0.45
   # (they bounce and settle, ~20% overshoot). `idle` (§idle) sways the antennas

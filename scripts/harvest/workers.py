@@ -2,6 +2,11 @@
 
     python scripts/harvest/workers.py --n 16
 
+Graceful code reload: ``touch <ROOT>/RELOAD`` -- workers stop claiming, finish their current item,
+the process exits and the daemon respawns it on the new code (nothing in flight is killed).
+``HARVEST_POSE_EVERY`` (default 2) is passed as ``capture --pose-every N`` when the checkout supports
+it (e9f04cc+); every clip records ``capture_git`` and ``pose_every`` in ``meta.json.harvest``.
+
 Each worker claims the oldest fetched item, splits it into equal chunks of <= 600 s (stream copy;
 ``<slug>__c01`` ...; a video <= 600 s stays one clip named ``<slug>``), prescreens every chunk with
 YuNet on 16 sampled frames (>= 60 % must show exactly one face, otherwise the chunk is skipped without
@@ -31,6 +36,29 @@ from typing import Dict, List, Optional
 import common as C
 
 PY = sys.executable
+POSE_EVERY = int(os.environ.get("HARVEST_POSE_EVERY", "2"))   # capture --pose-every N (e9f04cc+); 0 = flag omitted
+RELOAD = os.path.join(C.ROOT, "RELOAD")   # touch it: workers finish their current item, the process exits, the daemon respawns
+
+
+def capture_git() -> str:
+    """Short commit of the animacy checkout the capture runs from (recorded per clip)."""
+    try:
+        return subprocess.run(["git", "-C", C.REPO, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                              timeout=30).stdout.strip() or "?"
+    except Exception:
+        return "?"
+
+
+CAPTURE_GIT = capture_git()
+
+
+def capture_supports_pose_every() -> bool:
+    try:
+        out = subprocess.run([PY, "-m", "animacy.cli", "capture", "--help"], capture_output=True, text=True, timeout=120,
+                             cwd=C.REPO, env=C.child_env()).stdout
+        return "--pose-every" in out
+    except Exception:
+        return False
 
 
 def claim(con, worker: str) -> Optional[dict]:
@@ -45,6 +73,8 @@ def claim(con, worker: str) -> Optional[dict]:
 def run_capture(chunk_path: str, out_dir: str, duration: float, log_path: str) -> int:
     cmd = [PY, "-m", "animacy.cli", "capture", "--source", chunk_path, "-o", out_dir, "--neutral-seconds", "0",
            "--duration", str(duration)]
+    if POSE_EVERY > 0:
+        cmd += ["--pose-every", str(POSE_EVERY)]
     with open(log_path, "w", encoding="utf-8") as fh:
         try:
             return subprocess.run(cmd, cwd=C.REPO, stdout=fh, stderr=subprocess.STDOUT, env=C.child_env(),
@@ -86,6 +116,7 @@ def index_row(name: str, meta: dict, g: Dict, item: dict, chunk_i: int, start: f
         "speaker": item.get("speaker_key"), "series": item.get("series"), "language": item.get("language"), "lang_evidence": item.get("lang_evidence"),
         "chunk": chunk_i, "chunk_start_s": round(start, 1), "chunk_len_s": round(length, 1), "prescreen": pre,
         "audio": "audio.opus", "has_motion_json": False, "captured_at": meta.get("captured_at"),
+        "capture_git": CAPTURE_GIT, "pose_every": POSE_EVERY if POSE_EVERY > 0 else 1,
     }
 
 
@@ -170,7 +201,8 @@ def process_item(con, item: dict, worker: str) -> None:
                 rec["opus"] = "failed, wav kept"
         row = index_row(name, meta, g, item, i, start, length, pre)
         meta["harvest"] = {k: row[k] for k in ("item_id", "source_kind", "channel_key", "channel_name", "speaker", "series",
-                                                "language", "lang_evidence", "chunk", "chunk_start_s", "chunk_len_s", "prescreen", "category")}
+                                                "language", "lang_evidence", "chunk", "chunk_start_s", "chunk_len_s", "prescreen", "category",
+                                                "capture_git", "pose_every")}
         meta["harvest"]["worker"] = worker
         meta["audio"] = {"file": "audio.opus", "codec": f"opus {C.OPUS_KBPS} kb/s mono, source 16 kHz", "sr": 16000,
                          "restore": "ffmpeg -i audio.opus -ar 16000 -ac 1 audio.wav"}
@@ -207,6 +239,8 @@ def worker_loop(worker: str, stop: threading.Event) -> None:
     con = C.db()
     paused = False
     while not stop.is_set():
+        if os.path.exists(RELOAD):
+            return  # graceful drain: no new item; main() exits once every thread has returned
         free = C.disk_free_gb()
         if free < C.CAPTURE_MIN_FREE_GB:
             if not paused:
@@ -244,6 +278,13 @@ def main(argv=None) -> int:
     shutil.rmtree(C.WORK, ignore_errors=True)
     os.makedirs(C.WORK, exist_ok=True)
     C.kv_set(con, "workers_n", str(a.n))
+    global POSE_EVERY
+    if POSE_EVERY > 0 and not capture_supports_pose_every():
+        C.log("capture has no --pose-every (checkout predates e9f04cc); running without it")
+        POSE_EVERY = 0
+    C.log(f"capture checkout {CAPTURE_GIT}, pose_every {POSE_EVERY or 1}")
+    if os.path.exists(RELOAD):
+        os.remove(RELOAD)
     if a.once:
         item = claim(con, "w00")
         if not item:
@@ -261,6 +302,13 @@ def main(argv=None) -> int:
         while True:
             time.sleep(30)
             C.kv_set(con, "workers_heartbeat", str(time.time()))
+            if os.path.exists(RELOAD):
+                alive = [t for t in threads if t.is_alive()]
+                C.log(f"RELOAD: {len(alive)} workers still finishing their item")
+                if not alive:
+                    os.remove(RELOAD)
+                    C.log("RELOAD: all workers drained; exiting for the daemon to respawn")
+                    return 0
     except KeyboardInterrupt:
         stop.set()
     return 0

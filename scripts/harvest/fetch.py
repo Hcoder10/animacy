@@ -4,8 +4,10 @@
 
 One download at a time (bandwidth is not the bottleneck, YouTube's tolerance is). Keeps at most
 ``--buffer`` items in the fetched-but-not-captured state, pauses when the volume has less than
-``FETCH_MIN_FREE_GB`` free, and backs off exponentially (5 min .. 60 min) on HTTP 429 / "confirm
-you're not a bot", recording every incident in the events table.
+``FETCH_MIN_FREE_GB`` free, and on HTTP 429 / "confirm you're not a bot" backs YouTube off
+(5 -> 10 -> 20 -> 30 min, probe before resuming) while Commons / archive.org items keep flowing;
+every incident goes to the events table. ~300 YouTube downloads/h from one IP tripped the bot check
+after ~1.5 h on 2026-08-27; the default pacing is now ~150/h.
 
 License verification happens HERE for YouTube (the crawl only saw the flat listing):
   * ytsearch: ``--match-filter "license ~= creative commons attribution"`` skips anything else before
@@ -41,19 +43,46 @@ PY = sys.executable
 RATE_PATTERNS = ("429", "Too Many Requests", "not a bot", "Sign in to confirm", "rate-limit", "rate limit")
 
 
+PROBE_URL = "https://www.youtube.com/watch?v=c8_BIamLESg"   # a CC-BY talk used only for --simulate health probes
+
+
 class Pacer:
+    """YouTube-only back-off: 5 -> 10 -> 20 -> 30 min (cap), escalation forgotten after 2 h of success.
+    While YouTube is blocked, non-YouTube backends keep fetching; before YouTube resumes, one cheap
+    ``--simulate`` probe must pass, otherwise the block is extended without spending a download."""
+
     def __init__(self) -> None:
         self.backoff = 0
+        self.blocked_until = 0.0
+        self.last_ok = time.time()
 
     def penalty(self, con, detail: str) -> None:
+        if time.time() - self.last_ok > 7200:
+            self.backoff = 0
         self.backoff = min(self.backoff + 1, 4)
-        wait = 300 * (2 ** (self.backoff - 1))
+        wait = min(300 * (2 ** (self.backoff - 1)), 1800)
+        self.blocked_until = time.time() + wait
         C.event(con, "ratelimit", detail[-400:])
-        C.log(f"   rate limited; backing off {wait / 60:.0f} min: {detail[-160:]}")
-        time.sleep(wait)
+        C.log(f"   youtube blocked; backing off {wait / 60:.0f} min: {detail[-160:]}")
 
     def ok(self) -> None:
+        self.last_ok = time.time()
         self.backoff = 0
+
+    def youtube_open(self, con) -> bool:
+        if time.time() < self.blocked_until:
+            return False
+        if self.backoff == 0:
+            return True
+        cmd = [PY, "-m", "yt_dlp", *C.YTDLP_COMMON, "--no-warnings", "--simulate", "--print", "%(id)s", PROBE_URL]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=C.child_env(), encoding="utf-8", errors="replace")
+        blob = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and not any(p in blob for p in RATE_PATTERNS):
+            C.log("   youtube probe ok; resuming")
+            C.event(con, "youtube_resume", f"after {self.backoff} back-offs")
+            return True
+        self.penalty(con, "probe: " + blob)
+        return False
 
 
 def channel_caps(con) -> Dict[str, float]:
@@ -68,10 +97,14 @@ def channel_caps(con) -> Dict[str, float]:
     return per
 
 
-def pick(con) -> Optional[dict]:
+def pick(con, allow_youtube: bool = True) -> Optional[dict]:
     caps = channel_caps(con)
     cap = caps["__cap__"]
-    rows = con.execute("SELECT * FROM items WHERE state='queued' ORDER BY priority DESC, queued_at LIMIT 400").fetchall()
+    rows = con.execute("SELECT * FROM items WHERE state='queued' AND (part % ?) = ? ORDER BY priority DESC, queued_at LIMIT 400",
+                       (C.PART_N, C.PART_K)).fetchall()
+    if not allow_youtube:
+        rows = con.execute("SELECT * FROM items WHERE state='queued' AND (part % ?) = ? AND backend != 'ytdlp' "
+                           "ORDER BY priority DESC, queued_at LIMIT 400", (C.PART_N, C.PART_K)).fetchall()
     for r in rows:
         if caps.get(r["channel_key"] or "", 0.0) >= cap:
             continue
@@ -111,7 +144,7 @@ def fetch_youtube(con, item: dict, raw_dir: str, max_mb: float, pacer: Pacer) ->
     else:
         mfilter = "license ~= '(?i)creative commons attribution'"
     out_tpl = os.path.join(raw_dir, "source.%(ext)s")
-    cmd = [PY, "-m", "yt_dlp", "--no-warnings", "--no-playlist", "--no-progress", "--match-filter", mfilter,
+    cmd = [PY, "-m", "yt_dlp", *C.YTDLP_COMMON, "--no-warnings", "--no-playlist", "--no-progress", "--match-filter", mfilter,
            "--write-info-json", "--no-write-playlist-metafiles", "-f", fmt, "--max-filesize", f"{int(max_mb)}M",
            "--merge-output-format", "mp4", "--ffmpeg-location", C.bin_path("ffmpeg"), "-o", out_tpl,
            "--sleep-requests", "0.7", "--retries", "3", "--fragment-retries", "3", "--socket-timeout", "30",
@@ -145,6 +178,8 @@ def fetch_youtube(con, item: dict, raw_dir: str, max_mb: float, pacer: Pacer) ->
     info = json.load(open(info_path, encoding="utf-8"))
     lic = str(info.get("license") or "")
     ok, label = fs.classify_license(lic, allow_sa=False)
+    if ok and "creative commons attribution" in lic.lower():
+        label = "CC-BY-3.0"  # YouTube's only CC option is CC BY 3.0; classify_license defaults to 4.0 when no version is in the string
     evidence = {"api": "yt-dlp info-json", "license": lic or "NONE", "channel_id": info.get("channel_id"),
                 "channel": info.get("channel") or info.get("uploader"), "uploader_id": info.get("uploader_id"),
                 "upload_date": info.get("upload_date"), "webpage_url": info.get("webpage_url")}
@@ -234,12 +269,13 @@ def main(argv=None) -> int:
     p.add_argument("--loop", action="store_true")
     p.add_argument("--buffer", type=int, default=36, help="max items fetched-but-not-captured")
     p.add_argument("--max-mb", type=float, default=C.MAX_FILE_MB)
-    p.add_argument("--gap", type=float, default=12.0, help="mean seconds between YouTube downloads")
+    p.add_argument("--gap", type=float, default=20.0, help="mean seconds between YouTube downloads (~150/h; 8 s = ~300/h tripped the bot check)")
     p.add_argument("--n", type=int, default=0, help="stop after this many successful fetches (0 = unlimited)")
     p.add_argument("--retry-failed", action="store_true", help="re-queue failed items with < 2 attempts first")
     a = p.parse_args(argv)
     C.ensure_dirs()
     con = C.db()
+    C.log(f"fetch: partition {C.PART_K}/{C.PART_N}, box {C.BOX!r}")
     if a.retry_failed:
         con.execute("UPDATE items SET state='queued', error=NULL WHERE state='failed' AND COALESCE(attempts,0) < 2")
     # anything left 'fetching' by a crashed process goes back to the queue
@@ -259,10 +295,12 @@ def main(argv=None) -> int:
         if buffer_size(con) >= a.buffer:
             time.sleep(20)
             continue
-        item = pick(con)
+        C.backfill_parts(con)
+        yt_open = pacer.youtube_open(con)
+        item = pick(con, allow_youtube=yt_open)
         if item is None:
             if not idle_logged:
-                C.log("queue empty (or every channel at cap); waiting for the crawler")
+                C.log("queue empty (or every channel at cap%s); waiting" % ("" if yt_open else ", youtube blocked"))
                 idle_logged = True
             if not a.loop:
                 return 0

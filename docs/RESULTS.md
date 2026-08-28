@@ -194,6 +194,38 @@ regresses; the beat margin stays at noise level, as expected for a source that
 is aligned by construction but judged against a shuffled soundtrack. The same
 command refreshes both indexes as the harvest grows the corpus.
 
+**Gesture prototypes, amplitude tiers and the energy floor (run 3, 2026-08-27).**
+The blind judge rewards sculpted, unmistakable gestures, and arousal alone does
+not select them. Every index window now carries five label-free prototype
+scores in 0..1 computed from its own kinematics (nod: 1-3 Hz `head_pitch`
+oscillation with >= 2 downbeats and quiet yaw; head-shake: `head_yaw`
+oscillation with >= 2 reversals and quiet pitch; burst: fast upward
+pitch/`head_z` rise then hold; tilt-and-hold: roll/yaw excursion held >= 1 s
+with a small return; greet: pitch-up + brow raise in the first 0.7 s then
+settle; exact formulas in `retrieval.json: proto_doc`), and a text intent adds
+`proto_weight * proto[intent]` (default 0.25) to every window's score. The
+amplitude is now a tier by intent (excitement 1.45, greeting 1.25,
+agreement/doubt 1.15, thinking 0.9), and a per-utterance **energy floor**
+scales a whole utterance by one factor in [1, 2] when its standardised
+head+brow RMS falls below the corpus's 60th percentile over 3 s windows
+(0.692). Settle now starts only after the last speaking frame.
+
+| held-out speaker | option | retrieval beat recall vs shuffled (margin) | stillness (truth) | W1 rel |
+|---|---|---|---|---|
+| obama_2015 | plain | 0.445 / 0.424 (+0.02) | 0.16 (0.10) | 0.20 |
+| obama_2015 | prototype bias 0.25 (pseudo-intent from the clip's audio arousal) | 0.617 / 0.572 (+0.045) | 0.10 (0.10) | 0.33 |
+| kende | plain | 0.455 / 0.462 (-0.01) | 0.14 (0.10) | 1.09 |
+| kende | prototype bias 0.25 | 0.573 / 0.573 (0.00) | 0.09 (0.10) | 1.00 |
+
+The energy floor never engages on the 40-100 s held-out runs (their RMS sits
+above the 3 s-window reference), so its rows equal the plain ones; it engages
+on short utterances only. On the five tuning lines, sent through TTS and the
+`animacy say` path, the chosen windows resemble their own prototype most
+(greeting 0.64, agreement 0.88, doubt 0.83, excitement 0.89, thinking 0.30 -
+the corpus has few tilt-and-hold windows), and the floor lifted the agreement,
+doubt and thinking lines to the reference. Whether any of this moves the blind
+judge is, again, measured by the grader.
+
 Intent lexicon integrity (`intent.v3`): `animacy/model/intent.py` holds only
 generic cue families per tag (hi/hey/hello/welcome; yes/exactly/right/agree/of
 course; no/not sure/don't think/really?/hmm; wow/no way/incredible/amazing/!!;

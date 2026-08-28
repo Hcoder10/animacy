@@ -564,6 +564,8 @@ def test_showcase_picks_best_per_movement_and_flags_sealed_clips():
     recs = _records_sets("lamp", tuning=[(6, 7)] * 5, heldout=[(8, 5)] * 5, source="retrieval")
     best = pick_best(recs, "lamp", "retrieval")
     assert all(best[mv][0]["overall"] == 8 and best[mv][0]["line_set"] == HELDOUT_SET for mv in MOVEMENT_KEYS)
+    tie = _records_sets("lamp", tuning=[(7, 6)] * 5, heldout=[(7, 5)] * 5, source="retrieval")
+    assert all(pick_best(tie, "lamp", "retrieval")[mv][0]["line_set"] == TUNING_SET for mv in MOVEMENT_KEYS), "ties prefer publishable"
     only_tuning = pick_best(recs, "lamp", "retrieval", line_sets=[TUNING_SET])
     assert all(x[0]["overall"] == 7 and x[0]["seed"] == 1 for x in only_tuning.values())
     assert pick_best(recs, "lamp", "model")["greeting"] == []

@@ -46,8 +46,10 @@ retarget:
   # + 26° elbow + 17° wrist_pitch; "sad" droops 32/45/64) and then FITTED to
   # the vendor envelope by scripts/retarget_fit.py: per joint, the |.|p95
   # excursion of the retargeted human corpus is matched to the |.|p95 of the
-  # 31 native clips, capped by headroom and by 1.25x the vendor's velocity p95
-  # (docs/RETARGET.md has the before/after tables).
+  # 31 native clips (target 1.4x after the blind grader called the 1.15x fit
+  # "small"), capped by the mapping bounds (headroom 1.0, the soft limit
+  # absorbs the top) and by 2x the vendor's velocity p95 — still inside the
+  # vendor library's own p99 velocities (docs/RETARGET.md has the tables).
   # Vendor signs (see "Sign conventions" below): +base_yaw and +wrist_roll pan
   # RIGHT, +wrist_pitch tips the head DOWN — all opposite to the canonical
   # channels (+yaw = left, +pitch = up), hence the negative gains. Rule 4 of

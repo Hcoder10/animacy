@@ -103,12 +103,41 @@ Provisioning: `scripts/harvest/setup_windows.ps1` (idempotent; note the pip PATH
 not). Stop: create `C:\harvest\data\STOP` or kill the daemon; `daemon.py` restarts any child that
 exits (60 s delay).
 
-**Rented Linux box (later)** — `scripts/harvest/worker.sh`: clone, CPU torch, venv, static ffmpeg,
-deno, then `daemon.py --n $HARVEST_N`. Set `HF_TOKEN` for pushes and `HARVEST_HF_REPO` if not the
-default. Several boxes can push to the same repo: shard numbers are per box (`kv.next_shard`), so
-give each box a distinct `HARVEST_SHARD_PREFIX`-style start by seeding `next_shard` (e.g. 1000,
-2000) before the first push, and dedupe across boxes by giving each a disjoint slice of
-`YT_QUERIES` (`crawl.py` accepts nothing for that yet — split `sources.py` per box).
+**Rented Linux box (Vast etc., 32-64 cores, Ubuntu, no GPU) — joining the same harvest**
+
+No shared queue is needed. Every box crawls the same sources, but a box only *fetches* the items
+whose id hashes into its slice (`HARVEST_PART="k/N"`, `common.item_part`: sha1(id) mod 1000, bucket
+mod N == k), names its shards with its own prefix (`HARVEST_BOX`, e.g. `sb0001`), and `push.py`
+rebuilds `index.json` from the union of every `manifests/*.json` on the Hub, so boxes never
+overwrite each other. The 5 % channel cap is per box, which keeps the global share <= 5 % too.
+
+Exact steps. Tested 2026-08-27 in WSL Ubuntu 24.04 on squaredcube1 (`HARVEST_N=2`, partition 1/2, box
+`t`, scratch repo): clone + venv + deno + CPU torch in ~7 min, 19 clips / 2.56 h kept in 0.8 h from two
+workers, shard `st0001` pushed from Linux with the union index; the scratch repo and directory were
+deleted afterwards.
+
+```
+# 1. on squaredcube1: shrink its slice so the new box gets the rest (edit start_windows.ps1 / hv.ps1
+#    env: HARVEST_PART=0/2 HARVEST_BOX="" ; then restart fetch: kill fetch.py, the daemon respawns it)
+# 2. on the new box (as any user with python3 >= 3.10, git, curl):
+curl -fsSL https://raw.githubusercontent.com/Hcoder10/animacy/master/scripts/harvest/worker.sh -o worker.sh
+HARVEST_PART=1/2 HARVEST_BOX=b HF_TOKEN=hf_xxx HARVEST_N=32 nohup bash worker.sh > worker.out 2>&1 &
+#    (until scripts/harvest is committed: scp -r scripts/harvest box:/tmp/harvest and add
+#     HARVEST_SCRIPTS_SRC=/tmp/harvest to the line above)
+# 3. watch:  ~/animacy-harvest/venv/bin/python ~/animacy-harvest/animacy/scripts/harvest/status.py
+#    logs in ~/animacy-harvest/data/logs/, stop with: touch ~/animacy-harvest/data/STOP
+```
+
+`worker.sh` does: clone (or pull) the repo, static ffmpeg + deno into `~/animacy-harvest/bin`, venv
+with CPU torch (from the PyTorch CPU index, so silero-vad does not pull the CUDA wheels), `pip
+install -e ".[capture]" yt-dlp[default] silero-vad huggingface_hub soundfile`, prints the partition it
+will serve, then `exec daemon.py --n $HARVEST_N`. `HARVEST_N` defaults to nproc/2; each worker is
+~1.5x realtime, so a 64-core box at N=32 captures ~45 h of video per hour. Disk: the box needs
+~4 GB for the venv + fetch buffer (36 items) + < 3 GB of unpushed clips; nothing accumulates because
+pushed clips are deleted. A third box is `HARVEST_PART=2/3` with the others re-sliced to 0/3 and 1/3.
+Change N on every box at the same time (kill fetch.py on each; the daemons respawn it): the slices
+are a pure function of the item id, so the only duplicates possible are items that were already in
+flight on a box whose slice they just left.
 
 ## Throughput and ETA
 
@@ -121,12 +150,14 @@ frame at 480p is ~1x realtime per process on this CPU. With W workers and a surv
 The prescreen keeps capture time from being spent on no-face chunks, so s is the *post-prescreen*
 survival (~0.6-0.8), and the prescreen rejection rate is reported separately.
 
-Capture-side speed lever not taken (needs a capture flag, capture agent owns `animacy/capture.py`):
-**`--pose-every N`** — run PoseLandmarker on every N-th processed frame and hold/interpolate torso
-and arm samples between (the face path stays per-frame; `resample_to_grid` already interpolates
-between valid neighbours, so pose samples every 2nd frame would just be a sparser `t_src` for the
-torso/arm groups). Expected ~30-40 % less CPU per clip (pose-lite is roughly as expensive as the
-face landmarker on 480p). `mirror` already has `--pose-every`; `capture` does not.
+Capture-side speed lever: **`--pose-every 2`** landed in e9f04cc (capture agent; ~20 % less CPU,
+31 % less wall) together with a frame-decimation fix (29.97 fps sources were sampled at ~20 fps and
+grid-interpolated; now true 30/s). Workers pass `--pose-every $HARVEST_POSE_EVERY` (default 2) when
+the checkout supports it, and every clip records `capture_git` + `pose_every` in
+`meta.json.harvest` and in the index rows. Clips captured before e9f04cc (no `capture_git` field,
+`s0001` and the first ~150 clips) are kept: they are 20 -> 30 fps interpolated, not wrong, and the
+field tells them apart. Code reloads without killing in-flight captures: `touch <ROOT>/RELOAD`
+(`workers.py`) — or `reload_workers.py` for an instance that predates the hook.
 
 ## Milestones and reporting
 
@@ -140,6 +171,39 @@ wall-hour and ETA to 5,000 h, per-source yield (kept / captured / fetched hours,
 failed), chunks kept vs dropped-after-capture vs prescreen-rejected in the last 24 h, hours by
 language/series, top channels, rate-limit incidents in 24 h, disk, worker heartbeat.
 
+## Incidents
+
+* **2026-08-27 15:19 — YouTube "Sign in to confirm you're not a bot"** on squaredcube1 after ~1.5 h
+  at ~300 downloads/h (8 s pacing) plus the WSL test crawling/fetching from the same host. Diagnosis:
+  the block is per address and the Windows host was going out over **IPv6**; a `-4` probe passed
+  while `-6` failed, and WSL (IPv4 NAT) kept fetching throughout. Fixes: every yt-dlp call forces
+  IPv4 (`common.YTDLP_COMMON`), pacing 20 s mean (~150/h), YouTube-only back-off (5/10/20/30 min,
+  `--simulate` probe before resuming) while Commons/archive.org keep flowing, and the one-off
+  Commons + archive crawl was run so the queue has non-YouTube supply. Cookies were not and will not
+  be used (the owner's account). Lost: ~1 h of fetch (workers idled once the buffer drained).
+
+* **2026-08-27 16:17 — Commons crawl HTTP 414** (50 long interview titles per `videoinfo` GET):
+  crawl now batches 12 titles and survives a failing category. **archive.org advancedsearch**
+  returned `[BACKEND_ERROR] Invalid or no response from Elasticsearch` for every query (their
+  side); the crawl loop retries each round, no archive items in the queue until it recovers.
+* **2026-08-27 16:2x — YouTube CC label**: yt-dlp's license string carries no version, so
+  `classify_license` labelled YouTube clips CC-BY-4.0; YouTube's CC option is CC BY 3.0.
+  `fetch.py` now labels `CC-BY-3.0`; `fix_cc_label.py` rewrote the ~110 affected rows / meta.json
+  files before they were pushed (shard s0001 was gov-only, nothing on the Hub was wrong).
+
 ## Measured
 
-(filled in as the run progresses)
+**2026-08-27 14:15 PDT, launch on squaredcube1, 16 workers (first 12 min).**
+
+* Per-worker capture speed with 16 concurrent processes: **1.44-2.04x realtime** at 854x480
+  (e.g. 8.3 min chunk in 245 s wall, 4.9 min in 201 s). Host CPU ~57 % (64 threads), so 16 is not
+  the ceiling; ~24 workers should fit without touching the GPU job.
+* Fetch: ~5 s per 480p download (8-110 MB, AVC), 12 s mean pacing -> ~20 h of video per hour from
+  YouTube with 0 rate-limit incidents in the first 300 downloads.
+* Prescreen cost ~1-2 s per chunk (16 seeks + YuNet). On the White House / State Dept feeds it
+  rejected 32 chunks and passed 6 (event and crowd footage vs. remarks-to-camera); the 6 passed
+  chunks all survived the drop rule (face_valid 0.9+), i.e. the prescreen predicts the gate well.
+* Early gov-only survival: 15 % of fetched source time kept. CC-search vlog/interview content is
+  expected much higher (numbers to follow as the mix shifts; 2,005 items / 654 h queued at launch).
+* Capture capacity therefore ~25-30 h/h; kept hours per wall hour = fetch rate x survival, so the
+  levers are (1) survival via source choice, (2) fetch pacing (YouTube tolerance), (3) more boxes.

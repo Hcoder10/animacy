@@ -52,6 +52,12 @@ LOGS = os.path.join(ROOT, "logs")
 MANIFEST = os.path.join(ROOT, "manifest.jsonl")
 
 TARGET_HOURS = float(os.environ.get("HARVEST_TARGET_HOURS", "5000"))
+# Several boxes, one dataset, no shared state: every box crawls the same sources but FETCHES only the
+# items whose id hashes into its slice (HARVEST_PART="k/N", default "0/1"), and names its shards with
+# its own prefix (HARVEST_BOX, e.g. "b" -> sb0001; squaredcube1 is "" -> s0001).
+_part = os.environ.get("HARVEST_PART", "0/1").split("/")
+PART_K, PART_N = int(_part[0]), int(_part[1])
+BOX = os.environ.get("HARVEST_BOX", "")
 CHUNK_S = 600.0            # capture --duration per chunk
 MIN_ITEM_S, MAX_ITEM_S = 60.0, 3600.0
 MAX_FILE_MB = 150.0
@@ -62,6 +68,10 @@ FETCH_MIN_FREE_GB, CAPTURE_MIN_FREE_GB = 6.0, 3.0     # the remote volume has ~1
 OPUS_KBPS = 32
 
 VIDEO_EXT = (".mp4", ".mkv", ".webm", ".mov", ".ogv", ".mpg", ".mpeg", ".m4v")
+# YouTube's anonymous bot check is per address. squaredcube1's IPv6 /64 got flagged after ~1.5 h at
+# ~300 downloads/h while its IPv4 stayed clean, so every yt-dlp call forces IPv4 (HARVEST_YTDLP_IPV4=0
+# to disable, e.g. on a v6-only box).
+YTDLP_COMMON = ["-4"] if os.environ.get("HARVEST_YTDLP_IPV4", "1") != "0" else []
 
 
 def ensure_dirs() -> None:
@@ -116,7 +126,7 @@ CREATE TABLE IF NOT EXISTS items (
   state TEXT, error TEXT, raw_path TEXT, size_mb REAL, height INTEGER, fps REAL,
   n_chunks INTEGER, n_kept INTEGER, kept_s REAL, captured_s REAL, prescreen TEXT, worker TEXT,
   priority REAL DEFAULT 0, queued_at REAL, fetched_at REAL, captured_at REAL, updated_at REAL, artist TEXT,
-  attempts INTEGER DEFAULT 0
+  attempts INTEGER DEFAULT 0, part INTEGER
 );
 CREATE INDEX IF NOT EXISTS items_state ON items(state);
 CREATE INDEX IF NOT EXISTS items_fp ON items(title_fp);
@@ -134,10 +144,34 @@ def db() -> sqlite3.Connection:
     ensure_dirs()
     con = sqlite3.connect(DB_PATH, timeout=60, isolation_level=None)
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.executescript(SCHEMA)
+    for attempt in range(30):  # four processes open the db at daemon start; on DrvFS/NFS the first PRAGMA can hit a lock
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
+            con.executescript(SCHEMA)
+            break
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or attempt == 29:
+                raise
+            time.sleep(1.0 + attempt * 0.5)
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(items)")}
+    if "part" not in cols:  # db created before partitioning existed
+        con.execute("ALTER TABLE items ADD COLUMN part INTEGER")
+    backfill_parts(con)
     return con
+
+
+def backfill_parts(con: sqlite3.Connection) -> int:
+    """Rows inserted by a crawler that predates partitioning have part NULL; give them their bucket."""
+    missing = [r["id"] for r in con.execute("SELECT id FROM items WHERE part IS NULL")]
+    if missing:
+        con.executemany("UPDATE items SET part=? WHERE id=?", [(item_part(i), i) for i in missing])
+    return len(missing)
+
+
+def item_part(item_id: str) -> int:
+    """Stable 0..999 bucket of an item id; box k of N fetches buckets with bucket % N == k."""
+    return int(hashlib.sha1(item_id.encode("utf-8")).hexdigest()[:8], 16) % 1000
 
 
 @contextlib.contextmanager

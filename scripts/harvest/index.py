@@ -14,7 +14,7 @@ import collections
 import json
 import os
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import common as C
 
@@ -29,10 +29,10 @@ def rows_from_db(con) -> List[Dict]:
     return out
 
 
-def build(con) -> Dict:
+def build(con, rows: Optional[List[Dict]] = None) -> Dict:
     from data_capture_batch import capped_minutes
 
-    rows = rows_from_db(con)
+    rows = rows_from_db(con) if rows is None else rows
     per_spk: Dict[str, float] = collections.defaultdict(float)
     per_lang: Dict[str, float] = collections.defaultdict(float)
     per_src: Dict[str, float] = collections.defaultdict(float)
@@ -48,7 +48,7 @@ def build(con) -> Dict:
         per_chan[r.get("channel_key") or "?"] += r["duration_s"]
     kept_s = sum(r["duration_s"] for r in rows)
     valid_s = sum(r["valid_s"] for r in rows)
-    st = {r["state"]: (r["n"], r["h"] or 0.0) for r in con.execute("SELECT state, COUNT(*) n, SUM(duration_s)/3600 h FROM items GROUP BY state")}
+    st = {r["state"]: (r["n"], r["h"] or 0.0) for r in con.execute("SELECT state, COUNT(*) n, SUM(duration_s)/3600 h FROM items GROUP BY state")} if con is not None else {}
     top_chan = sorted(per_chan.items(), key=lambda kv: -kv[1])[:20]
     return {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),

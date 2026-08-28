@@ -5,8 +5,9 @@
 A shard is one commit: ``clips/sNNNN/<name>/{motion.parquet,audio.opus,meta.json}`` for every
 unpushed kept clip (oldest first, <= --max-clips per commit) + ``manifests/sNNNN.json``. After the
 commit the clips are marked pushed and their local directories removed (``--keep-local`` to keep).
-Then ``index.json`` (rebuilt from the clips table, i.e. everything ever pushed) and ``README.md``
-(dataset card: license policy, per-source / per-language hours) are uploaded.
+Then ``index.json`` (the union of every ``manifests/*.json`` on the Hub, so several boxes pushing to
+one repo never overwrite each other's rows) and ``README.md`` (dataset card: license policy,
+per-source / per-language hours) are uploaded. Shard names carry the box prefix (``HARVEST_BOX``).
 
 Triggers in --loop mode: >= --min-hours of unpushed clip time, or unpushed clips occupying more than
 --max-local-gb on disk (push early to free space), or --force.
@@ -131,7 +132,7 @@ def push_shard(con, api, repo: str, clips: List[dict], keep_local: bool) -> str:
     with C.tx(con):
         n = int(C.kv_get(con, "next_shard", "1"))
         C.kv_set(con, "next_shard", str(n + 1))
-    shard = f"s{n:04d}"
+    shard = f"s{C.BOX}{n:04d}"
     ops = []
     rows = []
     for c in clips:
@@ -167,10 +168,24 @@ def push_shard(con, api, repo: str, clips: List[dict], keep_local: bool) -> str:
     return shard
 
 
+def hub_rows(api, repo: str) -> List[dict]:
+    """Every clip row from every manifests/*.json on the Hub (all boxes), so index.json is the union."""
+    from huggingface_hub import hf_hub_download
+
+    rows: List[dict] = []
+    names = [f for f in api.list_repo_files(repo, repo_type="dataset") if f.startswith("manifests/") and f.endswith(".json")]
+    for f in sorted(names):
+        p = hf_hub_download(repo, f, repo_type="dataset")
+        m = json.load(open(p, encoding="utf-8"))
+        for r in m.get("clips", []):
+            r["shard"] = m.get("shard", os.path.basename(f)[:-5])
+            r["push_state"] = "pushed"
+            rows.append(r)
+    return rows
+
+
 def push_index(con, api, repo: str) -> None:
-    idx = IDX.build(con)
-    idx["clips"] = [r for r in idx["clips"] if r.get("push_state") == "pushed"]
-    idx["totals"]["kept"] = len(idx["clips"])
+    idx = IDX.build(con, rows=hub_rows(api, repo))
     ip = os.path.join(C.STAGE, "index.json")
     with open(ip, "w", encoding="utf-8") as fh:
         json.dump(idx, fh, ensure_ascii=False)
