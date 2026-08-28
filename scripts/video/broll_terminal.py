@@ -107,6 +107,36 @@ def shot_retarget() -> dict:
                        source=cmd)
 
 
+def shot_speed_cap() -> dict:
+    """The legality checker: zero speed-cap and limit violations over the whole corpus."""
+    os.makedirs(ARTIFACTS, exist_ok=True)
+    blocks = []
+    for robot, out in (("lamp", "out/eval_lamp.txt"), ("reachy_mini", "out/eval_reachy_mini.txt")):
+        cmd = f"python scripts/retarget_eval.py --robot robots/{robot} > {out}"
+        real = f'"{PY}" scripts\\retarget_eval.py --robot robots/{robot} > {out.replace("/", chr(92))}'
+        blocks.append(pace(run_capture(real, display=cmd, pause_after=0.4), cap=1.8))
+    if any(b.exit_code != 0 for b in blocks):
+        log("  retarget_eval failed — skipping rather than showing a partial table")
+        for b in blocks:
+            log(f"  exit {b.exit_code}: {b.output[:200]}")
+        return {}
+    blocks.append(run_bash("head -n 1 out/eval_lamp.txt", pause_after=0.6))
+    blocks.append(run_bash("grep -A 4 'legality' out/eval_lamp.txt out/eval_reachy_mini.txt",
+                           pause_after=1.1))
+    shot = TermShot(title="animacy — speed cap: zero violations, every clip")
+    shot.type_cps = 27.0
+    shot.blocks = blocks
+    return record_term(shot, "s4_speed_cap.mp4", section="4", max_seconds=22.0,
+                       shows="The legality checker over the whole captured corpus, both robots: "
+                             "speed-cap and joint-limit violations, offline (retarget_clip) and "
+                             "live (the streaming path) — 0 in every column. Per-frame |delta| is "
+                             "held at or under max_speed/rate by stretching time, never by clipping.",
+                       source="python scripts/retarget_eval.py --robot robots/{lamp,reachy_mini} ; "
+                              "grep -A 4 legality",
+                       notes="The head line names the corpus the table covers (96 human clips, "
+                             "~582k frames, plus the 31 vendor native clips).")
+
+
 # ---------------------------------------------------------------------------
 # 6 — on real hardware
 # ---------------------------------------------------------------------------
@@ -248,6 +278,7 @@ SHOTS = {
     "robotmd": shot_robotmd,
     "mapping": shot_robotmd_mapping,
     "retarget": shot_retarget,
+    "speedcap": shot_speed_cap,
     "sim2real": shot_sim2real_log,
     "daemon": shot_daemon_live,
     "evidence": shot_sim2real_evidence,

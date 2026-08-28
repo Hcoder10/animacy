@@ -328,7 +328,7 @@ def make_720(master: Path, out: Path, log: list[str]) -> None:
 # A terminal recording that merely has "retarget" in its filename is not that,
 # and shipping one as the README header would be a lie about what the project
 # does, so the match has to be positive and the disqualifiers are hard.
-LOOP_WANT = ["lamp", "viewer", "nod", "ab", "lean", "gaze"]
+LOOP_WANT = ["heroloop", "hero", "loop", "lamp", "viewer", "nod", "ab", "lean", "gaze"]
 LOOP_BLOCK = ["csv", "terminal", "report", "table", "check", "robotmd", "robot_md",
               "score", "readback", "read_back", "evidence", "datareport", "manifest",
               "mapping", "preview", "bars"]

@@ -1,9 +1,9 @@
-﻿// animacy browser viewer: two URDF robots driven by one canonical motion space.
+// animacy browser viewer: two URDF robots driven by one canonical motion space.
 //
 //   profile JSON (web/robots/<name>.json, written by `animacy profile export`)
-//     â””â”€ description.urdf â†’ ../robots/<name>/<urdf>  â†’ RobotViewer (three.js + urdf-loader)
-//     â””â”€ retarget.<mode>  â†’ LiveRetargeter (same equations as animacy/retarget.py)
-//   motion source (motion_source.js) â†’ frame â†’ retargeter â†’ toUrdfValues â†’ viewer.setJoints
+//     └─ description.urdf → ../robots/<name>/<urdf>  → RobotViewer (three.js + urdf-loader)
+//     └─ retarget.<mode>  → LiveRetargeter (same equations as animacy/retarget.py)
+//   motion source (motion_source.js) → frame → retargeter → toUrdfValues → viewer.setJoints
 //
 // Everything that can fail (fetches, camera, models) is caught and shown in
 // the status line; the render loop never throws.
@@ -38,13 +38,13 @@ const LAYOUT = new URLSearchParams(location.search).get('layout') === 'equal' ? 
 const HERO = {
   robot: 'lamp',
   weight: 62 / 38,                                          // hero column vs. every other column
-  framing: { link: 'head', fill: 0.45, anchor: 0.58, view: 'iso' },  // 3/4 front, head â‰ˆ 45 % of the viewport height
+  framing: { link: 'head', fill: 0.45, anchor: 0.58, view: 'iso' },  // 3/4 front, head ≈ 45 % of the viewport height
 };
 // The Lamp quick-start row: one click puts the page in a demo state.
 const DEMOS = {
   ab: { label: 'Vendor nod vs animacy nod (A/B)', title: 'the vendor\'s hand-authored nod next to a human nod retargeted through ROBOT.md' },
-  human: { label: 'Human clip â†’ lamp (look left / brows / lean-in)', title: 'three calibration clips in a row: look left/right, brows, lean-in â€” each through the lamp\'s ROBOT.md' },
-  talk: { label: 'Talk: "No way, that is incredible news!"', title: 'Kokoro TTS in the page (af_heart) â†’ speech features â†’ motion retrieval â†’ the lamp, in sync' },
+  human: { label: 'Human clip → lamp (look left / brows / lean-in)', title: 'three calibration clips in a row: look left/right, brows, lean-in — each through the lamp\'s ROBOT.md' },
+  talk: { label: 'Talk: "No way, that is incredible news!"', title: 'Kokoro TTS in the page (af_heart) → speech features → motion retrieval → the lamp, in sync' },
 };
 const DEMO_HUMAN_PLAYLIST = ['synth/cal_look_left_right', 'synth/cal_brows', 'synth/cal_lean_in'];
 const DEMO_TALK_LINE = 'No way, that is incredible news!';
@@ -70,7 +70,7 @@ let manifest = null;
 const app = {
   ready: false,
   robotNames: [],        // loaded robots, in viewport order
-  robots: {},            // name â†’ {profile, viewer, retargeters, alias, standin, urdfUrl, values, urdf, missingJoints}
+  robots: {},            // name → {profile, viewer, retargeters, alias, standin, urdfUrl, values, urdf, missingJoints}
   sourceKind: null,      // 'native' | 'canonical' | 'webcam' | 'model'
   source: null,
   clips: { native: [], canonical: [] },
@@ -124,7 +124,7 @@ window.addEventListener('unhandledrejection', (e) => { reportError('promise', e.
 // ---------------------------------------------------------------------------
 async function loadRobot(name, container, { forAb = false } = {}) {
   const profile = await fetchJsonOrNull(`robots/${name}.json`);
-  if (!profile) throw new Error(`robots/${name}.json missing â€” run: animacy profile export robots/${name} -o web/robots/${name}.json`);
+  if (!profile) throw new Error(`robots/${name}.json missing — run: animacy profile export robots/${name} -o web/robots/${name}.json`);
   const robotDir = `../robots/${name}`;
   let urdfUrl = `${robotDir}/${profile.description.urdf}`;
   // package://<x>/ inside a shipped URDF resolves inside the robot folder
@@ -211,8 +211,8 @@ function createViewport(name, { before = null, removable = false } = {}) {
   sec.id = `vp-${name}`;
   sec.dataset.robot = name;
   sec.innerHTML = `<div class="vp-label"><span class="vp-title">${robotLabel(name)}</span><span class="badge" id="badge-${name}"></span></div>` +
-    `<div class="vp-sub" id="sub-${name}"></div><div class="vp-loading" id="loading-${name}">loading URDFâ€¦</div>` +
-    (removable ? `<button class="vp-close" title="close this viewport">âœ•</button>` : '');
+    `<div class="vp-sub" id="sub-${name}"></div><div class="vp-loading" id="loading-${name}">loading URDF…</div>` +
+    (removable ? `<button class="vp-close" title="close this viewport">✕</button>` : '');
   const parent = $('viewports');
   if (before) parent.insertBefore(sec, before); else parent.insertBefore(sec, $('webcam-thumb'));
   if (removable) sec.querySelector('.vp-close').addEventListener('click', () => removeRobot(name));
@@ -305,7 +305,7 @@ function removeRobot(name) {
 
 function fillAddRobotPicker() {
   const sel = $('add-robot');
-  sel.innerHTML = '<option value="">+ add robotâ€¦</option>';
+  sel.innerHTML = '<option value="">+ add robot…</option>';
   for (const name of manifestRobots()) {
     if (app.robots[name]) continue;
     const m = manifest && manifest.robots && manifest.robots[name];
@@ -342,13 +342,13 @@ function describeRobot(R, forAb = false) {
   if (R.standin) {
     badge.textContent = 'stand-in URDF';
     badge.className = 'badge warn';
-    if (!forAb) sub.textContent = R.standin.note + (R.missingJoints.length ? ` Â· not driven: ${R.missingJoints.join(', ')}` : '');
+    if (!forAb) sub.textContent = R.standin.note + (R.missingJoints.length ? ` · not driven: ${R.missingJoints.join(', ')}` : '');
   } else {
     badge.textContent = R.missingJoints.length ? `${R.missingJoints.length} joint(s) missing` : '';
     badge.className = R.missingJoints.length ? 'badge warn' : 'badge';
     if (!forAb) {
       const p = R.profile;
-      sub.textContent = `${p.vendor} Â· ${p.joints.length} joints Â· ${R.profile.description.urdf}` + (R.missingJoints.length ? ` Â· missing in URDF: ${R.missingJoints.join(', ')}` : '');
+      sub.textContent = `${p.vendor} · ${p.joints.length} joints · ${R.profile.description.urdf}` + (R.missingJoints.length ? ` · missing in URDF: ${R.missingJoints.join(', ')}` : '');
     }
   }
 }
@@ -364,7 +364,7 @@ async function discoverClips() {
   const addNative = (robot, files) => {
     for (const f of files) {
       const fmt = f.file.endsWith('.csv') ? 'autonomous_csv' : 'joint_json';
-      app.clips.native.push({ id: `${robot}/${f.name}`, label: `${robot} Â· ${f.name}`, robot, url: `../robots/${robot}/clips/native/${f.file}`, fmt, description: f.description });
+      app.clips.native.push({ id: `${robot}/${f.name}`, label: `${robot} · ${f.name}`, robot, url: `../robots/${robot}/clips/native/${f.file}`, fmt, description: f.description });
     }
   };
   if (manifest && manifest.native) {
@@ -384,7 +384,7 @@ async function discoverClips() {
   const addCaptured = (f) => {
     if (seen.has(f.file)) return;
     seen.add(f.file);
-    app.clips.canonical.push({ id: `clip/${f.name}`, label: `captured Â· ${f.name}`, url: `clips/${f.file}`, group: 'captured', description: f.description });
+    app.clips.canonical.push({ id: `clip/${f.name}`, label: `captured · ${f.name}`, url: `clips/${f.file}`, group: 'captured', description: f.description });
   };
   if (manifest && manifest.clips) normaliseListing(manifest.clips, '.json').forEach(addCaptured);
   // on a local http.server, newly dropped files show up without rebuilding the manifest
@@ -392,14 +392,14 @@ async function discoverClips() {
 }
 
 function pollenMoveToTrack(obj, name) {
-  // Pollen recorded-move JSON (export.py to_pollen_move) â†’ joint table
+  // Pollen recorded-move JSON (export.py to_pollen_move) → joint table
   const t = obj.time.map((x) => x - obj.time[0]);
   const data = { head_x: [], head_y: [], head_z: [], head_roll: [], head_pitch: [], head_yaw: [], antenna_left: [], antenna_right: [], body_yaw: [] };
   const RAD = 180 / Math.PI;
   for (const s of obj.set_target_data) {
     const M = s.head;
     data.head_x.push(M[0][3] * 1000); data.head_y.push(M[1][3] * 1000); data.head_z.push(M[2][3] * 1000);
-    // ZYX euler from R = RzÂ·RyÂ·Rx (matches export._rpy_to_matrix)
+    // ZYX euler from R = Rz·Ry·Rx (matches export._rpy_to_matrix)
     data.head_yaw.push(Math.atan2(M[1][0], M[0][0]) * RAD);
     data.head_pitch.push(Math.asin(Math.min(1, Math.max(-1, -M[2][0]))) * RAD);
     data.head_roll.push(Math.atan2(M[2][1], M[2][2]) * RAD);
@@ -462,7 +462,7 @@ function stopSource() {
   app.channels = null;
   $('time').textContent = '0.00 / 0.00 s';
   $('scrub').value = '0';
-  $('play').textContent = 'â–¶';
+  $('play').textContent = '▶';
 }
 
 async function setSource(kind) {
@@ -498,7 +498,7 @@ async function setSource(kind) {
       app.source = t;
       app.talk = t;
       const avail = app.backends.available();
-      setStatus(`talk: type a line and press Say it Â· backends: ${avail.join(' / ')}${app.backends.hasModel ? '' : ' (no model bundle in web/models/ â€” envelope heuristic only)'}`, 'ok');
+      setStatus(`talk: type a line and press Say it · backends: ${avail.join(' / ')}${app.backends.hasModel ? '' : ' (no model bundle in web/models/ — envelope heuristic only)'}`, 'ok');
     } else if (kind === 'listen') {
       const l = new ListenSource({
         backends: app.backends, backend: $('listen-backend').value,
@@ -507,7 +507,7 @@ async function setSource(kind) {
       });
       app.source = l;
       await l.start();
-      setStatus('listen: microphone â†’ VAD â†’ causal model (speaking = 0) + gaze overlay from the camera â†’ both robots Â· experimental', 'ok');
+      setStatus('listen: microphone → VAD → causal model (speaking = 0) + gaze overlay from the camera → both robots · experimental', 'ok');
     }
   } catch (e) {
     reportError(`source ${kind}`, e);
@@ -555,12 +555,12 @@ async function sayAudio(samples, sr, backend = null, text = '', intentOverride =
 function fillBackendSelects() {
   const avail = app.backends ? app.backends.available() : ['envelope'];
   const labels = {
-    model: 'model (learned, ONNX) â€” experimental',
+    model: 'model (learned, ONNX) — experimental',
     retrieval: 'retrieval (motion matching, default)',
     envelope: 'envelope heuristic (no model)',
   };
   const titles = {
-    model: 'learned audioâ†’motion (VQ codes + transformer). Experimental: beats its shuffled-audio control on one of two held-out speakers â€” see docs/RESULTS.md',
+    model: 'learned audio→motion (VQ codes + transformer). Experimental: beats its shuffled-audio control on one of two held-out speakers — see docs/RESULTS.md',
     retrieval: 'motion matching: real human motion from the corpus, aligned to the speech (the default source)',
     envelope: 'explicit speech-energy heuristic, labelled as such; the floor the learned sources must beat',
   };
@@ -601,7 +601,7 @@ async function setClip(id, { fromPlaylist = false } = {}) {
   if (!fromPlaylist) app.playlist = null;
   app.clipId = id;
   $('clip-select').value = id;
-  setStatus(`loading ${entry.label}â€¦`);
+  setStatus(`loading ${entry.label}…`);
   const track = await getTrack(entry);
   stopSource();
   const Src = entry.synthetic ? SyntheticSource : ClipSource;
@@ -610,10 +610,10 @@ async function setClip(id, { fromPlaylist = false } = {}) {
   if (track.kind === 'joint') restAll(track.robot);
   else for (const R of Object.values(app.robots)) for (const rt of Object.values(R.retargeters)) rt.reset();
   $('scrub').max = String(track.duration || 1);
-  $('play').textContent = app.source.playing ? 'âšâš' : 'â–¶';
+  $('play').textContent = app.source.playing ? '❚❚' : '▶';
   const info = track.kind === 'joint'
-    ? `${entry.label} â€” vendor clip, ${track.n} frames, ${track.duration.toFixed(2)} s, plays raw on ${track.robot}`
-    : `${entry.label} â€” canonical, ${track.n} frames @ ${track.duration.toFixed(2)} s â†’ retargeted through both ROBOT.md (${app.mode})`;
+    ? `${entry.label} — vendor clip, ${track.n} frames, ${track.duration.toFixed(2)} s, plays raw on ${track.robot}`
+    : `${entry.label} — canonical, ${track.n} frames @ ${track.duration.toFixed(2)} s → retargeted through both ROBOT.md (${app.mode})`;
   setStatus(info, 'ok');
 }
 
@@ -632,7 +632,7 @@ async function startWebcam() {
   for (const R of Object.values(app.robots)) for (const rt of Object.values(R.retargeters)) rt.reset();
   app.recorder = new Recorder({ webcam: wc, onStatus: (m) => setStatus(`record: ${m}`, 'ok') });
   wc.onFrame((f) => app.recorder.onFrame(f));
-  setStatus('webcam live â†’ canonical channels â†’ both robots', 'ok');
+  setStatus('webcam live → canonical channels → both robots', 'ok');
 }
 
 // ---------------------------------------------------------------------------
@@ -646,16 +646,16 @@ async function toggleRecord() {
     if (!rec.recording) {
       const subject = $('rec-subject').value || 'me';
       await rec.start({ subject, slug: `take${rec.takes.length + 1}`, role: $('rec-role').value, prompt: '(free take)' });
-      btn.textContent = 'â–  Stop';
+      btn.textContent = '■ Stop';
       btn.classList.add('on');
       $('rec-dot').hidden = false;
     } else {
       await rec.stop();
-      btn.textContent = 'â— Record';
+      btn.textContent = '● Record';
       btn.classList.remove('on');
       $('rec-dot').hidden = true;
       $('rec-download').disabled = false;
-      toast(`saved ${rec.take.name}: ${rec.take.n} frames, ${rec.take.seconds.toFixed(1)} s â€” press "Download take"`, 6000);
+      toast(`saved ${rec.take.name}: ${rec.take.n} frames, ${rec.take.seconds.toFixed(1)} s — press "Download take"`, 6000);
     }
   } catch (e) {
     reportError('record', e);
@@ -664,11 +664,11 @@ async function toggleRecord() {
 
 function sessionState(s) {
   const p = s.prompt;
-  $('sp-progress').textContent = p ? `${s.index + 1}/${s.total} Â· ${p.slug} Â· ${p.role} Â· ${p.seconds}s` : `${s.done.length}/${s.total} takes`;
+  $('sp-progress').textContent = p ? `${s.index + 1}/${s.total} · ${p.slug} · ${p.role} · ${p.seconds}s` : `${s.done.length}/${s.total} takes`;
   const count = $('sp-count');
   count.classList.toggle('rec', s.phase === 'recording');
-  if (s.phase === 'prompt' || s.phase === 'countdown') { $('sp-prompt').textContent = p.text; count.textContent = s.phase === 'countdown' ? (s.remaining > 3 ? `readâ€¦ ${s.remaining}` : String(s.remaining)) : ''; }
-  else if (s.phase === 'recording') { $('sp-prompt').textContent = p.text; count.textContent = `â— ${s.remaining}s`; }
+  if (s.phase === 'prompt' || s.phase === 'countdown') { $('sp-prompt').textContent = p.text; count.textContent = s.phase === 'countdown' ? (s.remaining > 3 ? `read… ${s.remaining}` : String(s.remaining)) : ''; }
+  else if (s.phase === 'recording') { $('sp-prompt').textContent = p.text; count.textContent = `● ${s.remaining}s`; }
   else if (s.phase === 'saved') { count.textContent = 'got it'; }
   else if (s.phase === 'error') { $('sp-prompt').textContent = `could not start recording: ${s.error}`; count.textContent = ''; }
   else if (s.phase === 'complete' || s.phase === 'aborted') {
@@ -683,7 +683,7 @@ function sessionState(s) {
   ul.innerHTML = '';
   for (const t of s.done) {
     const li = document.createElement('li');
-    li.textContent = `${t.name} â€” ${t.n} frames, ${t.seconds.toFixed(1)} s, face ${(t.meta.face_valid_fraction * 100).toFixed(0)}%`;
+    li.textContent = `${t.name} — ${t.n} frames, ${t.seconds.toFixed(1)} s, face ${(t.meta.face_valid_fraction * 100).toFixed(0)}%`;
     ul.appendChild(li);
   }
 }
@@ -715,7 +715,7 @@ function setMode(mode) {
     // continue from the current pose instead of snapping to rest
     Object.assign(R.retargeters[mode].state, R.values);
   }
-  const hint = mode === 'puppet' ? ' Â· puppet: your arm drives the lamp; wrist drives the reachy head' : '';
+  const hint = mode === 'puppet' ? ' · puppet: your arm drives the lamp; wrist drives the reachy head' : '';
   if (app.sourceKind !== 'native') setStatus(`mapping = ${mode}${hint}`, 'ok');
 }
 
@@ -746,7 +746,7 @@ async function setAb(on) {
 }
 
 // ---------------------------------------------------------------------------
-// Lamp quick-start: one click â†’ a demo state (also `animacy.demo(name)`)
+// Lamp quick-start: one click → a demo state (also `animacy.demo(name)`)
 // ---------------------------------------------------------------------------
 async function runDemo(name, { say = true } = {}) {
   if (!DEMOS[name]) throw new Error(`unknown demo ${name} (have ${Object.keys(DEMOS).join(', ')})`);
@@ -758,7 +758,7 @@ async function runDemo(name, { say = true } = {}) {
     if (app.clips.native.some((e) => e.id === 'lamp/nod')) await setAbClip('lamp/nod');
     app.loop = true; $('loop').checked = true; app.source.loop = true;
     app.source.play();
-    setStatus('A/B: left = a human nod retargeted through the lamp\'s ROBOT.md Â· middle = the vendor\'s own nod CSV, raw Â· right = the same human nod on Reachy', 'ok');
+    setStatus('A/B: left = a human nod retargeted through the lamp\'s ROBOT.md · middle = the vendor\'s own nod CSV, raw · right = the same human nod on Reachy', 'ok');
   } else if (name === 'human') {
     await setSource('canonical');
     await setAb(false);
@@ -767,7 +767,7 @@ async function runDemo(name, { say = true } = {}) {
     await setClip(ids[0], { fromPlaylist: true });
     app.playlist = { ids, i: 0 };
     app.source.play();
-    setStatus(`playlist: ${ids.map((id) => id.replace('synth/cal_', '')).join(' â†’ ')} â€” human motion through each ROBOT.md`, 'ok');
+    setStatus(`playlist: ${ids.map((id) => id.replace('synth/cal_', '')).join(' → ')} — human motion through each ROBOT.md`, 'ok');
   } else if (name === 'talk') {
     await setSource('talk');
     await setAb(false);
@@ -809,7 +809,7 @@ async function setAbClip(id) {
   $('ab-select').value = id;
   const track = await getTrack(entry);
   app.ab.source = new ClipSource(track, { loop: true, speed: app.speed });
-  $('sub-lamp-ab').textContent = `B = vendor's hand-authored '${entry.label.replace('lamp Â· ', '')}' CSV, played raw Â· A (left) = retargeted from the human clip`;
+  $('sub-lamp-ab').textContent = `B = vendor's hand-authored '${entry.label.replace('lamp · ', '')}' CSV, played raw · A (left) = retargeted from the human clip`;
 }
 
 // ---------------------------------------------------------------------------
@@ -820,7 +820,7 @@ const bars = { channels: {}, joints: {} };
 function makeBar(parent, key, label, cls = '') {
   const el = document.createElement('div');
   el.className = `bar ${cls}`;
-  el.innerHTML = `<span class="k" title="${key}">${label}</span><span class="track"><span class="mid"></span><span class="fill"></span></span><span class="v">â€“</span>`;
+  el.innerHTML = `<span class="k" title="${key}">${label}</span><span class="track"><span class="mid"></span><span class="fill"></span></span><span class="v">–</span>`;
   parent.appendChild(el);
   return { el, fill: el.querySelector('.fill'), v: el.querySelector('.v'), mid: el.querySelector('.mid') };
 }
@@ -836,7 +836,7 @@ function buildReadouts() {
 }
 
 function setBar(b, v, unit = '') {
-  if (v === null || v === undefined || Number.isNaN(v)) { b.fill.style.width = '0%'; b.v.textContent = 'â€“'; b.el.classList.add('stale'); return; }
+  if (v === null || v === undefined || Number.isNaN(v)) { b.fill.style.width = '0%'; b.v.textContent = '–'; b.el.classList.add('stale'); return; }
   b.el.classList.remove('stale');
   const span = b.hi - b.lo || 1;
   if (b.signed) {
@@ -855,7 +855,7 @@ function setBar(b, v, unit = '') {
 function updateReadouts() {
   const ch = app.channels;
   for (const c of READOUT_CHANNELS) setBar(bars.channels[c], ch ? ch[c] : null, UNITS[c]);
-  $('channels-note').textContent = app.sourceKind === 'native' ? 'â€” (native clip: robot joint space, no canonical frame)' : 'â€” docs/CANONICAL.md, neutral-relative';
+  $('channels-note').textContent = app.sourceKind === 'native' ? '— (native clip: robot joint space, no canonical frame)' : '— docs/CANONICAL.md, neutral-relative';
   for (const n of app.robotNames) {
     const R = app.robots[n];
     if (!R || !bars.joints[n]) continue;
@@ -926,7 +926,7 @@ function loop(now) {
 
 // Frame-accurate capture (web/dev/demo_video.py): the page advances only when the
 // capturer calls stepFrame(dt) and screenshots the result, so frame i of the video is
-// exactly iÂ·dt of clip time on every source, however slow the renderer is.
+// exactly i·dt of clip time on every source, however slow the renderer is.
 function setCapture(on, dt = 1 / 30) {
   app.capture = on ? { dt } : null;
   $('fps').hidden = !!on;
@@ -948,17 +948,17 @@ function tick(dt, now) {
         const s = app.source;
         if (document.activeElement !== $('scrub')) $('scrub').value = String(s.time);
         $('time').textContent = `${s.time.toFixed(2)} / ${s.duration.toFixed(2)} s`;
-        const glyph = s.playing ? 'âšâš' : 'â–¶';
+        const glyph = s.playing ? '❚❚' : '▶';
         if ($('play').textContent !== glyph) $('play').textContent = glyph;
         if (app.playlist && s.finished) advancePlaylist();
       }
       if (app.sourceKind === 'webcam' && app.webcam) {
         const w = app.webcam;
-        $('webcam-stat').textContent = `${w.fps.toFixed(0)} fps Â· face ${w.stats.faceMs.toFixed(0)} ms Â· pose ${w.stats.poseMs.toFixed(0)} ms Â· ${w.hasFace ? 'face' : 'no face'} Â· ${w.hasPose ? 'pose' : 'no pose'}${w.speaking ? ' Â· speaking' : ''}`;
+        $('webcam-stat').textContent = `${w.fps.toFixed(0)} fps · face ${w.stats.faceMs.toFixed(0)} ms · pose ${w.stats.poseMs.toFixed(0)} ms · ${w.hasFace ? 'face' : 'no face'} · ${w.hasPose ? 'pose' : 'no pose'}${w.speaking ? ' · speaking' : ''}`;
         if (app.recorder && app.recorder.recording) $('rec-time').textContent = app.recorder.seconds.toFixed(1);
       } else if (app.sourceKind === 'listen' && app.source instanceof ListenSource) {
         const l = app.source;
-        $('listen-stat').textContent = `${l.talking ? 'you are talking' : 'quiet'} Â· queue ${l.queue.length} Â· gaze ${l.cam ? (l.gaze.hasFace ? `yaw ${l.gaze.yaw.toFixed(0)}Â° pitch ${l.gaze.pitch.toFixed(0)}Â°` : 'no face') : 'off (no camera)'}`;
+        $('listen-stat').textContent = `${l.talking ? 'you are talking' : 'quiet'} · queue ${l.queue.length} · gaze ${l.cam ? (l.gaze.hasFace ? `yaw ${l.gaze.yaw.toFixed(0)}° pitch ${l.gaze.pitch.toFixed(0)}°` : 'no face') : 'off (no camera)'}`;
       }
     }
     if (app.ab.on && app.ab.source && app.ab.viewer) {
@@ -1000,13 +1000,13 @@ function wireUi() {
   $('scrub').addEventListener('input', (e) => { if (app.source && app.source.seek) app.source.seek(parseFloat(e.target.value)); });
   $('speed').addEventListener('input', (e) => {
     app.speed = parseFloat(e.target.value);
-    $('speed-val').textContent = `${app.speed.toFixed(2)}Ã—`;
+    $('speed-val').textContent = `${app.speed.toFixed(2)}×`;
     if (app.source && 'speed' in app.source) app.source.speed = app.speed;
     if (app.ab.source) app.ab.source.speed = app.speed;
   });
   $('ab').addEventListener('change', (e) => setAb(e.target.checked).catch((err) => reportError('A/B', err)));
   $('ab-select').addEventListener('change', (e) => setAbClip(e.target.value).catch((err) => reportError('A/B clip', err)));
-  $('set-neutral').addEventListener('click', () => { if (app.webcam) { if (!app.webcam.setNeutral()) toast('no face tracked yet â€” look at the camera'); } });
+  $('set-neutral').addEventListener('click', () => { if (app.webcam) { if (!app.webcam.setNeutral()) toast('no face tracked yet — look at the camera'); } });
   $('arm-select').addEventListener('change', (e) => { if (app.webcam) app.webcam.arm = e.target.value; });
   wireRecordUi();
   $('talk-say').addEventListener('click', () => sayText($('talk-text').value));
@@ -1025,7 +1025,7 @@ function wireUi() {
   for (const e of app.clips.native.filter((c) => c.robot === 'lamp')) {
     const o = document.createElement('option');
     o.value = e.id;
-    o.textContent = e.label.replace('lamp Â· ', 'B: ');
+    o.textContent = e.label.replace('lamp · ', 'B: ');
     abSel.appendChild(o);
   }
 }
@@ -1034,12 +1034,12 @@ function wireUi() {
 // boot
 // ---------------------------------------------------------------------------
 async function boot() {
-  setStatus('loading robotsâ€¦');
+  setStatus('loading robots…');
   manifest = await fetchJsonOrNull('manifest.json');
-  if (!manifest) console.warn('[animacy] web/manifest.json missing â€” probing for files instead (run python web/dev/build_manifest.py)');
+  if (!manifest) console.warn('[animacy] web/manifest.json missing — probing for files instead (run python web/dev/build_manifest.py)');
   buildReadouts();
   layoutViewports();
-  // headline pair: the lamp first (left of the A/B slot, hero-framed), then the reachy, then any ?robots=â€¦ extras
+  // headline pair: the lamp first (left of the A/B slot, hero-framed), then the reachy, then any ?robots=… extras
   const wanted = (params.get('robots') || '').split(',').map((s) => s.trim()).filter(Boolean);
   const headline = HEADLINE_ROBOTS.filter((n) => manifestRobots().includes(n));
   for (const n of headline) await addRobot(n, { headline: true, before: n === 'lamp' ? $('vp-lamp-ab') : null }).catch(() => null);
@@ -1110,7 +1110,7 @@ Object.assign(app, {
     return R.viewer.renderer.domElement.toDataURL(mime);
   },
   // World-space forward (+x) axis of a link, in three.js coordinates: x = robot forward,
-  // y = up, z = robot RIGHT (URDF âˆ’y). A head turning LEFT makes z go negative; looking UP makes y go positive.
+  // y = up, z = robot RIGHT (URDF −y). A head turning LEFT makes z go negative; looking UP makes y go positive.
   linkForward: (name, link = 'head') => {
     const R = app.robots[name];
     if (!R || !R.viewer.robot || !R.viewer.robot.links[link]) return null;

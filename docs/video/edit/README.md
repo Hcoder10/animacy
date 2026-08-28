@@ -30,6 +30,23 @@ lands and again after every delivery.
 | `data/video/edit/report.json` | what the last run produced, including anything still missing |
 | `data/video/edit/qc/` | frames pulled back out of the finished render and looked at |
 
+## The scripts
+
+| Script | What it does |
+|---|---|
+| `edit_all.py` | the one command: build the EDL, the project, and every deliverable |
+| `edit_common.py` | paths, script parsing, manifests, **the cut plan**, and the EDL |
+| `edit_assets.py` | lower-thirds, end card, placeholder cards, room tone, narration levelling |
+| `edit_mlt.py` | writes the MLT XML that Kdenlive opens and melt renders |
+| `edit_render.py` | melt and ffmpeg render paths, derivatives, QC frames |
+| `edit_summary.py` | what the current cut actually is — read this before calling it done |
+| `edit_verify_sync.py` | proves every shot pulls the frame the EDL says it should |
+| `edit_check_sources.py` | are the host renders consistent with the current timeline? |
+
+If you want to change the edit rather than the machinery, `CUTPLAN`,
+`DISSOLVES`, `JCUTS`, `LOWER_THIRDS` and `DROP_ORDER` in `edit_common.py` are
+the whole of it.
+
 ## How the cut is structured
 
 **The narration is the spine.** Every video cut lands on the end of a spoken
@@ -213,14 +230,40 @@ being written exists on disk, has a plausible size, and cannot be decoded — an
 mp4's `moov` atom is only finalised when the encoder closes the file. Camera A
 was re-rendered mid-pass at one point and the master had to be thrown away.
 
-Two defences:
+The worse hazard is a clip that decodes perfectly and is simply from a previous
+version of the timeline. `show.json` is regenerated whenever the narration
+changes, and the host motion is baked into the camera renders against that
+clock; a camera rendered against the old one is exactly as long as the old
+timeline and drifts against the words by the difference. This happened: the
+show went from 227.000 s to 223.967 s, and `A/full.mp4` plus section 6 on
+cameras B, C and D were left behind. A master had already been rendered with
+them and was thrown away. No frame of it looked wrong — the wide shot was
+simply ahead of its own dialogue, which you only see in motion.
+
+Three defences:
 
 - Any file under `data/video/podcast/` or `data/video/broll/` that exists but
   will not probe is reported as `UNREADABLE (still being written?)` and named.
   Without this the build would quietly fall back to another camera and drop an
   angle from the whole film with nothing in the log to say so.
-- Before a final render, wait until every source file both probes cleanly and
-  has stopped changing size.
+- A camera clip whose duration does not match the section — or the whole show —
+  it claims to cover is **rejected**, not used, and named under
+  `REJECTED as being from a different timeline`. Where two versions of a clip
+  exist, the higher `_vN` wins, since a re-render corrects the one before it.
+- Before a final render, check the whole set is consistent:
+
+  ```
+  python scripts/video/edit_check_sources.py            # one report
+  python scripts/video/edit_check_sources.py --watch    # until consistent
+  ```
+
+  Exit code 0 means every `(camera, section)` **the cut plan actually asks
+  for** is covered by a clip consistent with the current `show.json`. It is
+  deliberately not "every file on disk is current": a superseded clip sitting
+  next to its re-render is ignored, and so is a stale angle this film never
+  cuts to — holding up a render for camera C in a section that plays entirely
+  on b-roll would be waiting for nothing. It is cheap enough to poll, unlike a
+  full build.
 
 ## Where the material comes from
 

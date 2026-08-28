@@ -56,6 +56,10 @@ rest. Currently measured over all 34 lines:
 | LAMP | 74.1 deg | **49.7** | OK |
 | REACHY | 37.9 deg | **15.9** | OK |
 
+(Re-measured on the current 6719-frame cut: LAMP 74.1 -> 48.6, REACHY 37.9 ->
+16.1. Re-measure after any change to the placement, either `ROBOT.md`, or the
+gaze constants.)
+
 Re-run that check if either `ROBOT.md`, either URDF, or the placement changes.
 
 The only hand-authored numbers in the whole show are the set itself: the settle
@@ -70,8 +74,13 @@ they cannot drift:
 |---|---|---|
 | lead-in (both at rest) | 36 | 1.20 |
 | settle between lines in a section | 11 | 0.367 |
-| beat between sections (ease to rest, hold, ease out) | 33 | 1.10 |
+| beat between sections (ease to rest, hold, ease out) | 16 | 0.533 |
 | tail | 45 | 1.50 |
+
+The section beat is 16 frames because the edit caps section gaps at 0.55 s; making
+it fit means the cut never has to trim one. The in-section settle is deliberately
+*not* shortened — both robots are mid-behaviour there, and trimming would slide
+the picture against the motion generated for it.
 
 Line *k* starts at row `f_start` of the joint tracks and at sample
 `f_start / 30 · 16000` of `narration.wav`. Gaps are a smoothstep from the last
@@ -87,7 +96,7 @@ no motion is ever cut and the pose simply rests into the gap.
 
 ```jsonc
 {
-  "fps": 30, "n_frames": 6810, "seconds": 227.0,   // 34 lines, 9 sections
+  "fps": 30, "n_frames": 6719, "seconds": 223.97,  // 34 lines, 9 sections
   "narration_wav": "narration.wav",
   "placeholder_voice": false,
   "hosts":    { "lamp": {"robot": "lamp", "joints": [...], "rest": [...]}, "reachy": {...} },
@@ -120,10 +129,31 @@ pool of light on it for separation, and two plinths.
   URDF's +x, so `podcast.js` measures the rest gaze direction (via
   `description.viewer.gaze`) and solves the body yaw that lands it there.
 - **Light.** Warm key from camera-left, above and in front — the only shadow
-  caster. Cool rim from behind camera-right. A low warm bounce so the plinths are
-  not holes, and a wash on the cyclorama placed past the hosts so it cannot spill
-  onto them. Key intensity is deliberately low: both shells are near-white and
-  clip to paper above about 13.
+  caster. Cool rim from behind camera-right. A low neutral fill from camera-right
+  (no shadows of its own: a second shadow caster on a two-hander reads as a
+  mistake), a warm bounce so the plinths are not holes, and a wash on the
+  cyclorama placed past the hosts so it cannot spill onto them.
+- **Why the key is only 10.5.** Both shells are near-white, and the lamp's base
+  carries a fan grille and vent slots whose upward faces sit directly under the
+  key. Any brighter and they clip to flat white and read as *shattered geometry*.
+  That is what the "white shards on the lamp base" were — not a broken or badly
+  decimated mesh (there is one `base.stl` and no decimated variant), and not
+  normals. Exposure 0.95 and roughness 0.52 hold the same highlight.
+
+### Shading: why `computeVertexNormals()` alone cannot help
+
+An STL stores three **unshared** vertices per triangle. The viewer's
+`computeVertexNormals()` therefore has nothing to average across and can only
+ever produce flat shading — which reads as hard facets on the lamp's shade and
+Reachy's shell at 1080p. No smoothing-angle setting fixes that, because there are
+no shared vertices to smooth over. `podcast.js` welds the duplicates with
+`mergeVertices()` first, then `toCreasedNormals(geometry, 42°)`, so curved
+surfaces shade smoothly and genuine edges stay hard.
+
+Shells are also drawn `DoubleSide` (the viewer's choice: exported STLs mix
+windings). That is fine until they cast shadows — back faces get written into the
+shadow map and a part with interior geometry self-shadows into hard artefacts —
+so the podcast page sets `material.shadowSide = THREE.FrontSide`.
 
 Because the plinth heights, the body yaws and every camera are *solved from
 measurements of the loaded URDFs*, the set survives a robot changing shape. If a
@@ -148,9 +178,19 @@ raised shade or a swung antenna cannot leave frame halfway through a take.
 | D | over the shoulder, behind LAMP onto REACHY |
 | E | the wide with a 1 deg push-in across the take (open and close) |
 
-B, C and D are cut to the sections exactly: a take runs from the first line's
-`f_start` to the last line's end, so the ~1 s beat *between* two sections is not
-in any of them. Cut those beats on A, which covers the show unbroken.
+A is one file over the whole timeline from t=0. B/C/D/E are one file per section,
+`<cam>/sNN.mp4`, NN being the 1-based section number; E additionally has
+`open.mp4` (lead-in + section 1) and `close.mp4` (section 9 + tail).
+
+`--tail-frames N` extends each per-section take past its section end so a cut can
+run into the following gap instead of freezing on the last frame. It never moves
+a clip's **first** frame, so `t_start` — the only thing an edit needs to sync on
+— is unaffected. 30 frames (1.0 s) is the useful default; without it, a shot that
+runs past its section has nothing to dissolve out of.
+
+`--suffix _v2` writes `<section>_v2.mp4`, so a re-render never overwrites a file
+an editor is already reading. Every manifest entry carries a `variant`, and the
+manifest's `convention` block states all of the above rather than implying it.
 
 No orbiting, no bobbing, no handheld. E's push is the only camera move: it loses
 `push` degrees of field of view linearly across the frames of *that take*, which
@@ -220,5 +260,36 @@ a warning when it sees it. The motion is real — it is generated from that
 placeholder audio — so the set, the framing and the timing are all workable. It
 is not the footage: re-run `show_build.py` when
 `data/video/voice/manifest.json` lands, then re-render.
+
+## One manifest, one timeline
+
+The show was rebuilt once mid-production (a reworded line, plus shorter section
+gaps), which left two generations of footage on disk at different lengths. That
+is a live hazard: an edit reads `t_start` out of `render_manifest.json`, so a
+clip from the wrong generation sends every cut on that camera to the wrong frame
+— and the mismatch is invisible in a still and obvious the moment anyone watches.
+
+So `render_manifest.json` describes exactly one timeline. It carries a
+`timeline` block naming the show, its frame count and its length, and it lists
+only clips that fit it; superseded clips move to `render_manifest_v1.json`
+stamped SUPERSEDED, beside the `show_v1.json` they belong to. Re-renders go to a
+`--suffix` rather than over a file someone may be reading.
+
+If you rebuild the show, the old renders do not become slightly wrong — they
+become a different film. Split them immediately.
+
+### Checking the show still matches its audio
+
+Voice takes get re-rendered. Before trusting a build, compare every wav on disk
+against `show.json`:
+
+- each line's duration against its `audio_seconds` — drift beyond one frame
+  (33.3 ms at 30 fps) means the motion no longer sits under the words;
+- each line's `f_count / fps` against the wav — the motion must still *cover*
+  the audio, since a line's frame count is the max over both robots and the
+  audio, and a longer wav would run past the animation.
+
+At the time of writing, a re-render for bit-reproducibility left all 34 lines at
+**0.0 ms** drift, so the build stayed valid without touching it.
 
 `data/video/` is gitignored. Nothing here is committed.

@@ -131,15 +131,39 @@ one"), *CSV*, *Autonomous OS*, *Stewart*, *hertz*, *daemon*, *kinematics*.
 
 ## Reproducibility
 
-`--device cpu` is the default and is **bit-reproducible**: two independent full
-runs produced 34/34 byte-identical WAVs, and the shipped files are byte-identical
-to both. Kokoro's decoder does not sample, the seed is pinned, and the voice
-style vectors are fixed files.
+**Durations are stable; bytes are not guaranteed identical.** This is the
+distinction that matters, because the film's timeline is built from the
+durations.
+
+On the default `--device cpu`, every re-run produces WAVs with **identical
+sample counts** — so every `seconds` value, and any timeline built from them, is
+reproducible exactly. The samples themselves can differ by a few LSB: measured
+across a full re-run, the worst per-sample difference was **4/32768, about
+-78 dBFS**, far below the 16-bit noise floor and inaudible. Two back-to-back
+runs were byte-identical; a later run on the same machine under different load
+was not, which points at CPU LSTM reductions varying with thread scheduling
+(torch used 24 threads here). Pin `OMP_NUM_THREADS=1` if you need the bytes to
+match as well as the durations.
 
 `--device cuda` is roughly twice as fast (36 s against 84 s for the whole
-script) but its LSTM kernels are not bit-identical between runs — an earlier GPU
-pass and its repeat differed on 12 of 34 files, and total speech length moved by
-1.5 s. It is therefore opt-in, and the shipped audio is the CPU render.
+script) but is not duration-stable: an earlier GPU pass and its repeat differed
+on 12 of 34 files and moved total speech length by 1.5 s. That is the difference
+that would desync an edit, so CUDA is opt-in and the shipped audio is the CPU
+render.
+
+### The film's timeline was built from an earlier render
+
+The cut that ships — `show.json`, `narration.wav` and the rendered camera takes
+— was built from an **earlier pass** of these voices, not from the files
+currently on disk. Regenerating with the command above produces takes whose
+durations differ from that pass by tens of milliseconds (total speech length
+202.6 s then against 204.1 s now, the bulk of it one line in §6 whose wording was
+corrected for accuracy after the first render).
+
+So: **the files here are the reproducible set, not the set the film was cut
+against.** Re-running `show_build.py` against them would desync the rendered
+footage. If the film is ever rebuilt, rebuild it end to end from these files
+rather than mixing the two.
 
 Other flags: `--engine {kokoro,sapi}` (`sapi` is a no-download Windows
 System.Speech fallback, markedly more robotic — for when you want timings without

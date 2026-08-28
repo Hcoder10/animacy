@@ -13,11 +13,13 @@ the edit.
 
     python scripts/video/tts_render.py --script docs/video/script.md --out data/video/voice
 
-Reproducible: Kokoro's decoder does not sample, the seed is pinned and the voice
-style vectors are fixed files, so on the default ``--device cpu`` a re-run
-reproduces every WAV byte-for-byte (verified: two full runs, 34/34 identical).
-``--device cuda`` is ~2x faster but its LSTM kernels are not bit-identical
-between runs, so it is opt-in.
+Reproducible where it counts: on the default ``--device cpu`` a re-run gives
+WAVs with identical sample counts, so every duration -- and any timeline built
+from them -- comes back the same. Samples themselves can move by a few LSB
+(measured worst case 4/32768, about -78 dBFS, inaudible); set OMP_NUM_THREADS=1
+if you need byte-identical output too. ``--device cuda`` is ~2x faster but is
+not duration-stable (a repeat pass moved total length by 1.5 s), so it is
+opt-in.
 
 ``index`` in the manifest is 0-based, matching ``scripts/video/show_build.py``.
 The ``NN_`` filename prefix is 1-based and is only there to sort the takes in

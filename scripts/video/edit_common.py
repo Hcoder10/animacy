@@ -596,9 +596,16 @@ def load_podcast(log: list[str], sec_t0: dict[int, float], show_seconds: float
                   (sorted((PODCAST_DIR / cam).glob("*.mp4"))
                    if (PODCAST_DIR / cam).exists() else [])]
     candidates += sorted(PODCAST_DIR.glob("*.mp4"))
-    # A full-timeline clip that matches the current show.json wins over one
-    # that does not, whatever it is called and whatever order the glob returns.
-    candidates.sort(key=lambda p: (not (is_full(p) and on_this_timeline(p)),))
+    # Order the candidates before claiming slots, because the first clip to
+    # claim a (camera, section) keeps it. A full-timeline clip that matches the
+    # current show.json comes first; then the highest _vN, since a re-render is
+    # a correction of the one before it.
+    def version(p: Path) -> int:
+        m = re.search(r"_v(\d+)$", p.stem)
+        return int(m.group(1)) if m else 0
+
+    candidates.sort(key=lambda p: (not (is_full(p) and on_this_timeline(p)),
+                                   -version(p), p.name))
     for p in candidates:
         cam = _cam_from_path(p)
         if cam not in CAMERAS:
@@ -704,14 +711,17 @@ BROLL_NEGATIVE: dict[str, list[str]] = {
     "robot_md": ["check", "validating", "validate"],
     "check_pass": ["scroll", "schema"],
     "vendor_nod": ["leanin", "gaze", "csv"],
-    "viewer_ab": ["vendornod", "handmade", "csv"],
+    "viewer_ab": ["vendornod", "handmade", "csv", "heroloop"],
     "hardware": ["evidence", "table", "page"],
     "readback": ["desk"],
     # section 5 is "what we are doing right now" - replaying the section 2
     # capture footage under it reads as a repeat. Better to stay on the hosts.
     "waveform": ["capture", "tracker", "preview", "landmark"],
-    "mapping": ["ab", "vendornod", "csv", "leanin"],
-    "vendor_nod": ["mapping", "gains"],
+    # s4_ab_lamp_hero_loop is a header asset, cut to loop for the README, not a
+    # shot for the film - it must not win an in-film slot from the clip that was
+    # made for one
+    "mapping": ["ab", "vendornod", "csv", "leanin", "heroloop"],
+    "vendor_nod": ["mapping", "gains", "heroloop"],
     "dataset": ["datareport", "speakers", "kept"],
     "data_report": ["huggingface", "hugging", "harveststatus"],
     "harvest": ["huggingface", "hugging", "datareport", "speakers"],
@@ -721,14 +731,39 @@ BROLL_NEGATIVE: dict[str, list[str]] = {
 
 
 _black_cache: dict[str, list[tuple[float, float]]] = {}
+_BLACK_DISK = EDIT_DATA / "black_spans.json"
+
+
+def _black_disk_load() -> dict:
+    try:
+        return json.loads(_BLACK_DISK.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def black_spans(path: Path | str) -> list[tuple[float, float]]:
     """Where a clip is black. Reels of judged clips have black between them,
-    and cutting to one of those gaps looks like the film dropped out."""
+    and cutting to one of those gaps looks like the film dropped out.
+
+    Scanning every b-roll clip on every build is slow enough to be annoying,
+    so results are cached on disk against the file's size and mtime.
+    """
     key = str(path)
     if key in _black_cache:
         return _black_cache[key]
+
+    p = Path(path)
+    stamp = ""
+    disk = _black_disk_load()
+    if p.exists():
+        st = p.stat()
+        stamp = f"{st.st_size}:{int(st.st_mtime)}"
+        hit = disk.get(key)
+        if isinstance(hit, dict) and hit.get("stamp") == stamp:
+            spans = [tuple(s) for s in hit.get("spans", [])]
+            _black_cache[key] = spans
+            return spans
+
     spans: list[tuple[float, float]] = []
     if FFMPEG and Path(path).exists():
         p = run([FFMPEG, "-hide_banner", "-nostdin", "-i", key, "-vf",
@@ -743,6 +778,13 @@ def black_spans(path: Path | str) -> list[tuple[float, float]]:
                 except Exception:
                     pass
     _black_cache[key] = spans
+    if stamp:
+        try:
+            EDIT_DATA.mkdir(parents=True, exist_ok=True)
+            disk[key] = {"stamp": stamp, "spans": [list(s) for s in spans]}
+            _BLACK_DISK.write_text(json.dumps(disk, indent=1), encoding="utf-8")
+        except Exception:
+            pass
     return spans
 
 
